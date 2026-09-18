@@ -258,3 +258,23 @@ Previews: `docs/hud_core_preview.png`, `docs/hud_tracker_preview.png`,
 `docs/result_card_preview.png`. All three are produced by renderers that parse
 the geometry constants straight out of the `.mq4` and assert zero overlaps
 (`docs/render_hud_preview.py`, `docs/render_tracker_preview.py`).
+
+### v2.01a — corner-ring bug (found from live MT4 screenshots)
+
+Live screenshots showed an 'O' bubble at every panel corner, which made the
+header look overlapped. Root cause: `RoundRect()` built its rounded corners from
+`CCanvas::Circle()`, which draws a **full ring**, not a quarter arc. Fixes:
+
+- Added `ArcQuarter()` (midpoint circle restricted to one quadrant) and switched
+  `RoundRect()` to it. 108 stray border pixels per panel -> 0.
+- Header relaid out right-to-left; the PRO badge is now placed from the
+  **measured** wordmark width (`CCanvas::TextWidth`) instead of a hardcoded
+  offset, so it cannot land on the wordmark under different font metrics. The
+  collapse button and state pill no longer collide.
+- BIAS pill on the FILTERS page resized/recentred.
+
+**Why the preview missed it:** the renderer drew panels with PIL's
+`rounded_rectangle` — correct corners — so it could not reproduce a bug in the
+EA's own corner algorithm. `docs/sfcanvas.py` now re-implements the EA's actual
+primitives (`FillCircle`, `Circle`, `ArcQuarter`, `Line`, `RoundRect`) pixel for
+pixel, and every renderer asserts zero wrong-quadrant corner pixels.

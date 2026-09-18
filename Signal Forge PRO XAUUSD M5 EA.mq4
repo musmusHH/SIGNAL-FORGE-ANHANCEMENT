@@ -1542,6 +1542,25 @@ string HitButton(int x, int y)
    return "";
   }
 
+// Midpoint-circle arc restricted to ONE quadrant. CCanvas::Circle() draws a
+// full ring, so using it for rounded corners left a visible "O" bubble at
+// every corner of every panel. Quadrants: 0=TL 1=TR 2=BL 3=BR.
+void ArcQuarter(int cx, int cy, int r, int quad, uint clr)
+  {
+   if(r <= 0) return;
+   int x = r, y = 0, err = 1 - r;
+   while(x >= y)
+     {
+      if(quad == 0)      { gHud.PixelSet(cx - x, cy - y, clr); gHud.PixelSet(cx - y, cy - x, clr); }
+      else if(quad == 1) { gHud.PixelSet(cx + x, cy - y, clr); gHud.PixelSet(cx + y, cy - x, clr); }
+      else if(quad == 2) { gHud.PixelSet(cx - x, cy + y, clr); gHud.PixelSet(cx - y, cy + x, clr); }
+      else               { gHud.PixelSet(cx + x, cy + y, clr); gHud.PixelSet(cx + y, cy + x, clr); }
+      y++;
+      if(err < 0) err += 2 * y + 1;
+      else { x--; err += 2 * (y - x) + 1; }
+     }
+  }
+
 void RoundRect(int x, int y, int w, int h, int r, uint fill, uint border, bool drawBorder = true)
   {
    if(w <= 0 || h <= 0) return;
@@ -1564,13 +1583,14 @@ void RoundRect(int x, int y, int w, int h, int r, uint fill, uint border, bool d
       gHud.Line(x + w - 1, y + r, x + w - 1, y + h - r, border);
       if(r > 0)
         {
-         gHud.Circle(x + r,         y + r,         r, border);
-         gHud.Circle(x + w - r - 1, y + r,         r, border);
-         gHud.Circle(x + r,         y + h - r - 1, r, border);
-         gHud.Circle(x + w - r - 1, y + h - r - 1, r, border);
+         ArcQuarter(x + r,         y + r,         r, 0, border);
+         ArcQuarter(x + w - r - 1, y + r,         r, 1, border);
+         ArcQuarter(x + r,         y + h - r - 1, r, 2, border);
+         ArcQuarter(x + w - r - 1, y + h - r - 1, r, 3, border);
         }
      }
   }
+
 
 // ---- RAISED 3D SURFACE -------------------------------------------------
 // Draws a solid plate with a light top/left edge and a dark bottom/right
@@ -1823,30 +1843,47 @@ void PaintHud()
    gHud.Line(SC(10), headerH,     W - SC(10), headerH,     TDark);
 
    //================= header =================
+   // Header is laid out RIGHT-TO-LEFT from the window edge, and the PRO badge
+   // is positioned from the MEASURED width of the wordmark (CCanvas::TextWidth)
+   // rather than a hardcoded offset - hardcoding it made the badge land on top
+   // of the wordmark whenever the installed font metrics differed from mine.
    int hx = SC(14), hy = SC(10);
-   // logo mark
    gHud.FillCircle(hx + SC(10), hy + SC(14), SC(11), TAccent2);
    gHud.FillCircle(hx + SC(10), hy + SC(14), SC(7),  TBg);
    gHud.FillCircle(hx + SC(10), hy + SC(14), SC(3),  TAccent);
-   Text(hx + SC(28), hy, "SIGNAL FORGE", TText, 11, "Segoe UI Black", SF_FW_BLACK);
-   // "PRO" rides in its own accent badge so it can never collide with the
-   // wordmark, whatever the installed font metrics happen to be.
-   int badgeX = hx + SC(168), badgeW = SC(34), badgeH = SC(15);
-   RoundRect(badgeX, hy + SC(2), badgeW, badgeH, SC(3), TAccent, TAccent);
-   TextCenter(badgeX + badgeW / 2, hy + SC(3), "PRO", A(C'6,10,18',255), 7, "Segoe UI Black", SF_FW_BLACK);
-   Text(hx + SC(28), hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  EXNESS RAW  ·  v2.01", TTextDim, 7);
 
-   // state pill
+   int txtX = hx + SC(28);
+   string mark = "SIGNAL FORGE";
+   gHud.FontSet("Segoe UI Black", SC(11) * -10, SF_FW_BLACK);
+   int markW = gHud.TextWidth(mark);
+   Text(txtX, hy, mark, TText, 11, "Segoe UI Black", SF_FW_BLACK);
+
+   // right cluster: [collapse] [state pill], both anchored to the right edge
    string st = StateText();
-   int pillW = SC(96);
-   RaisedPlate(W - pillW - SC(14), hy + SC(2), pillW, SC(24), SC(11), TPanelHi, StateColor(), true, 1);
-   StatusDot(W - pillW - SC(14) + SC(13), hy + SC(14), SC(4), !gPaused && !gHalted, StateColor(), TGridC);
-   TextCenter(W - pillW / 2 - SC(8), hy + SC(7), st, StateColor(), 7, "Segoe UI Semibold", SF_FW_SEMI);
+   int pillW = SC(92), pillH = SC(22);
+   int pillX = W - pillW - SC(12);
+   int colW  = SC(24);
+   int colX  = pillX - colW - SC(7);
 
-   // collapse toggle
-   DrawButton(W - pillW - SC(46), hy + SC(2), SC(26), SC(24), "BTN_COLLAPSE",
-              gHudCollapsed ? "+" : "–", false, TAccent);
+   int badgeW = SC(32), badgeH = SC(14);
+   int badgeX = txtX + markW + SC(7);
+   if(badgeX + badgeW < colX - SC(6))
+     {
+      RoundRect(badgeX, hy + SC(2), badgeW, badgeH, SC(3), TAccent, TAccent);
+      TextCenter(badgeX + badgeW / 2, hy + SC(2), "PRO", A(C'6,10,18',255), 7,
+                 "Segoe UI Black", SF_FW_BLACK);
+     }
+
+   Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
+        "  ·  RAW  ·  v2.01", TTextDim, 7);
+
+   RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
+   StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused && !gHalted, StateColor(), TGridC);
+   TextCenter(pillX + SC(13) + (pillW - SC(13)) / 2, hy + SC(6), st, StateColor(), 7,
+              "Segoe UI Semibold", SF_FW_SEMI);
+
+   DrawButton(colX, hy + SC(3), colW, pillH, "BTN_COLLAPSE",
+              gHudCollapsed ? "+" : "-", false, TAccent);
 
    if(gHudCollapsed) { gHud.Update(); return; }
 
@@ -2039,9 +2076,10 @@ void PaintHud()
          string bias = gBull[i] ? "BULL" : (gBear[i] ? "BEAR" : "FLAT");
          uint   bc   = gBull[i] ? TBull : (gBear[i] ? TBear : TFlat);
          if(!gEnabled[i]) bc = TTextDim;
-         RoundRect(pad + SC(148), y + SC(3), SC(46), SC(15), SC(4),
+         RoundRect(pad + SC(148), y + SC(3), SC(48), SC(16), SC(3),
                    gEnabled[i] ? TPanelHi : TBg2, bc);
-         TextCenter(pad + SC(171), y + SC(5), bias, bc, 7, "Segoe UI Semibold", SF_FW_SEMI);
+         TextCenter(pad + SC(148) + SC(24), y + SC(4), bias, bc, 7,
+                    "Segoe UI Semibold", SF_FW_SEMI);
 
          Text(pad + SC(234), y + SC(5), Fmt(gWeight[i], 1), gEnabled[i] ? TText : TTextDim, 7);
 

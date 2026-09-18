@@ -1,6 +1,8 @@
 # Renders PAGE 2 (Performance Tracker) using geometry parsed from the .mq4,
 # and asserts no text/element overlaps.
-import re,os
+import re,os,sys
+sys.path.insert(0,os.path.dirname(os.path.abspath(__file__)))
+from sfcanvas import Canvas, RoundRect as SFRoundRect
 from PIL import Image,ImageDraw,ImageFont
 src=open("Signal Forge PRO XAUUSD M5 EA.mq4",encoding='utf-8').read()
 def g(pat,d):
@@ -23,29 +25,34 @@ def F(sz,b=0):
     p=DJ%("-Bold" if b else "")
     return ImageFont.truetype(p,sz) if os.path.exists(p) else ImageFont.load_default()
 W=430;headerH=54;H=H_
-img=Image.new("RGB",(W+40,H+40),(8,11,20));d=ImageDraw.Draw(img);OX,OY=20,20
-def RR(x,y,w,h,r,f,b=None):d.rounded_rectangle([OX+x,OY+y,OX+x+w-1,OY+y+h-1],radius=r,fill=f,outline=b)
+cv=Canvas(W+40,H+40,(8,11,20));OX,OY=20,20
+PANELS=[]
+def RR(x,y,w,h,r,f,b=None):
+    SFRoundRect(cv,OX+x,OY+y,w,h,r,f,b if b else f,b is not None)
+    if b is not None and r>=3: PANELS.append((OX+x,OY+y,w,h,r))
+def _line(a,b_,c_,d_,col): cv.Line(a,b_,c_,d_,col)
 def Raised(x,y,w,h,r,f,e,sh=True,dep=2):
     if sh:
         for k in range(dep+1,0,-1):
             RR(x+k,y+k,w,h,r,(0,0,0))
     RR(x,y,w,h,r,f,e)
-    d.line([OX+x+r,OY+y+1,OX+x+w-r-1,OY+y+1],fill=TLite)
-    d.line([OX+x+1,OY+y+r,OX+x+1,OY+y+h-r-1],fill=TLite)
-    d.line([OX+x+r,OY+y+h-2,OX+x+w-r-1,OY+y+h-2],fill=TDark)
-    d.line([OX+x+w-2,OY+y+r,OX+x+w-2,OY+y+h-r-1],fill=TDark)
+    cv.Line(OX+x+r,OY+y+1,OX+x+w-r-1,OY+y+1,TLite)
+    cv.Line(OX+x+1,OY+y+r,OX+x+1,OY+y+h-r-1,TLite)
+    cv.Line(OX+x+r,OY+y+h-2,OX+x+w-r-1,OY+y+h-2,TDark)
+    cv.Line(OX+x+w-2,OY+y+r,OX+x+w-2,OY+y+h-r-1,TDark)
 def Sunk(x,y,w,h,r,f):
     RR(x,y,w,h,r,f,TDark)
-    d.line([OX+x+r,OY+y+h-2,OX+x+w-r-1,OY+y+h-2],fill=TLite)
-def Spine(x,y,h,c):d.rectangle([OX+x,OY+y,OX+x+2,OY+y+h],fill=c)
+    cv.Line(OX+x+r,OY+y+h-2,OX+x+w-r-1,OY+y+h-2,TLite)
+def Spine(x,y,h,c):cv.FillRectangle(OX+x,OY+y,OX+x+2,OY+y+h,c)
 sp=[]
 def T(x,y,s,c,sz=8,b=0,a="la",tag=None):
     d.text((OX+x,OY+y),s,fill=c,font=F(int(sz*1.45),b),anchor=a)
     if tag:sp.append((tag,d.textbbox((OX+x,OY+y),s,font=F(int(sz*1.45)),anchor=a)))
 def TR(x,y,s,c,sz=8,b=0,tag=None):T(x,y,s,c,sz,b,"ra",tag)
+d=ImageDraw.Draw(cv.img)
 Raised(0,0,W,H,12,TBg,TBorder,False,0)
-d.rectangle([OX+3,OY+3,OX+W-4,OY+headerH-3],fill=TPanelHi)
-d.line([OX+10,OY+headerH-1,OX+W-10,OY+headerH-1],fill=TAccent)
+cv.FillRectangle(OX+3,OY+3,OX+W-4,OY+headerH-3,TPanelHi)
+cv.Line(OX+10,OY+headerH-1,OX+W-10,OY+headerH-1,TAccent)
 T(42,10,"SIGNAL FORGE",TText,11,1);RR(182,12,34,15,3,TAccent,TAccent);T(199,13,"PRO",(6,10,18),7,1,"ma")
 T(42,28,"XAUUSD  ·  M5  ·  EXNESS RAW",TTextDim,7)
 y=headerH+6;pad=12;innerW=W-pad*2;tabW=(innerW-16)//3
@@ -115,7 +122,8 @@ if sparkH>=54:
     px0,py0=None,None
     for i,v in enumerate(pts):
         X=pad+12+int(i/(len(pts)-1)*(innerW-24));Y=y+25+int((1-v/5.4)*(sparkH-37))
-        if px0 is not None:d.line([OX+px0,OY+py0,OX+X,OY+Y],fill=TBull,width=2)
+        if px0 is not None:
+            cv.Line(OX+px0,OY+py0,OX+X,OY+Y,TBull);cv.Line(OX+px0,OY+py0+1,OX+X,OY+Y+1,TBull)
         px0,py0=X,Y
     y+=sparkH+6
 Raised(pad,H-34,innerW,26,5,TPanel,TFlat,True,1);T(pad+innerW//2,H-34+5,"PAUSE TRADING",TText,8,1,"ma")
@@ -124,4 +132,18 @@ bad=[(sp[i][0],sp[j][0]) for i in range(len(sp)) for j in range(i+1,len(sp)) if 
 print("overlaps:",bad if bad else "NONE")
 print(f"used {H-34+26}/{H}")
 assert not bad,"OVERLAP"
-img.save("docs/hud_tracker_preview.png");print("saved")
+# corner-ring regression: no wrong-quadrant border pixels inside a panel
+bub=0
+for (px,py,pw,ph,pr) in PANELS:
+    for (cx,cy,sx,sy) in [(px+pr,py+pr,-1,-1),(px+pw-pr-1,py+pr,1,-1),
+                          (px+pr,py+ph-pr-1,-1,1),(px+pw-pr-1,py+ph-pr-1,1,1)]:
+        for yy in range(cy-pr-1,cy+pr+2):
+            for xx in range(cx-pr-1,cx+pr+2):
+                if not(0<=xx<cv.w and 0<=yy<cv.h):continue
+                dx,dy=xx-cx,yy-cy
+                if abs(dx*dx+dy*dy-pr*pr)>pr:continue
+                if not(px<xx<px+pw-1 and py<yy<py+ph-1):continue
+                if((dx*sx<0)or(dy*sy<0)) and cv.px[xx,yy]==TBorder: bub+=1
+print("wrong-quadrant corner pixels:",bub)
+assert bub==0,"corner bubbles"
+cv.save("docs/hud_tracker_preview.png");print("saved")
