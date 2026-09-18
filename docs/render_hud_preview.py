@@ -6,7 +6,7 @@ src=open("Signal Forge PRO XAUUSD M5 EA.mq4",encoding='utf-8').read()
 def grab(pat,default):
     m=re.search(pat,src)
     return int(m.group(1)) if m else default
-Hc   = grab(r'int H = gHudCollapsed \? headerH \+ SC\(8\) : SC\((\d+)\);',640)
+Hc   = grab(r'int pageH = SC\((\d+)\);\s*// CORE',652)
 gaugeH=grab(r'int gaugeH = SC\((\d+)\);',112)
 costH =grab(r'int costH = SC\((\d+)\);',88)
 riskH =grab(r'int riskH = SC\((\d+)\);',96)
@@ -16,9 +16,10 @@ print(f"from source: H={Hc} gauge={gaugeH} cost={costH} risk={riskH} ticket={tkH
 
 SCALE=100
 def SC(v): return round(v*SCALE/100)
-TBg=(9,13,24);TPanel=(17,24,43);TPanelHi=(25,35,60);TBorder=(52,72,120)
-TAccent=(0,229,255);TAccent2=(150,100,255);TText=(226,236,252);TTextDim=(126,146,182)
-TBull=(0,240,176);TBear=(255,72,104);TFlat=(255,206,84);TGridC=(38,52,86)
+TBg=(12,18,34);TBg2=(20,30,54);TPanel=(28,40,72);TPanelHi=(40,56,98);TBorder=(86,116,190)
+TAccent=(0,245,255);TAccent2=(178,110,255);TText=(240,248,255);TTextDim=(158,180,220)
+TBull=(0,255,170);TBear=(255,60,110);TFlat=(255,215,70);TGridC=(58,80,132)
+TLite=(110,146,225);TDark=(5,8,16);TWarn=(255,160,50)
 DJ="/usr/share/fonts/truetype/dejavu/DejaVuSans%s.ttf"
 def font(sz,b=0):
     p=DJ%("-Bold" if b else "")
@@ -26,6 +27,15 @@ def font(sz,b=0):
 W=SC(430);headerH=SC(54);H=SC(Hc)
 img=Image.new("RGB",(W+40,H+40),(8,11,20));d=ImageDraw.Draw(img);OX,OY=20,20
 def R(x,y,w,h,r,f,b=None): d.rounded_rectangle([OX+x,OY+y,OX+x+w-1,OY+y+h-1],radius=r,fill=f,outline=b)
+def Raised(x,y,w,h,r,f,e,sh=True,dep=2):
+    if sh:
+        for k in range(dep+1,0,-1): R(x+k,y+k,w,h,r,(0,0,0))
+    R(x,y,w,h,r,f,e)
+    d.line([OX+x+r,OY+y+1,OX+x+w-r-1,OY+y+1],fill=TLite)
+    d.line([OX+x+1,OY+y+r,OX+x+1,OY+y+h-r-1],fill=TLite)
+    d.line([OX+x+r,OY+y+h-2,OX+x+w-r-1,OY+y+h-2],fill=TDark)
+    d.line([OX+x+w-2,OY+y+r,OX+x+w-2,OY+y+h-r-1],fill=TDark)
+def Spine(x,y,h,c): d.rectangle([OX+x,OY+y,OX+x+2,OY+y+h],fill=c)
 def T(x,y,s,c,sz=8,b=0,a="la"): d.text((OX+x,OY+y),s,fill=c,font=font(int(sz*1.45),b),anchor=a)
 def TC(x,y,s,c,sz=8,b=0): T(x,y,s,c,sz,b,"ma")
 def TR(x,y,s,c,sz=8,b=0): T(x,y,s,c,sz,b,"ra")
@@ -53,12 +63,12 @@ d.ellipse([OX+W-pillW-SC(14)+SC(9),OY+hy+SC(10),OX+W-pillW-SC(14)+SC(17),OY+hy+S
 TC(W-pillW//2-SC(8),hy+SC(7),"ARMED",TBull,7,1)
 R(W-pillW-SC(46),hy+SC(2),SC(26),SC(24),SC(5),TPanel,TBorder);TC(W-pillW-SC(46)+SC(13),hy+SC(8),"–",TText,8,1)
 y=headerH+SC(6);pad=SC(12);innerW=W-pad*2;tabW=(innerW-SC(16))//3
-for i,(l,a) in enumerate([("CORE",1),("FILTERS",0),("JOURNAL",0)]):
+for i,(l,a) in enumerate([("CORE",1),("FILTERS",0),("TRACKER",0)]):
     bx=pad+(tabW+SC(8))*i;R(bx,y,tabW,SC(24),SC(5),TAccent if a else TPanel,TAccent if a else TBorder)
     TC(bx+tabW//2,y+SC(24)//2-SC(7),l,(6,10,18) if a else TText,8,1)
 y+=SC(32)
-R(pad,y,innerW,SC(gaugeH),SC(10),TPanel,TBorder)
-T(pad+SC(12),y+SC(8),"CONFLUENCE CONVICTION",TTextDim,7,1)
+Raised(pad,y,innerW,SC(gaugeH),SC(10),TPanel,TBorder);Spine(pad+SC(4),y+SC(7),SC(13),TAccent)
+T(pad+SC(13),y+SC(6),"CONFLUENCE CONVICTION",TText,8,1)
 cx=pad+innerW//2;cy=y+SC(gaugeH)-SC(18);radius=SC(58);score=74.0;col=TBull
 for deg in range(180,361):
     rad=math.radians(deg);val=-100+(deg-180)/180*200
@@ -74,8 +84,8 @@ T(cx,cy-SC(19),"LONG",col,8,1,"ma"); track("dir",cx,cy-SC(19),"LONG",8,"ma")
 T(pad+SC(14),cy-SC(6),"-100",TTextDim,7);TR(pad+innerW-SC(14),cy-SC(6),"+100",TTextDim,7)
 T(pad+SC(12),y+SC(22),"ARM ±62",TAccent,7);TR(pad+innerW-SC(12),y+SC(22),"HTF UP",TBull,7,1)
 y+=SC(gaugeH)+SC(8)
-R(pad,y,innerW,SC(costH),SC(10),TPanel,TBorder)
-T(pad+SC(12),y+SC(8),"COST INTELLIGENCE  ·  RAW SPREAD MODEL",TTextDim,7,1)
+Raised(pad,y,innerW,SC(costH),SC(10),TPanel,TBorder);Spine(pad+SC(4),y+SC(7),SC(13),TAccent2)
+T(pad+SC(13),y+SC(6),"COST INTELLIGENCE  ·  RAW SPREAD",TText,8,1)
 c3=innerW//3
 for i,(l,v,c) in enumerate([("SPREAD","24 pts",TText),("COMMISSION","70 pts",TText),("ROUND TURN","94 pts",TBull)]):
     T(pad+SC(12)+c3*i,y+SC(26),l,TTextDim,7);T(pad+SC(12)+c3*i,y+SC(37),v,c,10,1)
@@ -85,14 +95,14 @@ M(pad+SC(12),y+SC(72),innerW-SC(24),SC(8),0.336,TBull,TGridC); spans.append(("co
 y+=SC(costH)+SC(8)
 chipH=SC(40);chipW=(innerW-SC(8))//2
 def chip(x,y,w,h,l,v,vc,ac):
-    R(x,y,w,h,SC(6),TPanel,TBorder);d.rectangle([OX+x+SC(2),OY+y+SC(5),OX+x+SC(4),OY+y+h-SC(5)],fill=ac)
-    T(x+SC(10),y+SC(5),l,TTextDim,7);T(x+SC(10),y+SC(16),v,vc,9,1)
+    Raised(x,y,w,h,SC(6),TPanel,TBorder);Spine(x+SC(3),y+SC(5),h-SC(10),ac)
+    T(x+SC(12),y+SC(5),l,TTextDim,7,1);T(x+SC(12),y+SC(16),v,vc,10,1)
 chip(pad,y,chipW,chipH,"BALANCE","$200.00",TText,TAccent);chip(pad+chipW+SC(8),y,chipW,chipH,"EQUITY","$203.41",TBull,TAccent2)
 y+=chipH+SC(6)
 chip(pad,y,chipW,chipH,"FLOATING P/L","+3.41",TBull,TBull);chip(pad+chipW+SC(8),y,chipW,chipH,"DAY P/L","+1.70%",TBull,TAccent)
 y+=chipH+SC(8)
-R(pad,y,innerW,SC(riskH),SC(10),TPanel,TBorder)
-T(pad+SC(12),y+SC(8),"RISK CONSOLE",TTextDim,7,1)
+Raised(pad,y,innerW,SC(riskH),SC(10),TPanel,TBorder);Spine(pad+SC(4),y+SC(7),SC(13),TFlat)
+T(pad+SC(13),y+SC(6),"RISK CONSOLE",TText,8,1)
 T(pad+SC(12),y+SC(26),"DAILY LOSS BUDGET",TTextDim,7);TR(pad+innerW-SC(12),y+SC(26),"0%",TText,7,1)
 track("r1",pad+SC(12),y+SC(26),"DAILY LOSS BUDGET",7)
 M(pad+SC(12),y+SC(39),innerW-SC(24),SC(7),0.0,TFlat,TGridC);spans.append(("m1",(OX+pad+SC(12),OY+y+SC(39),OX+pad+innerW-SC(12),OY+y+SC(39)+SC(7))))
@@ -103,7 +113,7 @@ T(pad+SC(12),y+SC(82),"TRADES TODAY  2 / 6",TTextDim,7);TR(pad+innerW-SC(12),y+S
 track("r3",pad+SC(12),y+SC(82),"TRADES TODAY  2 / 6",7)
 M(pad+SC(12),y+SC(95),innerW-SC(24),SC(7),2/6,TAccent2,TGridC);spans.append(("m3",(OX+pad+SC(12),OY+y+SC(95),OX+pad+innerW-SC(12),OY+y+SC(95)+SC(7))))
 y+=SC(riskH)+SC(8)
-R(pad,y,innerW,SC(tkH),SC(10),TPanel,TBorder)
+Raised(pad,y,innerW,SC(tkH),SC(10),TPanel,TBorder)
 R(pad+SC(10),y+SC(10),SC(56),SC(20),SC(5),TBull,TBull);TC(pad+SC(38),y+SC(13),"LONG",(6,10,18),8,1)
 T(pad+SC(74),y+SC(12),"0.01 lots @ 3912.450",TText,8,1);TR(pad+innerW-SC(12),y+SC(11),"+3.41",TBull,11,1)
 cc=(innerW-SC(20))//3

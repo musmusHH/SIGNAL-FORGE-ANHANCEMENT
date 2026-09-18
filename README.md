@@ -200,3 +200,61 @@ round turn, otherwise results will be optimistic.
 
 Derived from Signal Forge [LuxAlgo], **CC BY-NC-SA 4.0** — non-commercial, ShareAlike.
 Not financial advice.
+
+## v2.01 — Raised HUD + Performance Tracker
+
+**Solid raised styling.** Every panel is now drawn with `RaisedPlate()`: a drop
+shadow, a light top/left bevel (`TLite`) and a dark bottom/right bevel (`TDark`),
+so the panels physically sit above the chart instead of looking like flat
+rectangles. Progress bars use `SunkenWell()` for an inset track with a raised
+fill, and each section is tagged with a 3px glowing `AccentSpine()`.
+
+**Vivid palette.** All three themes (QUANTUM / CARBON / SOLAR) were rebuilt at
+higher chroma and are now fully opaque (alpha 255, previously 235–238), so
+nothing washes out against a light or dark chart.
+
+**Adaptive height.** Each page owns its natural height — CORE 652px,
+FILTERS 500px, TRACKER 700px — so no page shows dead space at the bottom.
+
+### Performance Tracker (new third tab)
+
+The old JOURNAL tab is now **TRACKER**, with the exact columns requested:
+
+| DATE | LOTS | PROFIT | GAIN% | WIN% | COMM |
+|------|------|--------|-------|------|------|
+
+- One row per trading day for the last `SF_TRACK_DAYS` (6) days, newest first,
+  today's row highlighted and marked `*`.
+- `PROFIT` is **net** — `OrderProfit() + OrderSwap() + OrderCommission()`.
+- `GAIN%` is measured against the balance **at that day's open**, so each row
+  answers "what did this day do to the account it started with" rather than
+  being distorted by later days.
+- `COMM` is the commission actually charged that day, shown negative.
+- A **TOTAL** row aggregates lots, net, gain%, win rate and fees.
+- A **FINAL P/L** plate shows net, gross, total fees and closing balance —
+  colour-coded green/red with a matching deep-tint background.
+- A KPI strip (TRADES / WIN RATE / P-FACTOR / MAX DD) and an equity sparkline
+  sit above and below the table.
+
+### On-chart result cards
+
+`DrawResultPills()` was replaced with solid **raised box cards**
+(`BORDER_RAISED` rectangle labels) — four stacked rows per closed trade:
+
+```
+WIN +2.31 USD            <- headline, net result
+BUY  0.01 lot  +248p     <- side, size, points captured
+GROSS +2.38  FEE -0.07   <- the Raw Spread cost story
+GAIN +1.14%  35m         <- account impact and hold time
+```
+
+Font size, card width and padding are inputs (`ResultCardFontSize` default 9,
+`ResultCardWidth` 172, `ResultCardPadding` 7). Cards re-anchor on every
+`CHARTEVENT_CHART_CHANGE` and are culled once scrolled outside the viewport, so
+they never freeze against the chart edge. `MaxResultPills` dropped 40 → 25
+because each card is now four objects tall.
+
+Previews: `docs/hud_core_preview.png`, `docs/hud_tracker_preview.png`,
+`docs/result_card_preview.png`. All three are produced by renderers that parse
+the geometry constants straight out of the `.mq4` and assert zero overlaps
+(`docs/render_hud_preview.py`, `docs/render_tracker_preview.py`).
