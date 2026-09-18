@@ -283,7 +283,7 @@ input bool   VerboseJournal         = true;     // Detailed journal logging
 #define SF_AL_TOP      0
 #define SF_FW_NORMAL   400
 #define SF_FW_SEMI     600
-#define SF_SF_FW_BLACK    900
+#define SF_FW_BLACK    900
 
 string   PFX = "SFP_";
 string   gFilterName[SF_FILTERS];
@@ -477,6 +477,7 @@ void PushSpreadSample()
    gSpreadIdx = (gSpreadIdx + 1) % 64;
    if(gSpreadCount < 64) gSpreadCount++;
    double tmp[64];
+   ArrayInitialize(tmp, 0.0);
    for(int i = 0; i < gSpreadCount; i++) tmp[i] = gSpreadSamples[i];
    for(int a = 0; a < gSpreadCount - 1; a++)
       for(int b = a + 1; b < gSpreadCount; b++)
