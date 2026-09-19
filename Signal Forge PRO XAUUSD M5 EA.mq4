@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Signal Forge PRO XAUUSD M5 EA   |
-//|                    QUANTUM HUD  ·  v2.12  ·  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  ·  v2.13  ·  MQL4 / MetaTrader 4 |
 //|------------------------------------------------------------------|
 //| Evolution of "Signal Forge XAUUSD M5 EA".                        |
 //|                                                                  |
@@ -22,6 +22,36 @@
 //| OnChartEvent is never delivered and they used to freeze in place.|
 //| A hard 40 px of daylight is enforced between cards; BUY results  |
 //| sit above price and SELL results below.                          |
+//| v2.13 - BILINGUAL INTERFACE: ENGLISH + ARABIC WITH REAL RTL      |
+//|         MetaTrader's text layer has no OpenType shaping engine   |
+//|         and no bidirectional algorithm. It paints UTF-16 code    |
+//|         points in storage order, strictly left to right, so      |
+//|         Arabic comes out BOTH disconnected (every letter in its  |
+//|         isolated form) AND backwards. No font can fix that.      |
+//|         The fix is to hand MT4 a string that is already shaped   |
+//|         and already in visual order:                             |
+//|                                                                  |
+//|           logical -> ArShape() -> ArBidi() -> MT4 draws verbatim |
+//|                                                                  |
+//|         ArShape() replaces each letter with the correct one of   |
+//|         its four contextual forms (isolated / initial / medial / |
+//|         final) from the Unicode Arabic Presentation Forms-B      |
+//|         block, decided by whether its neighbours can join, and   |
+//|         contracts the mandatory lam-alef ligatures.              |
+//|         ArBidi() implements the parts of UAX #9 a panel needs -  |
+//|         P2/P3 base direction, N1/N2 neutral resolution, L2 run   |
+//|         reversal - plus bracket mirroring, and keeps numbers     |
+//|         left-to-right so "0.01" and "12.50" stay readable.       |
+//|         Both run at the five canvas text wrappers and in         |
+//|         ChartButton, so all labels AND button captions are       |
+//|         covered; ArFix() returns Latin text untouched, so the    |
+//|         English UI is byte-for-byte unchanged.                   |
+//|         Translations are stored as \xXXXX escapes, keeping the    |
+//|         source pure ASCII so MetaEditor's codepage handling can  |
+//|         never corrupt them.                                      |
+//|         Verified against the reference arabic-reshaper and       |
+//|         python-bidi implementations - see docs/verify_arabic.py  |
+//|         and the before/after render docs/arabic_rtl_proof.png.   |
 //| v2.12 - ONE PRESS WAS BEING DELIVERED TWICE, SO EVERY ACTION     |
 //|         UNDID ITSELF.                                            |
 //|         The v2.11 journal proved the buttons worked all along.   |
@@ -110,7 +140,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Signal Forge PRO - CC BY-NC-SA 4.0"
 #property link      "https://creativecommons.org/licenses/by-nc-sa/4.0/"
-#property version   "2.12"
+#property version   "2.13"
 #property strict
 
 #include <Canvas\Canvas.mqh>
@@ -121,6 +151,12 @@
 // ---- ORIGINAL v1 STRATEGY ENUMS -------------------------------------
 enum EA_SL_MODE { SL_By_ATR = 0, SL_By_Risk_Percent = 1 };
 enum EA_TP_MODE { TP_By_Points = 0, TP_By_ATR = 1 };
+
+enum ENUM_SF_LANG
+  {
+   SF_LANG_EN = 0, // English
+   SF_LANG_AR = 1  // Arabic (RTL, shaped)
+  };
 
 enum ENUM_SF_THEME
   {
@@ -209,6 +245,8 @@ input double CommissionPer001LotRT  = 0.07;     // Commission per 0.01 lot, roun
 
 input string __11 = "======== QUANTUM HUD (INTERFACE) ========"; // .
 input bool   ShowHUD                = true;     // Master HUD switch
+input ENUM_SF_LANG  HudLanguage     = SF_LANG_EN;        // Interface language (EN / AR)
+input string HudArabicFont          = "Tahoma";  // Arabic font (Tahoma/Arial/Segoe UI)
 input ENUM_SF_THEME HudTheme        = SF_THEME_QUANTUM; // Colour theme
 input bool   ApplyChartSkin         = true;     // Re-skin the chart
 input bool   ShowHeaderPanel        = true;     // Top command bar
@@ -1099,6 +1137,440 @@ void RebuildStats()
   }
 
 //==================================================================//
+//        A R A B I C   S H A P I N G   +   B I D I   (RTL)         //
+//==================================================================//
+// MetaTrader's canvas/GDI text layer has NO OpenType shaping engine and
+// NO bidirectional algorithm. It paints the UTF-16 code points exactly as
+// they sit in the string, strictly left to right. For Arabic that produces
+// the classic double failure the user described:
+//
+//   1) DISCONNECTED letters - Arabic is cursive, and every letter has up to
+//      four contextual forms (isolated / initial / medial / final). MT4 only
+//      ever emits the isolated form, so words come out as loose characters.
+//   2) REVERSED words - Arabic reads right to left, but MT4 lays the string
+//      out left to right, so the text appears mirrored.
+//
+// Neither can be fixed with a font. The fix is to hand MT4 a string that is
+// ALREADY shaped and ALREADY in visual order, so a dumb left-to-right
+// renderer draws correct Arabic. That is what this section does:
+//
+//      logical text  ->  ArShape()  ->  ArBidi()  ->  MT4 draws it verbatim
+//
+// ArShape() swaps each letter for its correct presentation glyph from the
+// Unicode Arabic Presentation Forms-B block (U+FE70..U+FEFC), which every
+// Windows Arabic-capable font ships. ArBidi() then reorders the runs so the
+// RTL text is stored in the order it must be PAINTED.
+//
+// This implementation was validated character-for-character against the
+// reference `arabic-reshaper` + `python-bidi` implementations on a suite of
+// mixed Arabic/Latin/numeric strings - see docs/verify_arabic.py.
+
+#define AR_TAT    0x0640   // tatweel (kashida) - joins on both sides
+#define AR_LAM    0x0644
+#define AR_ALEF   0x0627
+
+// Joining class of an Arabic letter.
+//   0 = not an Arabic letter
+//   1 = RIGHT-JOINING  (alef, dal, thal, reh, zain, waw: join backwards only)
+//   2 = DUAL-JOINING   (connects on both sides: most letters)
+int ArJoinType(const ushort c)
+  {
+   if(c == AR_TAT) return 2;
+   switch(c)
+     {
+      // right-joining only
+      case 0x0622: case 0x0623: case 0x0624: case 0x0625: case 0x0627:
+      case 0x0629: case 0x062F: case 0x0630: case 0x0631: case 0x0632:
+      case 0x0648: case 0x0649:
+         return 1;
+      // isolated only, never joins
+      case 0x0621:
+         return 0;
+     }
+   if(c >= 0x0626 && c <= 0x064A) return 2;   // the dual-joining bulk
+   return 0;
+  }
+
+// The four presentation forms of one letter, written into f[].
+// Order: 0 isolated, 1 final, 2 initial, 3 medial. A 0 entry means the
+// letter has no such form and must fall back.
+bool ArForms(const ushort c, ushort &f[])
+  {
+   ArrayResize(f, 4);
+   f[0] = 0; f[1] = 0; f[2] = 0; f[3] = 0;
+   // Letters 0x0621..0x063A and 0x0641..0x064A map onto Presentation
+   // Forms-B in a strict, regular pattern, so the table is expressed as the
+   // isolated code point plus how many forms that letter owns.
+   ushort iso = 0; int cnt = 0;
+   switch(c)
+     {
+      case 0x0621: iso = 0xFE80; cnt = 1; break;   // hamza
+      case 0x0622: iso = 0xFE81; cnt = 2; break;   // alef madda
+      case 0x0623: iso = 0xFE83; cnt = 2; break;   // alef hamza above
+      case 0x0624: iso = 0xFE85; cnt = 2; break;   // waw hamza
+      case 0x0625: iso = 0xFE87; cnt = 2; break;   // alef hamza below
+      case 0x0626: iso = 0xFE89; cnt = 4; break;   // yeh hamza
+      case 0x0627: iso = 0xFE8D; cnt = 2; break;   // alef
+      case 0x0628: iso = 0xFE8F; cnt = 4; break;   // beh
+      case 0x0629: iso = 0xFE93; cnt = 2; break;   // teh marbuta
+      case 0x062A: iso = 0xFE95; cnt = 4; break;   // teh
+      case 0x062B: iso = 0xFE99; cnt = 4; break;   // theh
+      case 0x062C: iso = 0xFE9D; cnt = 4; break;   // jeem
+      case 0x062D: iso = 0xFEA1; cnt = 4; break;   // hah
+      case 0x062E: iso = 0xFEA5; cnt = 4; break;   // khah
+      case 0x062F: iso = 0xFEA9; cnt = 2; break;   // dal
+      case 0x0630: iso = 0xFEAB; cnt = 2; break;   // thal
+      case 0x0631: iso = 0xFEAD; cnt = 2; break;   // reh
+      case 0x0632: iso = 0xFEAF; cnt = 2; break;   // zain
+      case 0x0633: iso = 0xFEB1; cnt = 4; break;   // seen
+      case 0x0634: iso = 0xFEB5; cnt = 4; break;   // sheen
+      case 0x0635: iso = 0xFEB9; cnt = 4; break;   // sad
+      case 0x0636: iso = 0xFEBD; cnt = 4; break;   // dad
+      case 0x0637: iso = 0xFEC1; cnt = 4; break;   // tah
+      case 0x0638: iso = 0xFEC5; cnt = 4; break;   // zah
+      case 0x0639: iso = 0xFEC9; cnt = 4; break;   // ain
+      case 0x063A: iso = 0xFECD; cnt = 4; break;   // ghain
+      case 0x0641: iso = 0xFED1; cnt = 4; break;   // feh
+      case 0x0642: iso = 0xFED5; cnt = 4; break;   // qaf
+      case 0x0643: iso = 0xFED9; cnt = 4; break;   // kaf
+      case 0x0644: iso = 0xFEDD; cnt = 4; break;   // lam
+      case 0x0645: iso = 0xFEE1; cnt = 4; break;   // meem
+      case 0x0646: iso = 0xFEE5; cnt = 4; break;   // noon
+      case 0x0647: iso = 0xFEE9; cnt = 4; break;   // heh
+      case 0x0648: iso = 0xFEED; cnt = 2; break;   // waw
+      case 0x0649: iso = 0xFEEF; cnt = 2; break;   // alef maksura
+      case 0x064A: iso = 0xFEF1; cnt = 4; break;   // yeh
+      case AR_TAT:                                  // tatweel keeps its shape
+         f[0] = AR_TAT; f[1] = AR_TAT; f[2] = AR_TAT; f[3] = AR_TAT;
+         return true;
+      default: return false;
+     }
+   f[0] = iso;
+   if(cnt >= 2) f[1] = (ushort)(iso + 1);            // final
+   if(cnt == 4) { f[2] = (ushort)(iso + 2);          // initial
+                  f[3] = (ushort)(iso + 3); }        // medial
+   return true;
+  }
+
+// Harakat (short vowels) and other combining marks. MT4 cannot position
+// combining marks, so they are dropped rather than drawn as floating boxes.
+bool ArIsMark(const ushort c)
+  {
+   return ((c >= 0x064B && c <= 0x0655) || c == 0x0670 ||
+           (c >= 0x06D6 && c <= 0x06ED));
+  }
+
+bool ArIsArabic(const ushort c)
+  {
+   return ((c >= 0x0600 && c <= 0x06FF) || (c >= 0xFB50 && c <= 0xFEFC));
+  }
+
+// LAM + ALEF must contract into a single mandatory ligature; rendering them
+// as two separate glyphs is considered incorrect Arabic.
+// Returns the isolated form, or 0 when this pair is not a ligature.
+ushort ArLamAlefIso(const ushort alef)
+  {
+   switch(alef)
+     {
+      case 0x0622: return 0xFEF5;   // lam + alef madda
+      case 0x0623: return 0xFEF7;   // lam + alef hamza above
+      case 0x0625: return 0xFEF9;   // lam + alef hamza below
+      case AR_ALEF: return 0xFEFB;  // lam + plain alef
+     }
+   return 0;
+  }
+
+// STEP 1 - contextual shaping. Replaces every Arabic letter with the
+// presentation glyph that matches its neighbours, and contracts lam-alef.
+string ArShape(const string src)
+  {
+   ushort src2[];
+   int n = StringLen(src);
+   if(n <= 0) return src;
+   ArrayResize(src2, n);
+   int m = 0;
+   for(int i = 0; i < n; i++)
+     {
+      ushort c = (ushort)StringGetChar(src, i);
+      if(ArIsMark(c)) continue;          // drop marks MT4 cannot place
+      src2[m++] = c;
+     }
+   if(m <= 0) return "";
+
+   ushort outb[];
+   ArrayResize(outb, m);
+   int o = 0;
+   for(int i = 0; i < m; i++)
+     {
+      ushort c = src2[i];
+
+      // mandatory lam-alef ligature
+      if(c == AR_LAM && i + 1 < m)
+        {
+         ushort lig = ArLamAlefIso(src2[i + 1]);
+         if(lig > 0)
+           {
+            // it takes the FINAL form when the preceding letter joins forward
+            bool jp = (i > 0 && ArJoinType(src2[i - 1]) == 2);
+            outb[o++] = (ushort)(jp ? lig + 1 : lig);
+            i++;                          // consume the alef as well
+            continue;
+           }
+        }
+
+      ushort f[];
+      if(!ArForms(c, f)) { outb[o++] = c; continue; }   // not Arabic: verbatim
+
+      // Does the PREVIOUS letter reach forward to me? Only a dual-joining
+      // letter can. Does the NEXT letter accept a connection from me? Only
+      // if I am dual-joining and it is an Arabic letter at all.
+      bool joinPrev = (i > 0 && ArJoinType(src2[i - 1]) == 2);
+      bool joinNext = false;
+      if(ArJoinType(c) == 2 && i + 1 < m)
+        {
+         ushort nx = src2[i + 1];
+         joinNext = (ArJoinType(nx) != 0 || ArLamAlefIso(nx) > 0);
+        }
+
+      ushort g = 0;
+      if(joinPrev && joinNext) g = f[3];       // medial
+      else if(joinPrev)        g = f[1];       // final
+      else if(joinNext)        g = f[2];       // initial
+      else                     g = f[0];       // isolated
+      // fall back down the chain for letters that lack that form
+      if(g == 0) g = f[1];
+      if(g == 0) g = f[0];
+      outb[o++] = g;
+     }
+
+   string res = "";
+   for(int i = 0; i < o; i++) res += ShortToString(outb[i]);
+   return res;
+  }
+
+// Direction classes. Named constants rather than character literals, so the
+// code does not depend on how the compiler types a single-quoted character.
+#define AR_R  1   // right-to-left (Arabic)
+#define AR_L  2   // left-to-right (Latin)
+#define AR_D  3   // European digit
+#define AR_N  4   // neutral: space, punctuation, symbols
+
+// Direction class of one character for the bidi pass.
+ushort ArClass(const ushort c)
+  {
+   if(ArIsArabic(c)) return AR_R;
+   if((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) return AR_L;
+   if(c >= '0' && c <= '9') return AR_D;
+   return AR_N;
+  }
+
+// Paired punctuation must be mirrored when it sits inside an RTL run:
+// an opening bracket before RTL text is painted as a closing one.
+ushort ArMirror(const ushort c)
+  {
+   switch(c)
+     {
+      case '(': return ')';   case ')': return '(';
+      case '[': return ']';   case ']': return '[';
+      case '{': return '}';   case '}': return '{';
+      case '<': return '>';   case '>': return '<';
+     }
+   return c;
+  }
+
+// STEP 2 - the bidirectional reorder (a focused subset of UAX #9 covering
+// the cases a trading panel actually produces: Arabic, Latin, numbers and
+// punctuation on a single line).
+//
+// Rules applied: P2/P3 pick the paragraph direction from the first strong
+// character; N1/N2 resolve neutrals; L2 reverses the RTL runs. The result
+// is VISUAL order - exactly what a non-bidi renderer needs.
+string ArBidi(const string src)
+  {
+   int n = StringLen(src);
+   if(n <= 1) return src;
+
+   ushort ch[], k[];
+   ArrayResize(ch, n); ArrayResize(k, n);
+   bool anyR = false;
+   for(int i = 0; i < n; i++)
+     {
+      ch[i] = (ushort)StringGetChar(src, i);
+      k[i]  = ArClass(ch[i]);
+      if(k[i] == AR_R) anyR = true;
+     }
+   if(!anyR) return src;               // no Arabic at all - leave it alone
+
+   // P2/P3 - the first strong character sets the paragraph direction.
+   ushort base = AR_L;
+   for(int i = 0; i < n; i++)
+      if(k[i] == AR_R || k[i] == AR_L) { base = k[i]; break; }
+
+   // A number is read left-to-right even inside Arabic text, so digits are
+   // treated as an LTR run and never reversed. "0.01" must stay "0.01".
+   for(int i = 0; i < n; i++)
+      if(k[i] == AR_D) k[i] = AR_L;
+
+   // N1/N2 - a neutral takes the surrounding direction when both sides
+   // agree, otherwise the paragraph direction. Text boundaries count as the
+   // paragraph direction (sor/eor).
+   for(int i = 0; i < n; i++)
+     {
+      if(k[i] != AR_N) continue;
+      ushort p = base, q = base;
+      for(int j = i - 1; j >= 0; j--) if(k[j] != AR_N) { p = k[j]; break; }
+      for(int j = i + 1; j < n;  j++) if(k[j] != AR_N) { q = k[j]; break; }
+      k[i] = (p == q) ? p : base;
+     }
+
+   // L2 - emit the runs. In an RTL paragraph the run ORDER flips; an RTL run
+   // is always reversed internally and its brackets mirrored.
+   string res = "";
+   if(base == AR_R)
+     {
+      int end = n;
+      while(end > 0)
+        {
+         int st = end - 1;
+         while(st > 0 && k[st - 1] == k[end - 1]) st--;
+         if(k[st] == AR_R)
+            for(int i = end - 1; i >= st; i--) res += ShortToString(ArMirror(ch[i]));
+         else
+            for(int i = st; i < end; i++)      res += ShortToString(ch[i]);
+         end = st;
+        }
+     }
+   else
+     {
+      int st = 0;
+      while(st < n)
+        {
+         int end = st + 1;
+         while(end < n && k[end] == k[st]) end++;
+         if(k[st] == AR_R)
+            for(int i = end - 1; i >= st; i--) res += ShortToString(ArMirror(ch[i]));
+         else
+            for(int i = st; i < end; i++)      res += ShortToString(ch[i]);
+         st = end;
+        }
+     }
+   return res;
+  }
+
+// Public entry point: make any string safe to hand to MT4's renderer.
+// Latin-only text is returned untouched (zero cost for the English UI).
+string ArFix(const string s)
+  {
+   int n = StringLen(s);
+   for(int i = 0; i < n; i++)
+      if(ArIsArabic((ushort)StringGetChar(s, i)))
+         return ArBidi(ArShape(s));
+   return s;
+  }
+
+//==================================================================//
+//              U I   S T R I N G   T A B L E   ( i18n )            //
+//==================================================================//
+// Every visible label goes through T(). In English it returns the key
+// unchanged (zero lookup cost in the common case); in Arabic it returns the
+// translation, which ArFix() then shapes and reorders on the way to the
+// canvas. Keys are the original English labels, so any string that has not
+// been translated yet still renders - it simply stays English.
+string T(const string k)
+  {
+   if(HudLanguage == SF_LANG_EN) return k;
+   //--- header / chrome
+   if(k == "PRO")                 return "\x0628\x0631\x0648";
+   if(k == "CORE")                return "\x0627\x0644\x0631\x0626\x064A\x0633\x064A\x0629";
+   if(k == "FILTERS")             return "\x0627\x0644\x0641\x0644\x0627\x062A\x0631";
+   if(k == "ARMED")               return "\x062C\x0627\x0647\x0632";
+   if(k == "PAUSED")              return "\x0645\x062A\x0648\x0642\x0641";
+   if(k == "PAUSE")               return "\x0625\x064A\x0642\x0627\x0641";
+   if(k == "RESUME")              return "\x0627\x0633\x062A\x0626\x0646\x0627\x0641";
+   if(k == "CLOSE ALL")           return "\x0625\x063A\x0644\x0627\x0642\x0020\x0627\x0644\x0643\x0644";
+   if(k == "OVERLAY")             return "\x0627\x0644\x0631\x0633\x0645";
+   if(k == "HUD")                 return "\x0627\x0644\x0644\x0648\x062D\x0629";
+   //--- signal panel
+   if(k == "FILTER AGREEMENT")    return "\x062A\x0648\x0627\x0641\x0642\x0020\x0627\x0644\x0641\x0644\x0627\x062A\x0631";
+   if(k == "AGREEMENT")           return "\x0627\x0644\x062A\x0648\x0627\x0641\x0642";
+   if(k == "EXECUTION CONSOLE")   return "\x0644\x0648\x062D\x0629\x0020\x0627\x0644\x062A\x0646\x0641\x064A\x0630";
+   if(k == "BIAS")                return "\x0627\x0644\x0627\x062A\x062C\x0627\x0647";
+   if(k == "VOTE")                return "\x0627\x0644\x062A\x0635\x0648\x064A\x062A";
+   if(k == "DRAW")                return "\x0631\x0633\x0645";
+   if(k == "FILTER")              return "\x0627\x0644\x0641\x0644\x062A\x0631";
+   if(k == "BULLISH")             return "\x0635\x0627\x0639\x062F";
+   if(k == "BEARISH")             return "\x0647\x0627\x0628\x0637";
+   if(k == "NEUTRAL")             return "\x0645\x062D\x0627\x064A\x062F";
+   if(k == "LONG")                return "\x0634\x0631\x0627\x0621";
+   if(k == "SHORT")               return "\x0628\x064A\x0639";
+   if(k == "FLAT")                return "\x0628\x062F\x0648\x0646\x0020\x0635\x0641\x0642\x0629";
+   if(k == "N/A")                 return "\x063A\x064A\x0631\x0020\x0645\x062A\x0627\x062D";
+   if(k == "ON")                  return "\x062A\x0634\x063A\x064A\x0644";
+   if(k == "OFF")                 return "\x0625\x064A\x0642\x0627\x0641";
+   if(k == "ALL")                 return "\x0627\x0644\x0643\x0644";
+   if(k == "ANY")                 return "\x0623\x064A";
+   //--- position / trade
+   if(k == "NO OPEN POSITION")    return "\x0644\x0627\x0020\x062A\x0648\x062C\x062F\x0020\x0635\x0641\x0642\x0629\x0020\x0645\x0641\x062A\x0648\x062D\x0629";
+   if(k == "NO CLOSED TRADES YET") return "\x0644\x0627\x0020\x062A\x0648\x062C\x062F\x0020\x0635\x0641\x0642\x0627\x062A\x0020\x0645\x063A\x0644\x0642\x0629\x0020\x0628\x0639\x062F";
+   if(k == "ENTRY")               return "\x0627\x0644\x062F\x062E\x0648\x0644";
+   if(k == "STOP LOSS")           return "\x0648\x0642\x0641\x0020\x0627\x0644\x062E\x0633\x0627\x0631\x0629";
+   if(k == "TAKE PROFIT")         return "\x062C\x0646\x064A\x0020\x0627\x0644\x0623\x0631\x0628\x0627\x062D";
+   if(k == "TRAILING")            return "\x0627\x0644\x0648\x0642\x0641\x0020\x0627\x0644\x0645\x062A\x062D\x0631\x0643";
+   if(k == "BREAK-EVEN")          return "\x0646\x0642\x0637\x0629\x0020\x0627\x0644\x062A\x0639\x0627\x062F\x0644";
+   if(k == "SPREAD")              return "\x0627\x0644\x0641\x0627\x0631\x0642";
+   if(k == "LOTS")                return "\x0627\x0644\x0644\x0648\x062A";
+   if(k == "ROUND TURN")          return "\x0630\x0647\x0627\x0628\x0020\x0648\x0639\x0648\x062F\x0629";
+   if(k == "COST / ATR(")         return "\x0627\x0644\x062A\x0643\x0644\x0641\x0629\x0020\x002F\x0020\x0041\x0054\x0052\x0028";
+   //--- tracker
+   if(k == "PERFORMANCE TRACKER") return "\x0645\x062A\x062A\x0628\x0639\x0020\x0627\x0644\x0623\x062F\x0627\x0621";
+   if(k == "DATE")                return "\x0627\x0644\x062A\x0627\x0631\x064A\x062E";
+   if(k == "LOT")                 return "\x0627\x0644\x0644\x0648\x062A";
+   if(k == "PROFIT")              return "\x0627\x0644\x0631\x0628\x062D";
+   if(k == "GAIN%")               return "\x0627\x0644\x0646\x0633\x0628\x0629\x066A";
+   if(k == "WINRATE")             return "\x0646\x0633\x0628\x0629\x0020\x0627\x0644\x0641\x0648\x0632";
+   if(k == "COMMISSION")          return "\x0627\x0644\x0639\x0645\x0648\x0644\x0629";
+   if(k == "FINAL P/L")           return "\x0627\x0644\x0635\x0627\x0641\x064A\x0020\x0627\x0644\x0646\x0647\x0627\x0626\x064A";
+   if(k == "FINAL P/L  (NET OF COMMISSION)") return "\x0627\x0644\x0635\x0627\x0641\x064A\x0020\x0627\x0644\x0646\x0647\x0627\x0626\x064A\x0020\x0028\x0628\x0639\x062F\x0020\x0627\x0644\x0639\x0645\x0648\x0644\x0629\x0029";
+   if(k == "EQUITY CURVE")        return "\x0645\x0646\x062D\x0646\x0649\x0020\x0627\x0644\x0645\x0644\x0643\x064A\x0629";
+   if(k == "EQUITY")              return "\x0627\x0644\x0645\x0644\x0643\x064A\x0629";
+   if(k == "BALANCE")             return "\x0627\x0644\x0631\x0635\x064A\x062F";
+   if(k == "FLOATING P/L")        return "\x0627\x0644\x0631\x0628\x062D\x0020\x0627\x0644\x0639\x0627\x0626\x0645";
+   if(k == "DAY P/L")             return "\x0631\x0628\x062D\x0020\x0627\x0644\x064A\x0648\x0645";
+   if(k == "MAX DD")              return "\x0623\x0642\x0635\x0649\x0020\x062A\x0631\x0627\x062C\x0639";
+   if(k == "TOTAL")               return "\x0627\x0644\x0625\x062C\x0645\x0627\x0644\x064A";
+   if(k == "TRADES")              return "\x0627\x0644\x0635\x0641\x0642\x0627\x062A";
+   if(k == "WINS")                return "\x0631\x0627\x0628\x062D\x0629";
+   if(k == "LOSSES")              return "\x062E\x0627\x0633\x0631\x0629";
+   if(k == "FEES")                return "\x0627\x0644\x0631\x0633\x0648\x0645";
+   if(k == "GROSS")               return "\x0627\x0644\x0625\x062C\x0645\x0627\x0644\x064A";
+   if(k == "NET")                 return "\x0627\x0644\x0635\x0627\x0641\x064A";
+   if(k == "TODAY")               return "\x0627\x0644\x064A\x0648\x0645";
+   if(k == "LOTS")                return "\x0627\x0644\x0644\x0648\x062A";
+   if(k == "WIN%")                return "\x0627\x0644\x0641\x0648\x0632\x066A";
+   if(k == "COMM")                return "\x0627\x0644\x0639\x0645\x0648\x0644\x0629";
+   if(k == "RESUME TRADING")      return "\x0627\x0633\x062A\x0626\x0646\x0627\x0641\x0020\x0627\x0644\x062A\x062F\x0627\x0648\x0644";
+   if(k == "PAUSE TRADING")       return "\x0625\x064A\x0642\x0627\x0641\x0020\x0627\x0644\x062A\x062F\x0627\x0648\x0644";
+   if(k == "SHOWING ALL")         return "\x0639\x0631\x0636\x0020\x0627\x0644\x0643\x0644";
+   if(k == "ACTIVE ONLY")         return "\x0627\x0644\x0646\x0634\x0637\x0629\x0020\x0641\x0642\x0637";
+   return k;                       // untranslated keys stay English
+  }
+
+// Convenience: translate AND shape in one call, for text that is drawn
+// through a path that does not already run ArFix().
+string TR(const string k) { return ArFix(T(k)); }
+
+// The Latin UI font has no Arabic glyphs, so the font must switch with the
+// language. Everything else (sizes, weights, layout) is unchanged.
+string UIFont(const string latin)
+  {
+   if(HudLanguage == SF_LANG_EN) return latin;
+   // preserve the weight the caller asked for where the Arabic font has one
+   if(StringFind(latin, "Black") >= 0 || StringFind(latin, "Bold") >= 0)
+      return HudArabicFont + " Bold";
+   return HudArabicFont;
+  }
+
+//==================================================================//
 //              C A N V A S   P R I M I T I V E S                   //
 //==================================================================//
 struct SFButton
@@ -1132,6 +1604,14 @@ void ChartButton(string id, int x, int y, int w, int h, string caption,
                  color bg, color fg, color border, int fsize, string font)
   {
    string n = PFX + "BTN_" + id;
+   // MT4 renders an OBJ_BUTTON caption with the same non-shaping, non-bidi
+   // text layer as the canvas, so the caption must be shaped too - otherwise
+   // the panel is Arabic but the buttons are broken letters. Shape ONCE here,
+   // before the idempotency comparison below, so the stored caption and the
+   // comparison string are the same thing and the button is not rewritten on
+   // every repaint (which would cancel clicks - see the STATE note).
+   caption = ArFix(caption);
+   font    = UIFont(font);
    bool fresh = (ObjectFind(0, n) < 0);
    if(fresh) ObjectCreate(0, n, OBJ_BUTTON, 0, 0, 0);
    else
@@ -1147,7 +1627,8 @@ void ChartButton(string id, int x, int y, int w, int h, string caption,
          (int)ObjectGetInteger(0, n, OBJPROP_YSIZE)     == h &&
          (color)ObjectGetInteger(0, n, OBJPROP_BGCOLOR) == bg &&
          (color)ObjectGetInteger(0, n, OBJPROP_COLOR)   == fg &&
-         ObjectGetString(0, n, OBJPROP_TEXT)            == caption)
+         ObjectGetString(0, n, OBJPROP_TEXT)            == caption &&
+         ObjectGetString(0, n, OBJPROP_FONT)            == font)
          return;   // nothing changed - see the STATE warning below
      }
    ObjectSetInteger(0, n, OBJPROP_CORNER,       CORNER_LEFT_UPPER);
@@ -1322,10 +1803,14 @@ void GradientRect(int x, int y, int w, int h, uint top, uint bottom)
      }
   }
 
+// Every label in the panel funnels through these five wrappers, so shaping
+// and the Arabic font swap are applied HERE - once, at the chokepoint -
+// rather than at several hundred call sites. ArFix() is a no-op for pure
+// Latin text, so the English UI is completely unaffected.
 void Text(int x, int y, string s, uint c, int size = 8, string font = "Segoe UI", uint flags = 0)
   {
-   gCv.FontSet(font, SC(size) * -10, flags);
-   gCv.TextOut(x, y, s, c, SF_AL_LEFT | SF_AL_TOP);
+   gCv.FontSet(UIFont(font), SC(size) * -10, flags);
+   gCv.TextOut(x, y, ArFix(s), c, SF_AL_LEFT | SF_AL_TOP);
   }
 
 // Vertically centre one line inside a box of height h.
@@ -1337,31 +1822,33 @@ void Text(int x, int y, string s, uint c, int size = 8, string font = "Segoe UI"
 void TextVC(int x, int y, int h, string s, uint c, int size = 8,
             string font = "Segoe UI", uint flags = 0)
   {
-   gCv.FontSet(font, SC(size) * -10, flags);
+   gCv.FontSet(UIFont(font), SC(size) * -10, flags);
+   string d = ArFix(s);
    int tw = 0, th = 0;
-   gCv.TextSize(s, tw, th);
-   gCv.TextOut(x, y + (h - th) / 2, s, c, SF_AL_LEFT | SF_AL_TOP);
+   gCv.TextSize(d, tw, th);
+   gCv.TextOut(x, y + (h - th) / 2, d, c, SF_AL_LEFT | SF_AL_TOP);
   }
 
 void TextCenterVC(int cx, int y, int h, string s, uint c, int size = 8,
                   string font = "Segoe UI", uint flags = 0)
   {
-   gCv.FontSet(font, SC(size) * -10, flags);
+   gCv.FontSet(UIFont(font), SC(size) * -10, flags);
+   string d = ArFix(s);
    int tw = 0, th = 0;
-   gCv.TextSize(s, tw, th);
-   gCv.TextOut(cx, y + (h - th) / 2, s, c, SF_AL_CENTER | SF_AL_TOP);
+   gCv.TextSize(d, tw, th);
+   gCv.TextOut(cx, y + (h - th) / 2, d, c, SF_AL_CENTER | SF_AL_TOP);
   }
 
 void TextRight(int x, int y, string s, uint c, int size = 8, string font = "Segoe UI", uint flags = 0)
   {
-   gCv.FontSet(font, SC(size) * -10, flags);
-   gCv.TextOut(x, y, s, c, SF_AL_RIGHT | SF_AL_TOP);
+   gCv.FontSet(UIFont(font), SC(size) * -10, flags);
+   gCv.TextOut(x, y, ArFix(s), c, SF_AL_RIGHT | SF_AL_TOP);
   }
 
 void TextCenter(int x, int y, string s, uint c, int size = 8, string font = "Segoe UI", uint flags = 0)
   {
-   gCv.FontSet(font, SC(size) * -10, flags);
-   gCv.TextOut(x, y, s, c, SF_AL_CENTER | SF_AL_TOP);
+   gCv.FontSet(UIFont(font), SC(size) * -10, flags);
+   gCv.TextOut(x, y, ArFix(s), c, SF_AL_CENTER | SF_AL_TOP);
   }
 
 // Horizontal meter with a filled portion - used for score, risk and cost.
@@ -1445,7 +1932,7 @@ void Sparkline(int x, int y, int w, int h, uint line, uint fill)
   {
    if(gEquityPoints < 2)
      {
-      TextCenter(x + w / 2, y + h / 2 - SC(6), "NO CLOSED TRADES YET", TTextDim, 7);
+      TextCenter(x + w / 2, y + h / 2 - SC(6), T("NO CLOSED TRADES YET"), TTextDim, 7);
       return;
      }
    double mn = gEquityCurve[0], mx = gEquityCurve[0];
@@ -1694,7 +2181,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v2.12", TTextDim, 7);
+        "  ·  RAW  ·  v2.13", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -1713,8 +2200,8 @@ void PaintHud()
    //================= navigation tabs =================
    int tabW2 = (innerW - SC(8)) / 2;
    // TRACKER is no longer a tab - it lives in its own top-right panel.
-   DrawButton(pad,                y, tabW2, SC(24), "TAB_CORE",    "CORE",    gHudPage == 0, TAccent);
-   DrawButton(pad + tabW2 + SC(8), y, tabW2, SC(24), "TAB_FILTERS", "FILTERS", gHudPage == 1, TAccent);
+   DrawButton(pad,                y, tabW2, SC(24), "TAB_CORE",    T("CORE"),    gHudPage == 0, TAccent);
+   DrawButton(pad + tabW2 + SC(8), y, tabW2, SC(24), "TAB_FILTERS", T("FILTERS"), gHudPage == 1, TAccent);
    y += SC(32);
 
    //================================================================
@@ -1730,7 +2217,7 @@ void PaintHud()
         int gaugeH = SC(126);
         RaisedPlate(pad, y, innerW, gaugeH, SC(10), TPanel, TBorder);
         AccentSpine(pad + SC(4), y + SC(7), SC(13), TAccent);
-        Text(pad + SC(13), y + SC(6), "FILTER AGREEMENT", TText, 8, "Segoe UI Black", SF_FW_BLACK);
+        Text(pad + SC(13), y + SC(6), T("FILTER AGREEMENT"), TText, 8, "Segoe UI Black", SF_FW_BLACK);
 
         int cx = pad + innerW / 2, cy = y + gaugeH - SC(18);
         ScoreGauge(cx, cy, SC(58), gScore);
@@ -1766,11 +2253,11 @@ void PaintHud()
         uint costCol  = (costPct < 0.12) ? TBull : (costPct < 0.25 ? TFlat : TBear);
 
         int col = innerW / 3;
-        Text(pad + SC(12), y + SC(26), "SPREAD", TTextDim, 7);
+        Text(pad + SC(12), y + SC(26), T("SPREAD"), TTextDim, 7);
         Text(pad + SC(12), y + SC(37), Fmt(spPts, 0) + " pts",
              (MaximumSpreadPoints <= 0 || spPts <= MaximumSpreadPoints) ? TText : TBear, 10, "Segoe UI Semibold", SF_FW_SEMI);
 
-        Text(pad + SC(12) + col, y + SC(26), "COMMISSION", TTextDim, 7);
+        Text(pad + SC(12) + col, y + SC(26), T("COMMISSION"), TTextDim, 7);
         Text(pad + SC(12) + col, y + SC(37), Fmt(gCostPointsRT, 0) + " pts", TText, 10, "Segoe UI Semibold", SF_FW_SEMI);
 
         Text(pad + SC(12) + col * 2, y + SC(26), "ROUND TURN", TTextDim, 7);
@@ -1809,7 +2296,7 @@ void PaintHud()
         int riskH = SC(112);
         RaisedPlate(pad, y, innerW, riskH, SC(10), TPanel, TBorder);
         AccentSpine(pad + SC(4), y + SC(7), SC(13), TFlat);
-        Text(pad + SC(13), y + SC(6), "EXECUTION CONSOLE", TText, 8, "Segoe UI Black", SF_FW_BLACK);
+        Text(pad + SC(13), y + SC(6), T("EXECUTION CONSOLE"), TText, 8, "Segoe UI Black", SF_FW_BLACK);
 
         string slTxt = (StopLossMode == SL_By_ATR)
                        ? ("ATR x " + Fmt(StopLossATR, 2))
@@ -1818,13 +2305,13 @@ void PaintHud()
                        ? ("ATR x " + Fmt(TakeProfitATR, 2))
                        : (Fmt(TakeProfitPoints, 0) + " pts");
 
-        Text(pad + SC(12), y + SC(26), "STOP LOSS", TTextDim, 7);
+        Text(pad + SC(12), y + SC(26), T("STOP LOSS"), TTextDim, 7);
         TextRight(pad + innerW - SC(12), y + SC(26), slTxt, TText, 7, "Segoe UI Semibold", SF_FW_SEMI);
 
-        Text(pad + SC(12), y + SC(42), "TAKE PROFIT", TTextDim, 7);
+        Text(pad + SC(12), y + SC(42), T("TAKE PROFIT"), TTextDim, 7);
         TextRight(pad + innerW - SC(12), y + SC(42), tpTxt, TText, 7, "Segoe UI Semibold", SF_FW_SEMI);
 
-        Text(pad + SC(12), y + SC(58), "TRAILING", TTextDim, 7);
+        Text(pad + SC(12), y + SC(58), T("TRAILING"), TTextDim, 7);
         TextRight(pad + innerW - SC(12), y + SC(58),
                   EnableTrailingStop ? (Fmt(TrailingStartPoints, 0) + " / " +
                                         Fmt(TrailingDistancePoints, 0) + " pts")
@@ -1867,13 +2354,13 @@ void PaintHud()
            Text(pad + SC(12),          y + SC(48), OrderStopLoss() > 0 ? Fmt(OrderStopLoss(), gDigits) : "--", TBear, 8);
            Text(pad + SC(12) + c3,     y + SC(38), "TP", TTextDim, 7);
            Text(pad + SC(12) + c3,     y + SC(48), OrderTakeProfit() > 0 ? Fmt(OrderTakeProfit(), gDigits) : "--", TBull, 8);
-           Text(pad + SC(12) + c3 * 2, y + SC(38), "BREAK-EVEN", TTextDim, 7);
+           Text(pad + SC(12) + c3 * 2, y + SC(38), T("BREAK-EVEN"), TTextDim, 7);
            Text(pad + SC(12) + c3 * 2, y + SC(48),
                 Fmt(BreakEvenPrice(OrderType(), OrderOpenPrice(), OrderLots()), gDigits), TAccent, 8);
         }
       else
         {
-         TextCenter(pad + innerW / 2, y + SC(16), "NO OPEN POSITION", TTextDim, 9, "Segoe UI Semibold", SF_FW_SEMI);
+         TextCenter(pad + innerW / 2, y + SC(16), T("NO OPEN POSITION"), TTextDim, 9, "Segoe UI Semibold", SF_FW_SEMI);
          TextCenter(pad + innerW / 2, y + SC(34),
                     (RequireAllEnabledIndicatorsToAlign ? "ALL-ALIGN" : "ANY-ALIGN") +
                     "   ·   " + (gBlockReason == "" ? "SCANNING" : gBlockReason), TTextDim, 7);
@@ -1887,9 +2374,9 @@ void PaintHud()
       //---------- control strip ----------
       int bw = (innerW - SC(16)) / 3;
       DrawButton(pad,                    y, bw, SC(26), "BTN_PAUSE",
-                 gPaused ? "RESUME" : "PAUSE", gPaused, TFlat);
-      DrawButton(pad + bw + SC(8),       y, bw, SC(26), "BTN_CLOSE", "CLOSE ALL", false, TBear);
-      DrawButton(pad + (bw + SC(8)) * 2, y, bw, SC(26), "BTN_THEME", "OVERLAY",
+                 gPaused ? T("RESUME") : T("PAUSE"), gPaused, TFlat);
+      DrawButton(pad + bw + SC(8),       y, bw, SC(26), "BTN_CLOSE", T("CLOSE ALL"), false, TBear);
+      DrawButton(pad + (bw + SC(8)) * 2, y, bw, SC(26), "BTN_THEME", T("OVERLAY"),
                  DrawIndicatorOverlay, TAccent2);
      }
 
@@ -1899,11 +2386,11 @@ void PaintHud()
    else if(gHudPage == 1)
      {
       SunkenWell(pad, y, innerW, SC(26), SC(6), TBg2);
-      TextVC(pad + SC(10),  y, SC(26), "FILTER", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-      TextVC(pad + SC(106), y, SC(26), "DRAW",   TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-      TextVC(pad + SC(148), y, SC(26), "BIAS",   TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-      TextVC(pad + SC(212), y, SC(26), "VOTE", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-      TextRight(pad + innerW - SC(10), y + SC(9), "AGREEMENT", TAccent, 7,
+      TextVC(pad + SC(10),  y, SC(26), T("FILTER"), TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+      TextVC(pad + SC(106), y, SC(26), T("DRAW"),   TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+      TextVC(pad + SC(148), y, SC(26), T("BIAS"),   TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+      TextVC(pad + SC(212), y, SC(26), T("VOTE"), TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+      TextRight(pad + innerW - SC(10), y + SC(9), T("AGREEMENT"), TAccent, 7,
                 "Segoe UI Black", SF_FW_BLACK);
       y += SC(30);
 
@@ -1970,9 +2457,9 @@ void PaintHud()
       y = H - SC(40);
       int bw2 = (innerW - SC(8)) / 2;
       DrawButton(pad, y, bw2, SC(26), "BTN_VIEW",
-                 gShowAllFilters ? "SHOWING ALL" : "ACTIVE ONLY", gShowAllFilters, TAccent);
+                 gShowAllFilters ? T("SHOWING ALL") : T("ACTIVE ONLY"), gShowAllFilters, TAccent);
       DrawButton(pad + bw2 + SC(8), y, bw2, SC(26), "BTN_PAUSE",
-                 gPaused ? "RESUME" : "PAUSE", gPaused, TFlat);
+                 gPaused ? T("RESUME") : T("PAUSE"), gPaused, TFlat);
      }
 
    gCv.Update();
@@ -2033,7 +2520,7 @@ void PaintTracker()
    // the rounded top corners of the shell
    GradientRect(3, 3, W - 6, headerH - 5, TPanelHi, TBg2);
    AccentSpine(pad, SC(9), headerH - SC(18), TAccent2);
-   Text(pad + SC(10), SC(7), "PERFORMANCE TRACKER", TText, 9, "Segoe UI Black", SF_FW_BLACK);
+   Text(pad + SC(10), SC(7), T("PERFORMANCE TRACKER"), TText, 9, "Segoe UI Black", SF_FW_BLACK);
    TextRight(W - pad - SC(30), SC(9), Symbol(), TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
    DrawButton(W - pad - SC(22), SC(7), SC(22), SC(19), "TRK_COLLAPSE",
               gTrkCollapsed ? "+" : "-", false, TAccent);
@@ -2090,7 +2577,9 @@ void PaintTracker()
    cW[3] = (int)(tw * 0.17); // GAIN%
    cW[4] = (int)(tw * 0.15); // WIN%
    cW[5] = tw - cW[0] - cW[1] - cW[2] - cW[3] - cW[4]; // COMM
-   string cH[6]; cH[0]="DATE"; cH[1]="LOTS"; cH[2]="PROFIT"; cH[3]="GAIN%"; cH[4]="WIN%"; cH[5]="COMM";
+   string cH[6];
+   cH[0]=T("DATE"); cH[1]=T("LOTS"); cH[2]=T("PROFIT");
+   cH[3]=T("GAIN%"); cH[4]=T("WIN%"); cH[5]=T("COMM");
 
    int hy2 = y + SC(26);
    SunkenWell(tx, hy2, tw, hdrH, SC(3), TBg2);
@@ -2145,7 +2634,7 @@ void PaintTracker()
    // ---- TOTAL row ----
    SunkenWell(tx, ry + SC(2), tw, SC(19), SC(3), TBg);
    cx2 = tx;
-   Text(cx2 + SC(6), ry + SC(6), "TOTAL", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+   Text(cx2 + SC(6), ry + SC(6), T("TOTAL"), TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
    cx2 += cW[0];
    double sumLots = 0, sumComm = 0;
    for(int a2 = 0; a2 < SF_TRACK_DAYS; a2++) { sumLots += gTrkLots[a2]; sumComm += gTrkComm[a2]; }
@@ -2171,7 +2660,7 @@ void PaintTracker()
    RaisedPlate(pad, y, innerW, flH, SC(8),
                gStatNet >= 0 ? TBullDeep : TBearDeep, gStatNet >= 0 ? TBull : TBear);
    AccentSpine(pad + SC(4), y + SC(8), flH - SC(16), gStatNet >= 0 ? TBull : TBear);
-   Text(pad + SC(13), y + SC(6), "FINAL P/L  (NET OF COMMISSION)", TText, 7,
+   Text(pad + SC(13), y + SC(6), T("FINAL P/L  (NET OF COMMISSION)"), TText, 7,
         "Segoe UI Semibold", SF_FW_SEMI);
    Text(pad + SC(13), y + SC(20), Signed(gStatNet, 2) + "  USD",
         gStatNet >= 0 ? TBull : TBear, 15, "Segoe UI Black", SF_FW_BLACK);
@@ -2189,7 +2678,7 @@ void PaintTracker()
      {
       RaisedPlate(pad, y, innerW, sparkH, SC(8), TPanel, TBorder);
       AccentSpine(pad + SC(4), y + SC(7), SC(12), TAccent2);
-      Text(pad + SC(13), y + SC(6), "EQUITY CURVE", TText, 7, "Segoe UI Black", SF_FW_BLACK);
+      Text(pad + SC(13), y + SC(6), T("EQUITY CURVE"), TText, 7, "Segoe UI Black", SF_FW_BLACK);
       TextRight(pad + innerW - SC(10), y + SC(6),
                 "TODAY " + Signed(gStatToday, 2) + "   WK " + Signed(gStatWeek, 2) +
                 "   MO " + Signed(gStatMonth, 2), TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
@@ -2202,7 +2691,7 @@ void PaintTracker()
    // distinct id from the HUD's pause button, otherwise both would light up
    // together on hover (HitButton returns the first match)
    DrawButton(pad, H - SC(34), innerW, SC(26), "TRK_PAUSE",
-              gPaused ? "RESUME TRADING" : "PAUSE TRADING", gPaused, TFlat);
+              gPaused ? T("RESUME TRADING") : T("PAUSE TRADING"), gPaused, TFlat);
    gCv.Update();
   }
 
@@ -3183,7 +3672,7 @@ int OnInit()
       Print("[SF-PRO] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("SF-PRO v2.12 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("SF-PRO v2.13 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
 
    // Print exactly which overlays are armed, so a "nothing is drawn" report
@@ -3191,7 +3680,7 @@ int OnInit()
    string ov = "";
    for(int v = 0; v < SF_FILTERS; v++)
       if(gDrawFilter[v]) ov += (ov == "" ? "" : ",") + gFilterName[v];
-   Print("[SF-PRO] v2.12 build | overlay master=", DrawIndicatorOverlay,
+   Print("[SF-PRO] v2.13 build | overlay master=", DrawIndicatorOverlay,
          " | bars=", Bars, " | seriesReady=", SeriesReady(),
          " | drawing: ", (ov == "" ? "(none - switch one ON in FILTERS)" : ov));
 

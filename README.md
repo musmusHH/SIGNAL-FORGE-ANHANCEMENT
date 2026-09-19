@@ -1,4 +1,4 @@
-# Signal Forge PRO — XAUUSD M5 EA (v2.12)
+# Signal Forge PRO — XAUUSD M5 EA (v2.13)
 
 > **v2.05 — the ORIGINAL v1 trading strategy has been restored.**
 > The trading engine is now exactly the v1 engine. The entire v2 risk layer
@@ -1056,6 +1056,115 @@ Correct: `BTN_COLLAPSE`, `TAB_CORE`, `TAB_FILTERS`, `BTN_PAUSE`, `BTN_CLOSE`,
 `BTN_THEME`, `TRK_COLLAPSE`, `TRK_PAUSE`. The eleven `DRAW_*` toggles and
 `BTN_VIEW` belong to the FILTERS page and are created when that tab is opened —
 visible in the log the moment `TAB_FILTERS` was pressed.
+
+> Still no MQL4 compiler in this environment — static analysis, not a build.
+
+---
+
+## v2.13 — bilingual interface: English + Arabic with real RTL
+
+> منصة MetaTrader لا تدعم اللغة العربية (RTL) في اللوحات الرسومية وتظهر الحروف
+> مقلوبة ومتقطعة.
+
+Correct — and no font fixes it. **MetaTrader's text layer has no OpenType
+shaping engine and no bidirectional algorithm.** It paints UTF-16 code points
+in storage order, strictly left to right, which breaks Arabic in *two*
+independent ways at once:
+
+1. **Disconnected letters.** Arabic is cursive: every letter has up to four
+   contextual forms (isolated / initial / medial / final). MT4 only ever emits
+   the isolated form, so words render as loose, unjoined characters.
+2. **Reversed words.** Arabic reads right-to-left, but MT4 lays the string out
+   left-to-right, so the text comes out mirrored.
+
+The fix is to hand MT4 a string that is **already shaped** and **already in
+visual order**, so a dumb left-to-right renderer draws correct Arabic:
+
+```
+logical text  ->  ArShape()  ->  ArBidi()  ->  MT4 draws it verbatim
+```
+
+![Arabic RTL proof](docs/arabic_rtl_proof.png)
+
+*Left column = what MT4 draws today. Right column = the same strings through
+`ArFix()`. Rendered with PIL, which — exactly like MT4's canvas — has no
+shaping and no bidi, so it reproduces the bug faithfully.*
+
+### `ArShape()` — contextual glyph selection
+
+Each letter is classified by its joining behaviour (dual-joining, right-joining
+like `ا د ذ ر ز و`, or non-joining) and swapped for the correct presentation
+glyph from the Unicode **Arabic Presentation Forms-B** block (U+FE70–U+FEFC),
+which every Arabic-capable Windows font ships:
+
+| neighbours | form | example (beh) |
+|---|---|---|
+| joins before **and** after | medial | `ﺒ` U+FE92 |
+| joins before only | final | `ﺐ` U+FE90 |
+| joins after only | initial | `ﺑ` U+FE91 |
+| neither | isolated | `ﺏ` U+FE8F |
+
+It also contracts the four **mandatory lam-alef ligatures** (`لا` → U+FEFB),
+and drops harakat, which MT4 cannot position and would otherwise scatter as
+floating boxes.
+
+### `ArBidi()` — the reordering pass
+
+A focused implementation of the parts of **UAX #9** a trading panel actually
+needs: **P2/P3** (base direction from the first strong character), **N1/N2**
+(neutral resolution), **L2** (run reversal), plus bracket mirroring. Two
+details that matter in a trading HUD:
+
+* **Numbers stay left-to-right** — `0.01`, `12.50` and `100%` remain readable
+  inside Arabic text instead of being reversed to `10.0`.
+* **Mixed strings resolve per-run** — `BUY فتح صفقة` keeps `BUY` first, while
+  `صفقة BUY` lays out right-to-left, exactly as the standard requires.
+
+### Where it is applied
+
+Both passes run at the **five canvas text wrappers** and inside
+**`ChartButton`**, so panel labels *and* button captions are covered. Two
+deliberate design points:
+
+* `ArFix()` returns pure-Latin text **untouched**, so the English UI is
+  byte-for-byte unchanged and costs nothing.
+* The caption is shaped **before** the idempotency comparison in
+  `ChartButton`, so buttons are not rewritten every repaint — which would
+  resurrect the v2.12 click-cancellation bug.
+
+### Encoding safety
+
+Translations are stored as **`\xXXXX` escapes, not raw Arabic bytes**, so the
+`.mq4` stays pure ASCII. MetaEditor silently re-interprets non-ASCII source
+under the system codepage (a real hazard on Arabic/CP1256 Windows); escapes
+make that impossible. The compiler resolves them to the same Unicode string.
+
+### Usage
+
+| input | meaning |
+|---|---|
+| `HudLanguage` | `English` (default) or `Arabic` |
+| `HudArabicFont` | `Tahoma` (default), `Arial`, `Segoe UI` — any Arabic-capable font |
+
+The 7 required tracker fields are translated: DATE `التاريخ`, LOT `اللوت`,
+PROFIT `الربح`, GAIN% `النسبة٪`, WINRATE `نسبة الفوز`, COMMISSION `العمولة`,
+FINAL P/L `الصافي النهائي`. 69 keys in total; anything untranslated falls back
+to English rather than rendering blank.
+
+### Verification
+
+`docs/verify_arabic.py` parses the shaping table, the ligatures and the
+dictionary **straight out of the `.mq4`**, re-implements the MQL logic, and
+diffs it against the reference `arabic-reshaper` + `python-bidi` libraries:
+
+* 36/36 letters match the reference presentation-forms table
+* 12 mixed Arabic/Latin/numeric strings match **byte-for-byte**
+* all 4 lam-alef ligatures present, 0 raw Arabic bytes in the source
+
+The one intentional deviation is U+0649 (alef maksura): the reference maps its
+initial/medial forms into Presentation Forms-**A** (U+FBE8/9), which many
+Windows fonts lack. The EA uses the font-safe 2-form mapping, which is correct
+for standard Arabic where that letter is always word-final.
 
 > Still no MQL4 compiler in this environment — static analysis, not a build.
 
