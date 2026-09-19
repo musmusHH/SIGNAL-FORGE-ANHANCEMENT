@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Signal Forge PRO XAUUSD M5 EA   |
-//|                    QUANTUM HUD  ·  v2.03  ·  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  ·  v2.04  ·  MQL4 / MetaTrader 4 |
 //|------------------------------------------------------------------|
 //| Evolution of "Signal Forge XAUUSD M5 EA".                        |
 //| Original indicator concept: Signal Forge [LuxAlgo]               |
@@ -16,7 +16,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Signal Forge PRO - CC BY-NC-SA 4.0"
 #property link      "https://creativecommons.org/licenses/by-nc-sa/4.0/"
-#property version   "2.03"
+#property version   "2.04"
 #property strict
 
 #include <Canvas\Canvas.mqh>
@@ -1948,7 +1948,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v2.03", TTextDim, 7);
+        "  ·  RAW  ·  v2.04", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused && !gHalted, StateColor(), TGridC);
@@ -2597,6 +2597,22 @@ void DrawOverlay()
 // Each closed trade gets a multi-line card anchored at its close, built from
 // stacked OBJ_RECTANGLE_LABEL rows (BORDER_RAISED) so it is legible on any
 // chart background - far more informative than the old one-line price tag.
+// Commission actually charged for a trade. Brokers (and the Strategy Tester
+// when no commission is configured in the symbol settings) frequently report
+// OrderCommission() == 0. Falling back to the configured Raw Spread rate keeps
+// the cost story honest instead of printing a flattering "FEE -0.00".
+// `estimated` tells the caller the number was derived, not reported, so the
+// card can mark it with a ~ rather than pass an estimate off as fact.
+double TradeCommissionUSD(double lots, double reported, bool &estimated)
+  {
+   estimated = false;
+   double c = MathAbs(reported);
+   if(c > 0.0) return c;
+   if(lots <= 0.0) return 0.0;
+   estimated = true;
+   return CommissionPer001LotRT * (lots / 0.01);
+  }
+
 // ======================================================================
 //  ON-CHART TRADE CARDS
 //  A card is born the moment a trade OPENS (entry / TP / SL / live P&L),
@@ -2760,11 +2776,10 @@ void DrawLiveTradeCard(int &oX1[], int &oY1[], int &oX2[], int &oY2[], int &occN
    bool   isBuy = (OrderType() == OP_BUY);
    double entry = OrderOpenPrice();
    double cur   = isBuy ? Bid : Ask;
-   double gross = OrderProfit() + OrderSwap();
-   double comm  = MathAbs(OrderCommission());
-   if(comm <= 0) comm = CommissionPer001LotRT * (OrderLots() / 0.01);
-   double net   = gross + OrderCommission();
-   if(OrderCommission() == 0) net = gross - comm;
+   bool   commEst = false;
+   double gross   = OrderProfit() + OrderSwap();
+   double comm    = TradeCommissionUSD(OrderLots(), OrderCommission(), commEst);
+   double net     = commEst ? (gross - comm) : (gross + OrderCommission());
    double pts   = isBuy ? (cur - entry) / gPoint : (entry - cur) / gPoint;
    double bal   = AccountBalance();
    double gainP = (bal > 0) ? net / bal * 100.0 : 0.0;
@@ -2844,14 +2859,20 @@ void DrawClosedTradeCards(int &oX1[], int &oY1[], int &oX2[], int &oY2[], int &o
       datetime ct = OrderCloseTime();
       if(ct <= 0) continue;
 
-      double net   = OrderProfit() + OrderSwap() + OrderCommission();
-      double comm  = MathAbs(OrderCommission());
-      double gross = OrderProfit() + OrderSwap();
-      bool   won   = (net > 0);
+      bool   commEst = false;
+      double gross   = OrderProfit() + OrderSwap();
+      double comm    = TradeCommissionUSD(OrderLots(), OrderCommission(), commEst);
+      // when the fee had to be estimated it is not in OrderProfit() either,
+      // so subtract it to keep net honest
+      double net     = commEst ? (gross - comm) : (gross + OrderCommission());
+      bool   won     = (net > 0);
       bool   isBuy = (OrderType() == OP_BUY);
       double pts   = isBuy ? (OrderClosePrice() - OrderOpenPrice()) / gPoint
                            : (OrderOpenPrice() - OrderClosePrice()) / gPoint;
-      double gainPct = (gTrkStartBal > 0) ? net / gTrkStartBal * 100.0 : 0.0;
+      // gTrkStartBal is only populated by RebuildStats(); fall back to the
+      // live balance so GAIN% is never a silent 0.00%
+      double baseBal = (gTrkStartBal > 0) ? gTrkStartBal : AccountBalance();
+      double gainPct = (baseBal > 0) ? net / baseBal * 100.0 : 0.0;
       int holdMin = (int)((ct - OrderOpenTime()) / 60);
 
       int ax = 0, ay = 0;
@@ -2878,7 +2899,8 @@ void DrawClosedTradeCards(int &oX1[], int &oY1[], int &oX2[], int &oY2[], int &o
               bgBody, txtBd, fs, false);
       CardRow(b + "R2", x, y + headH + rowH, w, rowH,
               "GROSS " + (gross >= 0 ? "+" : "") + DoubleToString(gross, 2) +
-              "  FEE -" + DoubleToString(comm, 2), bgBody, txtBd, fs, false);
+              "  FEE " + (commEst ? "~-" : "-") + DoubleToString(comm, 2),
+              bgBody, txtBd, fs, false);
       CardRow(b + "R3", x, y + headH + rowH * 2, w, rowH,
               "GAIN " + (gainPct >= 0 ? "+" : "") + DoubleToString(gainPct, 2) + "%  " +
               IntegerToString(holdMin) + "m", bgBody, txtBd, fs, false);
@@ -2907,6 +2929,13 @@ void DrawClosedTradeCards(int &oX1[], int &oY1[], int &oX2[], int &oY2[], int &o
 // Rebuilding all ~125 objects at the HUD refresh rate would flicker.
 void DrawResultPills()
   {
+   // Card text depends on tracker-derived stats (gTrkStartBal for GAIN%).
+   // RebuildStats() used to be called only by the TRACKER page, so cards drawn
+   // before that tab was ever opened baked in a 0.00% gain and were then
+   // latched by gKnownResultHistory and never redrawn. It is cheap (it early-
+   // outs unless the history count changed), so drive it from here too.
+   RebuildStats();
+
    int total = OrdersHistoryTotal();
    bool rebuildClosed = (total != gKnownResultHistory) || gCardsDirty;
 
@@ -3027,7 +3056,7 @@ int OnInit()
       Print("[SF-PRO] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("SF-PRO v2.03 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("SF-PRO v2.04 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
    gLastBar = 0;
    return INIT_SUCCEEDED;

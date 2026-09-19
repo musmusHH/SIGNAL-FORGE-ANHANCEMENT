@@ -364,3 +364,32 @@ whose *background* carries the state, with white `Segoe UI Black` text:
 
 `TGreyDeep` was added to all three themes. Labels widened to
 BULLISH/BEARISH/FLAT and the row pitch grew to `SC(27)` to fit.
+
+## v2.04 — GAIN% and FEE always showed 0.00 on the result cards
+
+Two separate bugs with the same symptom.
+
+**GAIN% stuck at 0.00%.** `gainPct` divided by `gTrkStartBal`, which is written
+**only** inside `RebuildStats()` — and the only caller of `RebuildStats()` was
+the TRACKER page render block. If you never opened that tab, `gTrkStartBal`
+stayed `0`, the `> 0` guard forced `gainPct = 0.0`, and because closed cards are
+latched by `gKnownResultHistory` they were never redrawn once that zero was
+baked in. Fixes: `DrawResultPills()` now calls `RebuildStats()` itself (it
+early-outs unless the history count changed, so it is cheap), plus a fallback to
+`AccountBalance()` so the figure is never a silent zero.
+
+**FEE stuck at -0.00.** `MathAbs(OrderCommission())` is genuinely `0` whenever
+the broker has not posted the fee — and in the **Strategy Tester** it is always
+`0` unless commission is configured in the symbol settings, which is exactly
+what the screenshots showed. Added `TradeCommissionUSD()`, which falls back to
+`CommissionPer001LotRT × (lots / 0.01)`.
+
+Because an estimated fee is *not* included in `OrderProfit()` either, net is
+computed as `gross − comm` in that case rather than `gross + OrderCommission()`
+— otherwise the card would show a fee while quietly omitting it from the net.
+Estimated fees are rendered as `FEE ~-0.07`; the tilde marks a derived number so
+an estimate is never passed off as reported fact. The live card uses the same
+helper.
+
+Verified across five cases (broker-reported, tester-zero, tracker-never-opened,
+0.10 lot, and a losing trade where the fee must deepen the loss).
