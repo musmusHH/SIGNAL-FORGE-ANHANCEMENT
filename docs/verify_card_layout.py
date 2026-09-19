@@ -4,7 +4,7 @@ Faithful port of FreeLaneY() + the caller's horizontal panel dodge, used to
 prove the on-chart result-card placement invariants:
 
   1. no two cards that share an x-span come closer than ResultCardSeparationPx
-  2. no card ever overlaps the HUD panel rect
+  2. no card ever overlaps the HUD panel rect OR the tracker panel rect
   3. BUY cards sit above their anchor, SELL cards below (BuyCardsAbove=true)
      -- SOFT: falls back to the other side when the preferred one is blocked
         by the panel or another card. Invariants 1, 2 and 4 are HARD.
@@ -27,9 +27,15 @@ FS  = gi(r'input int\s+ResultCardFontSize\s*=\s*(\d+)', 9)
 NO_LANE = -1000000
 print(f"from source: sep={SEP} gap={GAP} hudMargin={HM} cardW={CW} font={FS}")
 
+TRW = gi(r'input int\s+TrackerWidthPx\s*=\s*(\d+)', 430)
+TRH = gi(r'input int\s+TrackerHeightPx\s*=\s*(\d+)', 660)
+
 CHH, CHW = 800, 1400
 HUDW, HUDH = 430, 656
 HUD = (HM, HM, HM + HUDW, HM + HUDH)
+# standalone tracker: pinned to the TOP-RIGHT corner
+TRK = (CHW - HM - TRW, HM, CHW - HM, HM + TRH)
+print(f"panels: HUD={HUD}  TRACKER={TRK}")
 
 W = max(150, CW + 14)
 rowH = FS + 11; headH = rowH + 3
@@ -41,6 +47,8 @@ def free_lane(cx, cw, ch, anchorY, prefer_above, occ):
     yDn = anchorY + GAP
     hx1, hy1, hx2, hy2 = HUD
     hud_x = (hx2 > hx1) and (cx < hx2 + sep) and (cx + cw > hx1 - sep)
+    tx1, ty1, tx2, ty2 = TRK
+    trk_x = (tx2 > tx1) and (cx < tx2 + sep) and (cx + cw > tx1 - sep)
     cand = [yUp, yDn] if prefer_above else [yDn, yUp]
     for y0 in cand:
         y = y0; up = (y0 == yUp)
@@ -50,6 +58,9 @@ def free_lane(cx, cw, ch, anchorY, prefer_above, occ):
             clash = False
             if hud_x and y < hy2 + sep and y + ch > hy1 - sep:
                 y = hy1 - sep - ch if up else hy2 + sep
+                clash = True
+            elif trk_x and y < ty2 + sep and y + ch > ty1 - sep:
+                y = ty1 - sep - ch if up else ty2 + sep
                 clash = True
             if not clash:
                 for (ox1, oy1, ox2, oy2) in occ:
@@ -65,6 +76,7 @@ def free_lane(cx, cw, ch, anchorY, prefer_above, occ):
     while y2 + ch <= CHH - 4:
         clash = False
         if hud_x and y2 < hy2 + sep and y2 + ch > hy1 - sep: clash = True
+        if trk_x and y2 < ty2 + sep and y2 + ch > ty1 - sep: clash = True
         if not clash:
             for (ox1, oy1, ox2, oy2) in occ:
                 if (cx < ox2 + sep and cx + cw > ox1 - sep and
@@ -82,11 +94,16 @@ def place_closed(ax, ay, is_buy, occ):
     if x + W > CHW - 4: x = ax - W - 12
     if x < 2: x = 2
     hx1, hy1, hx2, hy2 = HUD
-    if hx2 > hx1 and x < hx2 + SEPX and x + W > hx1 - SEPX:
-        altR = hx2 + SEPX
-        altL = hx1 - SEPX - W
+    if hx2 > hx1 and x < hx2 + SEP and x + W > hx1 - SEP:
+        altR = hx2 + SEP
+        altL = hx1 - SEP - W
         if altR + W <= CHW - 4: x = altR
         elif altL >= 2:         x = altL
+    tx1, ty1, tx2, ty2 = TRK
+    if tx2 > tx1 and x < tx2 + SEP and x + W > tx1 - SEP:
+        tAltL = tx1 - SEP - W
+        if tAltL >= 2 and not (hx2 > hx1 and tAltL < hx2 + SEP and tAltL + W > hx1 - SEP):
+            x = tAltL
     for _ in range(8):
         tight = False
         for (ox1, oy1, ox2, oy2) in occ:
@@ -108,8 +125,12 @@ def vgap(a, b):
     if a[0] >= b[2] or b[0] >= a[2]: return None
     return b[1] - a[3] if a[3] <= b[1] else a[1] - b[3]
 
+def _hits(r, p):
+    return not (r[2] <= p[0] or r[0] >= p[2] or r[3] <= p[1] or r[1] >= p[3])
+
 def on_panel(r):
-    return not (r[2] <= HUD[0] or r[0] >= HUD[2] or r[3] <= HUD[1] or r[1] >= HUD[3])
+    """a card may not sit on EITHER panel"""
+    return _hits(r, HUD) or _hits(r, TRK)
 
 fails = 0
 

@@ -1,5 +1,7 @@
-# Renders PAGE 2 (Performance Tracker) using geometry parsed from the .mq4,
-# and asserts no text/element overlaps.
+# Renders the STANDALONE PERFORMANCE TRACKER panel (top-right corner) using
+# geometry parsed from the .mq4, and asserts no text/element overlaps.
+# It is no longer a HUD tab: it has its own header, collapse button and
+# TrackerWidthPx/TrackerHeightPx inputs.
 import re,os,sys
 sys.path.insert(0,os.path.dirname(os.path.abspath(__file__)))
 from sfcanvas import Canvas, RoundRect as SFRoundRect
@@ -7,13 +9,14 @@ from PIL import Image,ImageDraw,ImageFont
 src=open("Signal Forge PRO XAUUSD M5 EA.mq4",encoding='utf-8').read()
 def g(pat,d):
     m=re.search(pat,src); return int(m.group(1)) if m else d
-H_=g(r'if\(gHudPage == 2\) pageH = SC\((\d+)\);',700)
+H_=g(r'input int    TrackerHeightPx\s*=\s*(\d+);',660)
+W_=g(r'input int    TrackerWidthPx\s*=\s*(\d+);',430)
 DAYS=g(r'#define SF_TRACK_DAYS (\d+)',6)
 kpiH=g(r'int kpiH = SC\((\d+)\);',52)
 hdrH=g(r'int hdrH = SC\((\d+)\), rowH',20)
 rowH=g(r'int hdrH = SC\(\d+\), rowH = SC\((\d+)\);',21)
 flH =g(r'int flH = SC\((\d+)\);',46)
-print(f"parsed: H={H_} days={DAYS} kpi={kpiH} hdr={hdrH} row={rowH} final={flH}")
+print(f"parsed: W={W_} H={H_} days={DAYS} kpi={kpiH} hdr={hdrH} row={rowH} final={flH}")
 def SC(v):return v
 TBg=(12,18,34);TBg2=(20,30,54);TPanel=(28,40,72);TPanelHi=(40,56,98)
 TBorder=(86,116,190);TAccent=(0,245,255);TAccent2=(178,110,255)
@@ -24,7 +27,7 @@ DJ="/usr/share/fonts/truetype/dejavu/DejaVuSans%s.ttf"
 def F(sz,b=0):
     p=DJ%("-Bold" if b else "")
     return ImageFont.truetype(p,sz) if os.path.exists(p) else ImageFont.load_default()
-W=430;headerH=54;H=H_
+W=W_;headerH=34;H=H_
 cv=Canvas(W+40,H+40,(8,11,20));OX,OY=20,20
 PANELS=[]
 def RR(x,y,w,h,r,f,b=None):
@@ -50,16 +53,17 @@ def T(x,y,s,c,sz=8,b=0,a="la",tag=None):
     if tag:sp.append((tag,d.textbbox((OX+x,OY+y),s,font=F(int(sz*1.45)),anchor=a)))
 def TR(x,y,s,c,sz=8,b=0,tag=None):T(x,y,s,c,sz,b,"ra",tag)
 d=ImageDraw.Draw(cv.img)
+pad0=10
 Raised(0,0,W,H,12,TBg,TBorder,False,0)
 cv.FillRectangle(OX+3,OY+3,OX+W-4,OY+headerH-3,TPanelHi)
 cv.Line(OX+10,OY+headerH-1,OX+W-10,OY+headerH-1,TAccent)
-T(42,10,"SIGNAL FORGE",TText,11,1);RR(182,12,34,15,3,TAccent,TAccent);T(199,13,"PRO",(6,10,18),7,1,"ma")
-T(42,28,"XAUUSD  ·  M5  ·  EXNESS RAW",TTextDim,7)
-y=headerH+6;pad=12;innerW=W-pad*2;tabW=(innerW-16)//3
-for i,(l,a) in enumerate([("CORE",0),("FILTERS",0),("TRACKER",1)]):
-    bx=pad+(tabW+8)*i;Raised(bx,y,tabW,24,5,TAccent if a else TPanel,TAccent if a else TBorder,True,1)
-    T(bx+tabW//2,y+5,l,(6,10,18) if a else TText,8,1,"ma")
-y+=32
+pad=10;innerW=W-pad*2
+Spine(pad,9,headerH-18,TAccent2)
+T(pad+10,7,"PERFORMANCE TRACKER",TText,9,1,"la","hdr")
+TR(W-pad-30,9,"XAUUSDr",TTextDim,7,1,"sym")
+Raised(W-pad-22,7,22,19,5,TPanel,TAccent,True,1)
+T(W-pad-22+11,7+4,"-",TText,8,1,"ma")
+y=headerH+8
 kw=(innerW-12)//4
 K=[("TRADES","18",TAccent),("WIN RATE","61.1%",TBull),("P/FACTOR","1.84",TBull),("MAX DD","7.3%",TBull)]
 for k,(lb,v,c) in enumerate(K):
@@ -68,7 +72,7 @@ for k,(lb,v,c) in enumerate(K):
 y+=kpiH+8
 tblH=26+hdrH+DAYS*rowH+24
 Raised(pad,y,innerW,tblH,8,TPanel,TBorder);Spine(pad+4,y+7,13,TAccent)
-T(pad+13,y+6,"PERFORMANCE TRACKER",TText,8,1,"la","ttl")
+T(pad+13,y+6,"DAILY BREAKDOWN",TText,8,1,"la","ttl")
 TR(pad+innerW-10,y+7,f"LAST {DAYS} DAYS",TTextDim,7,1,"sub")
 tx=pad+6;tw=innerW-12
 cW=[int(tw*.21),int(tw*.13),int(tw*.20),int(tw*.17),int(tw*.15)]

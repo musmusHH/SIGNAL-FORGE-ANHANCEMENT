@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Signal Forge PRO XAUUSD M5 EA   |
-//|                    QUANTUM HUD  ·  v2.06  ·  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  ·  v2.07  ·  MQL4 / MetaTrader 4 |
 //|------------------------------------------------------------------|
 //| Evolution of "Signal Forge XAUUSD M5 EA".                        |
 //|                                                                  |
@@ -22,6 +22,18 @@
 //| OnChartEvent is never delivered and they used to freeze in place.|
 //| A hard 40 px of daylight is enforced between cards; BUY results  |
 //| sit above price and SELL results below.                          |
+//| v2.07 - LIVE OVERLAY, PER-FILTER PLOTS, STANDALONE TRACKER.      |
+//| The indicator overlay was only ever drawn from the NEW-BAR branch |
+//| of OnTick, so on a live M5 chart nothing appeared for up to five  |
+//| minutes, while the Strategy Tester (bars complete in seconds)     |
+//| looked perfect. It is now painted on OnInit and refreshed from    |
+//| OnTimer whenever it is marked dirty. Each filter has its own      |
+//| ON/OFF button on the FILTERS page, between the name and the BIAS  |
+//| card, that adds or removes just that indicator's plot. The        |
+//| PERFORMANCE TRACKER is no longer a tab: it is its own solid       |
+//| raised panel pinned to the TOP-RIGHT corner, so the tracker and   |
+//| the signal engine are readable at the same time.                  |
+//|                                                                  |
 //| Original indicator concept: Signal Forge [LuxAlgo]               |
 //| (c) LuxAlgo, CC BY-NC-SA 4.0 - non commercial ShareAlike port.    |
 //| https://creativecommons.org/licenses/by-nc-sa/4.0/               |
@@ -36,7 +48,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Signal Forge PRO - CC BY-NC-SA 4.0"
 #property link      "https://creativecommons.org/licenses/by-nc-sa/4.0/"
-#property version   "2.06"
+#property version   "2.07"
 #property strict
 
 #include <Canvas\Canvas.mqh>
@@ -142,6 +154,9 @@ input bool   ShowSignalPanel        = true;     // Signal / agreement panel
 input bool   ShowRiskPanel          = true;     // Risk console
 input bool   ShowPerformancePanel   = true;     // Performance + equity curve
 input bool   ShowTradePanel         = true;     // Live trade ticket
+input bool   ShowTrackerPanel       = true;     // Standalone tracker (top-right)
+input int    TrackerWidthPx         = 430;      // Tracker panel width (px)
+input int    TrackerHeightPx        = 660;      // Tracker panel height (px)
 input ENUM_SF_FILTERVIEW FilterView = SF_VIEW_ACTIVE; // Filter list mode
 input int    HudMargin              = 12;       // Outer margin (px)
 input int    HudRefreshMs           = 220;      // Repaint interval (ms)
@@ -162,7 +177,8 @@ input bool   ShowLiveTradeCard      = true;     // Live card while a trade is op
 input int    ResultCardGapPx        = 18;       // Min gap from candles (px)
 input int    ResultCardSeparationPx = 40;       // Min gap BETWEEN result cards (px)
 input bool   BuyCardsAbove          = true;     // BUY cards above price, SELL below
-input bool   DrawIndicatorOverlay   = true;     // Plot active filters
+input bool   DrawIndicatorOverlay   = true;     // Master switch: plot filters on chart
+input string OverlayFilters         = "3";      // Filters drawn at start: CSV of indices, "all", or ""
 input int    OverlayBars            = 180;      // Bars plotted
 input bool   KeepVisualsAfterTest   = true;     // Keep graphics after a visual test
 
@@ -194,6 +210,23 @@ string   gFilterName[SF_FILTERS];
 // score: the original strategy treats every enabled filter as an equal vote.
 int      gBull[SF_FILTERS], gBear[SF_FILTERS];
 bool     gEnabled[SF_FILTERS];
+// Per-filter chart-overlay visibility, toggled by the small DRAW button on
+// the FILTERS page. Independent of gEnabled[]: you can watch an indicator on
+// the chart without it voting, or let it vote without cluttering the chart.
+bool     gDrawFilter[SF_FILTERS];
+bool     gOverlayDirty = true;   // force a DrawOverlay() on the next paint
+
+// Does this filter have a price-chart representation? The oscillators are
+// read from indicator buffers that belong in a separate sub-window, so there
+// is nothing meaningful to plot over the candles for them.
+bool FilterHasOverlay(int i)
+  {
+   return (i == 0 ||   // SMA cross
+           i == 3 ||   // Supertrend
+           i == 5 ||   // Bollinger midline
+           i == 6 ||   // EMA cross
+           i == 8);    // Parabolic SAR
+  }
 double   gScore = 0.0, gPrevScore = 0.0;
 int      gAgreeBull = 0, gAgreeBear = 0, gAgreeOn = 0;
 bool     gLongSignal = false, gShortSignal = false;
@@ -232,12 +265,24 @@ int      gSTDir = 0, gSTPrevDir = 0;
 datetime gSTTime = 0, gSTPrevTime = 0;
 
 //--- HUD
-CCanvas  gHud;
+// Two independent bitmap panels: the main HUD (top-left) and the standalone
+// PERFORMANCE TRACKER (top-right). Every drawing primitive writes to gCv,
+// the CURRENT target, so the same primitives serve both panels. Pointers are
+// required because GetPointer() is only valid for new-allocated objects.
+CCanvas *gHud = NULL;    // main HUD canvas
+CCanvas *gTrk = NULL;    // tracker canvas
+CCanvas *gCv  = NULL;    // current draw target
+// Screen-space origin of the current target, so RegisterButton() can convert
+// canvas-local coordinates into chart pixels for hit-testing.
+int      gCvOx = 0, gCvOy = 0;
 bool     gHudReady = false;
 int      gHudW = 0, gHudH = 0;
+bool     gTrkReady = false;
+int      gTrkW = 0, gTrkH = 0;
 uint     gLastHudPaint = 0;
 bool     gHudCollapsed = false;
-int      gHudPage = 0;          // 0 = core, 1 = filters, 2 = journal
+int      gHudPage = 0;          // 0 = core, 1 = filters
+bool     gTrkCollapsed = false; // standalone tracker panel collapsed?
 bool     gShowAllFilters = false;
 bool     gPaused = false;
 int      gMouseX = -1, gMouseY = -1;   // chart-space cursor, for hover + click fallback
@@ -976,12 +1021,12 @@ struct SFButton
    int      x, y, w, h;
    string   id;
   };
-SFButton gButtons[16];
+SFButton gButtons[40];   // 11 per-filter DRAW toggles + chrome
 int      gButtonCount = 0;
 
 void RegisterButton(string id, int x, int y, int w, int h)
   {
-   if(gButtonCount >= 16) return;
+   if(gButtonCount >= 40) return;
    gButtons[gButtonCount].id = id;
    gButtons[gButtonCount].x  = x;
    gButtons[gButtonCount].y  = y;
@@ -1008,10 +1053,10 @@ void ArcQuarter(int cx, int cy, int r, int quad, uint clr)
    int x = r, y = 0, err = 1 - r;
    while(x >= y)
      {
-      if(quad == 0)      { gHud.PixelSet(cx - x, cy - y, clr); gHud.PixelSet(cx - y, cy - x, clr); }
-      else if(quad == 1) { gHud.PixelSet(cx + x, cy - y, clr); gHud.PixelSet(cx + y, cy - x, clr); }
-      else if(quad == 2) { gHud.PixelSet(cx - x, cy + y, clr); gHud.PixelSet(cx - y, cy + x, clr); }
-      else               { gHud.PixelSet(cx + x, cy + y, clr); gHud.PixelSet(cx + y, cy + x, clr); }
+      if(quad == 0)      { gCv.PixelSet(cx - x, cy - y, clr); gCv.PixelSet(cx - y, cy - x, clr); }
+      else if(quad == 1) { gCv.PixelSet(cx + x, cy - y, clr); gCv.PixelSet(cx + y, cy - x, clr); }
+      else if(quad == 2) { gCv.PixelSet(cx - x, cy + y, clr); gCv.PixelSet(cx - y, cy + x, clr); }
+      else               { gCv.PixelSet(cx + x, cy + y, clr); gCv.PixelSet(cx + y, cy + x, clr); }
       y++;
       if(err < 0) err += 2 * y + 1;
       else { x--; err += 2 * (y - x) + 1; }
@@ -1022,22 +1067,22 @@ void RoundRect(int x, int y, int w, int h, int r, uint fill, uint border, bool d
   {
    if(w <= 0 || h <= 0) return;
    r = MathMax(0, MathMin(r, MathMin(w, h) / 2));
-   gHud.FillRectangle(x + r, y,         x + w - r, y + h,     fill);
-   gHud.FillRectangle(x,     y + r,     x + r,     y + h - r, fill);
-   gHud.FillRectangle(x + w - r, y + r, x + w,     y + h - r, fill);
+   gCv.FillRectangle(x + r, y,         x + w - r, y + h,     fill);
+   gCv.FillRectangle(x,     y + r,     x + r,     y + h - r, fill);
+   gCv.FillRectangle(x + w - r, y + r, x + w,     y + h - r, fill);
    if(r > 0)
      {
-      gHud.FillCircle(x + r,         y + r,         r, fill);
-      gHud.FillCircle(x + w - r - 1, y + r,         r, fill);
-      gHud.FillCircle(x + r,         y + h - r - 1, r, fill);
-      gHud.FillCircle(x + w - r - 1, y + h - r - 1, r, fill);
+      gCv.FillCircle(x + r,         y + r,         r, fill);
+      gCv.FillCircle(x + w - r - 1, y + r,         r, fill);
+      gCv.FillCircle(x + r,         y + h - r - 1, r, fill);
+      gCv.FillCircle(x + w - r - 1, y + h - r - 1, r, fill);
      }
    if(drawBorder)
      {
-      gHud.Line(x + r, y,         x + w - r, y,         border);
-      gHud.Line(x + r, y + h - 1, x + w - r, y + h - 1, border);
-      gHud.Line(x,         y + r, x,         y + h - r, border);
-      gHud.Line(x + w - 1, y + r, x + w - 1, y + h - r, border);
+      gCv.Line(x + r, y,         x + w - r, y,         border);
+      gCv.Line(x + r, y + h - 1, x + w - r, y + h - 1, border);
+      gCv.Line(x,         y + r, x,         y + h - r, border);
+      gCv.Line(x + w - 1, y + r, x + w - 1, y + h - r, border);
       if(r > 0)
         {
          ArcQuarter(x + r,         y + r,         r, 0, border);
@@ -1065,11 +1110,11 @@ void RaisedPlate(int x, int y, int w, int h, int r, uint fill, uint edge,
      }
    RoundRect(x, y, w, h, r, fill, edge);
    // highlight: top + left
-   gHud.Line(x + r,     y + 1,     x + w - r - 1, y + 1,         TLite);
-   gHud.Line(x + 1,     y + r,     x + 1,         y + h - r - 1, TLite);
+   gCv.Line(x + r,     y + 1,     x + w - r - 1, y + 1,         TLite);
+   gCv.Line(x + 1,     y + r,     x + 1,         y + h - r - 1, TLite);
    // shadow: bottom + right
-   gHud.Line(x + r,     y + h - 2, x + w - r - 1, y + h - 2,     TDark);
-   gHud.Line(x + w - 2, y + r,     x + w - 2,     y + h - r - 1, TDark);
+   gCv.Line(x + r,     y + h - 2, x + w - r - 1, y + h - 2,     TDark);
+   gCv.Line(x + w - 2, y + r,     x + w - 2,     y + h - r - 1, TDark);
   }
 
 // Inset/sunken well - used for meter tracks and table bodies.
@@ -1077,16 +1122,16 @@ void SunkenWell(int x, int y, int w, int h, int r, uint fill)
   {
    if(w <= 2 || h <= 2) return;
    RoundRect(x, y, w, h, r, fill, TDark);
-   gHud.Line(x + r, y + 1, x + w - r - 1, y + 1, TDark);
-   gHud.Line(x + 1, y + r, x + 1, y + h - r - 1, TDark);
-   gHud.Line(x + r, y + h - 2, x + w - r - 1, y + h - 2, TLite);
+   gCv.Line(x + r, y + 1, x + w - r - 1, y + 1, TDark);
+   gCv.Line(x + 1, y + r, x + 1, y + h - r - 1, TDark);
+   gCv.Line(x + r, y + h - 2, x + w - r - 1, y + h - 2, TLite);
   }
 
 // Glowing accent bar - a vivid 3px spine used to tag panels and rows.
 void AccentSpine(int x, int y, int h, uint c)
   {
-   gHud.FillRectangle(x,     y, x + 2, y + h, c);
-   gHud.FillRectangle(x + 3, y, x + 3, y + h, A(C'0,0,0',90));
+   gCv.FillRectangle(x,     y, x + 2, y + h, c);
+   gCv.FillRectangle(x + 3, y, x + 3, y + h, A(C'0,0,0',90));
   }
 
 // Vertical gradient fill - gives the panels real depth instead of flat blocks.
@@ -1104,14 +1149,14 @@ void GradientRect(int x, int y, int w, int h, uint top, uint bottom)
                ((uint)(tr + (br - tr) * t) << 16) |
                ((uint)(tg + (bg - tg) * t) << 8)  |
                 (uint)(tb + (bb - tb) * t);
-      gHud.Line(x, y + i, x + w, y + i, c);
+      gCv.Line(x, y + i, x + w, y + i, c);
      }
   }
 
 void Text(int x, int y, string s, uint c, int size = 8, string font = "Segoe UI", uint flags = 0)
   {
-   gHud.FontSet(font, SC(size) * -10, flags);
-   gHud.TextOut(x, y, s, c, SF_AL_LEFT | SF_AL_TOP);
+   gCv.FontSet(font, SC(size) * -10, flags);
+   gCv.TextOut(x, y, s, c, SF_AL_LEFT | SF_AL_TOP);
   }
 
 // Vertically centre one line inside a box of height h.
@@ -1123,31 +1168,31 @@ void Text(int x, int y, string s, uint c, int size = 8, string font = "Segoe UI"
 void TextVC(int x, int y, int h, string s, uint c, int size = 8,
             string font = "Segoe UI", uint flags = 0)
   {
-   gHud.FontSet(font, SC(size) * -10, flags);
+   gCv.FontSet(font, SC(size) * -10, flags);
    int tw = 0, th = 0;
-   gHud.TextSize(s, tw, th);
-   gHud.TextOut(x, y + (h - th) / 2, s, c, SF_AL_LEFT | SF_AL_TOP);
+   gCv.TextSize(s, tw, th);
+   gCv.TextOut(x, y + (h - th) / 2, s, c, SF_AL_LEFT | SF_AL_TOP);
   }
 
 void TextCenterVC(int cx, int y, int h, string s, uint c, int size = 8,
                   string font = "Segoe UI", uint flags = 0)
   {
-   gHud.FontSet(font, SC(size) * -10, flags);
+   gCv.FontSet(font, SC(size) * -10, flags);
    int tw = 0, th = 0;
-   gHud.TextSize(s, tw, th);
-   gHud.TextOut(cx, y + (h - th) / 2, s, c, SF_AL_CENTER | SF_AL_TOP);
+   gCv.TextSize(s, tw, th);
+   gCv.TextOut(cx, y + (h - th) / 2, s, c, SF_AL_CENTER | SF_AL_TOP);
   }
 
 void TextRight(int x, int y, string s, uint c, int size = 8, string font = "Segoe UI", uint flags = 0)
   {
-   gHud.FontSet(font, SC(size) * -10, flags);
-   gHud.TextOut(x, y, s, c, SF_AL_RIGHT | SF_AL_TOP);
+   gCv.FontSet(font, SC(size) * -10, flags);
+   gCv.TextOut(x, y, s, c, SF_AL_RIGHT | SF_AL_TOP);
   }
 
 void TextCenter(int x, int y, string s, uint c, int size = 8, string font = "Segoe UI", uint flags = 0)
   {
-   gHud.FontSet(font, SC(size) * -10, flags);
-   gHud.TextOut(x, y, s, c, SF_AL_CENTER | SF_AL_TOP);
+   gCv.FontSet(font, SC(size) * -10, flags);
+   gCv.TextOut(x, y, s, c, SF_AL_CENTER | SF_AL_TOP);
   }
 
 // Horizontal meter with a filled portion - used for score, risk and cost.
@@ -1179,9 +1224,9 @@ void Meter(int x, int y, int w, int h, double pct01, uint fill, uint track)
    int fw = (int)MathRound((w - 2) * pct01);
    if(fw <= 0) return;
    if(fw > h) RoundRect(x + 1, y + 1, fw, h - 2, (h - 2) / 2, fill, fill, false);
-   else gHud.FillRectangle(x + 1, y + 1, x + 1 + fw, y + h - 1, fill);
+   else gCv.FillRectangle(x + 1, y + 1, x + 1 + fw, y + h - 1, fill);
    // glossy top edge on the filled portion
-   gHud.Line(x + 2, y + 2, x + fw - 1, y + 2, A(C'255,255,255',70));
+   gCv.Line(x + 2, y + 2, x + fw - 1, y + 2, A(C'255,255,255',70));
   }
 
 void MeterGraded(int x, int y, int w, int h, double pct01, uint strongC, uint track)
@@ -1210,20 +1255,20 @@ void ScoreGauge(int cx, int cy, int radius, double score)
         {
          int px = cx + (int)MathRound(MathCos(rad) * (radius - t));
          int py = cy + (int)MathRound(MathSin(rad) * (radius - t));
-         gHud.PixelSet(px, py, c);
+         gCv.PixelSet(px, py, c);
         }
      }
    // centre zero tick
-   gHud.Line(cx, cy - radius, cx, cy - radius + SC(9), TTextDim);
+   gCv.Line(cx, cy - radius, cx, cy - radius + SC(9), TTextDim);
 
    // needle
    double ndeg = 180.0 + (norm + 100.0) / 200.0 * 180.0;
    double nrad = ndeg * M_PI / 180.0;
    int nx = cx + (int)MathRound(MathCos(nrad) * (radius - SC(11)));
    int ny = cy + (int)MathRound(MathSin(nrad) * (radius - SC(11)));
-   gHud.Line(cx, cy, nx, ny, col);
-   gHud.Line(cx, cy - 1, nx, ny - 1, col);
-   gHud.FillCircle(cx, cy, SC(4), col);
+   gCv.Line(cx, cy, nx, ny, col);
+   gCv.Line(cx, cy - 1, nx, ny - 1, col);
+   gCv.FillCircle(cx, cy, SC(4), col);
   }
 
 // Compact sparkline of the closed-trade equity curve.
@@ -1244,17 +1289,17 @@ void Sparkline(int x, int y, int w, int h, uint line, uint fill)
      {
       int cx = x + (int)((double)p / (gEquityPoints - 1) * w);
       int cy = y + h - (int)((gEquityCurve[p] - mn) / (mx - mn) * h);
-      gHud.Line(prevX, prevY, cx, cy, line);
-      gHud.Line(prevX, prevY + 1, cx, cy + 1, line);
-      for(int fy = (cy > y ? cy : y); fy < y + h; fy += 3) gHud.PixelSet(cx, fy, fill);
+      gCv.Line(prevX, prevY, cx, cy, line);
+      gCv.Line(prevX, prevY + 1, cx, cy + 1, line);
+      for(int fy = (cy > y ? cy : y); fy < y + h; fy += 3) gCv.PixelSet(cx, fy, fill);
       prevX = cx; prevY = cy;
      }
   }
 
 void StatusDot(int x, int y, int r, bool on, uint onC, uint offC)
   {
-   gHud.FillCircle(x, y, r, on ? onC : offC);
-   gHud.Circle(x, y, r + 1, on ? onC : TGridC);
+   gCv.FillCircle(x, y, r, on ? onC : offC);
+   gCv.Circle(x, y, r + 1, on ? onC : TGridC);
   }
 
 //==================================================================//
@@ -1276,13 +1321,22 @@ uint StateColor()
 
 void DestroyHud()
   {
-   if(gHudReady) gHud.Destroy();
+   if(gHudReady && gHud != NULL) gHud.Destroy();
    gHudReady = false; gHudW = 0; gHudH = 0;
    ObjectDelete(0, PFX + "HUD");
   }
 
+void DestroyTracker()
+  {
+   if(gTrkReady && gTrk != NULL) gTrk.Destroy();
+   gTrkReady = false; gTrkW = 0; gTrkH = 0;
+   ObjectDelete(0, PFX + "TRK");
+  }
+
 bool EnsureHud(int w, int h)
   {
+   if(gHud == NULL) gHud = new CCanvas;
+   if(gHud == NULL) return false;
    if(gHudReady && w == gHudW && h == gHudH) return true;
 
    // Resize IN PLACE when the object already exists. Destroying and
@@ -1314,12 +1368,52 @@ bool EnsureHud(int w, int h)
    return true;
   }
 
+// The tracker is pinned to the TOP-RIGHT corner. MT4 measures
+// CORNER_RIGHT_UPPER objects from the right edge, so XDISTANCE is the gap
+// between the panel's RIGHT edge and the chart's right edge.
+bool EnsureTracker(int w, int h)
+  {
+   if(gTrk == NULL) gTrk = new CCanvas;
+   if(gTrk == NULL) return false;
+   if(gTrkReady && w == gTrkW && h == gTrkH) return true;
+
+   if(gTrkReady && ObjectFind(0, PFX + "TRK") >= 0)
+     {
+      if(gTrk.Resize(w, h))
+        {
+         gTrkW = w; gTrkH = h;
+         ObjectSetInteger(0, PFX + "TRK", OBJPROP_XSIZE, w);
+         ObjectSetInteger(0, PFX + "TRK", OBJPROP_YSIZE, h);
+         return true;
+        }
+     }
+
+   DestroyTracker();
+   if(!gTrk.CreateBitmapLabel(0, 0, PFX + "TRK", HudMargin, HudMargin, w, h, COLOR_FORMAT_ARGB_NORMALIZE))
+      return false;
+   gTrkReady = true; gTrkW = w; gTrkH = h;
+   ObjectSetInteger(0, PFX + "TRK", OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0, PFX + "TRK", OBJPROP_XDISTANCE, HudMargin + w);
+   ObjectSetInteger(0, PFX + "TRK", OBJPROP_YDISTANCE, HudMargin);
+   ObjectSetInteger(0, PFX + "TRK", OBJPROP_BACK, false);
+   ObjectSetInteger(0, PFX + "TRK", OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, PFX + "TRK", OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, PFX + "TRK", OBJPROP_ZORDER, 500);
+   return true;
+  }
+
 void DrawChip(int x, int y, int w, int h, string label, string value, uint valueColor, uint accent)
   {
    RaisedPlate(x, y, w, h, SC(6), TPanel, TBorder);
    AccentSpine(x + SC(3), y + SC(5), h - SC(10), accent);
    Text(x + SC(12), y + SC(6),  label, TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
    Text(x + SC(12), y + SC(19), value, valueColor, 10, "Segoe UI Black", SF_FW_BLACK);
+  }
+
+// Registers in CHART pixels: canvas-local coords plus the active panel origin.
+void RegisterButtonLocal(string id, int x, int y, int w, int h)
+  {
+   RegisterButton(id, gCvOx + x, gCvOy + y, w, h);
   }
 
 void DrawButton(int x, int y, int w, int h, string id, string caption, bool active, uint accent)
@@ -1329,14 +1423,34 @@ void DrawButton(int x, int y, int w, int h, string id, string caption, bool acti
    uint edge  = active ? accent : (hover ? TAccent : TBorder);
    uint txt   = active ? A(C'6,10,18',255) : (hover ? TAccent : TText);
    RaisedPlate(x, y, w, h, SC(5), fill, edge, true, 2);
-   if(hover && !active) gHud.Line(x + SC(6), y + h - 3, x + w - SC(6), y + h - 3, TAccent);
+   if(hover && !active) gCv.Line(x + SC(6), y + h - 3, x + w - SC(6), y + h - 3, TAccent);
    TextCenterVC(x + w / 2, y, h, caption, txt, 8, "Segoe UI Semibold", SF_FW_SEMI);
-   RegisterButton(id, HudMargin + x, HudMargin + y, w, h);
+   RegisterButtonLocal(id, x, y, w, h);
+  }
+
+// Small square ON/OFF used per filter row to add or remove its chart overlay.
+// Three states: lit (drawn), dark (available but off), and "--" for the
+// oscillators that have no price-chart representation at all.
+void DrawMiniToggle(int x, int y, int sz, string id, bool on, bool available)
+  {
+   bool hover = (gHoverId == id);
+   if(!available)
+     {
+      RaisedPlate(x, y, sz, sz, SC(3), TBg2, TBorder, true, 1);
+      TextCenterVC(x + sz / 2, y, sz, "-", TTextDim, 7, "Segoe UI Black", SF_FW_BLACK);
+      return;   // deliberately NOT registered: nothing to toggle
+     }
+   uint fill = on ? TAccent : (hover ? TPanelHi : TGridC);
+   uint edge = on ? TAccent : (hover ? TAccent   : TBorder);
+   uint tcol = on ? A(C'6,10,18',255) : (hover ? TAccent : TTextDim);
+   RaisedPlate(x, y, sz, sz, SC(3), fill, edge, true, 1);
+   TextCenterVC(x + sz / 2, y, sz, on ? "O" : "-", tcol, 7, "Segoe UI Black", SF_FW_BLACK);
+   RegisterButtonLocal(id, x, y, sz, sz);
   }
 
 void PaintHud()
   {
-   if(!ShowHUD) { DestroyHud(); return; }
+   if(!ShowHUD) { DestroyHud(); DestroyTracker(); return; }
 
    long chartW = 0, chartH = 0;
    ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0, chartW);
@@ -1357,20 +1471,22 @@ void PaintHud()
    if(ShowRiskPanel)        pageH += SC(112) + SC(8); // execution console
    if(ShowTradePanel)       pageH += SC(74)  + SC(8); // live trade ticket
    if(gHudPage == 1) pageH = SC(500);         // FILTERS
-   if(gHudPage == 2) pageH = SC(700);         // TRACKER
    int H = gHudCollapsed ? headerH + SC(8) : pageH;
    if(H > (int)chartH - HudMargin * 2) H = (int)chartH - HudMargin * 2;
    if(H < headerH + SC(8)) return;
 
    if(!EnsureHud(W, H)) return;
-   gButtonCount = 0;
-   gHud.Erase(A(C'0,0,0', 0));
+   gButtonCount = 0;                 // PaintHud always repaints first
+   gCv   = gHud;                     // route primitives to the HUD bitmap
+   gCvOx = HudMargin;
+   gCvOy = HudMargin;
+   gCv.Erase(A(C'0,0,0', 0));
 
    //================= shell =================
    RaisedPlate(0, 0, W, H, SC(12), TBg, TBorder, false, 0);
    GradientRect(3, 3, W - 6, headerH - 5, TPanelHi, TBg2);
-   gHud.Line(SC(10), headerH - 1, W - SC(10), headerH - 1, TAccent);
-   gHud.Line(SC(10), headerH,     W - SC(10), headerH,     TDark);
+   gCv.Line(SC(10), headerH - 1, W - SC(10), headerH - 1, TAccent);
+   gCv.Line(SC(10), headerH,     W - SC(10), headerH,     TDark);
 
    //================= header =================
    // Header is laid out RIGHT-TO-LEFT from the window edge, and the PRO badge
@@ -1378,14 +1494,14 @@ void PaintHud()
    // rather than a hardcoded offset - hardcoding it made the badge land on top
    // of the wordmark whenever the installed font metrics differed from mine.
    int hx = SC(14), hy = SC(10);
-   gHud.FillCircle(hx + SC(10), hy + SC(14), SC(11), TAccent2);
-   gHud.FillCircle(hx + SC(10), hy + SC(14), SC(7),  TBg);
-   gHud.FillCircle(hx + SC(10), hy + SC(14), SC(3),  TAccent);
+   gCv.FillCircle(hx + SC(10), hy + SC(14), SC(11), TAccent2);
+   gCv.FillCircle(hx + SC(10), hy + SC(14), SC(7),  TBg);
+   gCv.FillCircle(hx + SC(10), hy + SC(14), SC(3),  TAccent);
 
    int txtX = hx + SC(28);
    string mark = "SIGNAL FORGE";
-   gHud.FontSet("Segoe UI Black", SC(11) * -10, SF_FW_BLACK);
-   int markW = gHud.TextWidth(mark);
+   gCv.FontSet("Segoe UI Black", SC(11) * -10, SF_FW_BLACK);
+   int markW = gCv.TextWidth(mark);
    Text(txtX, hy, mark, TText, 11, "Segoe UI Black", SF_FW_BLACK);
 
    // right cluster: [collapse] [state pill], both anchored to the right edge
@@ -1405,7 +1521,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v2.06", TTextDim, 7);
+        "  ·  RAW  ·  v2.07", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -1415,17 +1531,17 @@ void PaintHud()
    DrawButton(colX, hy + SC(3), colW, pillH, "BTN_COLLAPSE",
               gHudCollapsed ? "+" : "–", false, TAccent);
 
-   if(gHudCollapsed) { gHud.Update(); ChartRedraw(0); return; }
+   if(gHudCollapsed) { gCv.Update(); ChartRedraw(0); return; }
 
    int y = headerH + SC(6);
    int pad = SC(12);
    int innerW = W - pad * 2;
 
    //================= navigation tabs =================
-   int tabW = (innerW - SC(16)) / 3;
-   DrawButton(pad,                  y, tabW, SC(24), "TAB_CORE",    "CORE",    gHudPage == 0, TAccent);
-   DrawButton(pad + tabW + SC(8),   y, tabW, SC(24), "TAB_FILTERS", "FILTERS", gHudPage == 1, TAccent);
-   DrawButton(pad + (tabW + SC(8)) * 2, y, tabW, SC(24), "TAB_LOG", "TRACKER", gHudPage == 2, TAccent);
+   int tabW2 = (innerW - SC(8)) / 2;
+   // TRACKER is no longer a tab - it lives in its own top-right panel.
+   DrawButton(pad,                y, tabW2, SC(24), "TAB_CORE",    "CORE",    gHudPage == 0, TAccent);
+   DrawButton(pad + tabW2 + SC(8), y, tabW2, SC(24), "TAB_FILTERS", "FILTERS", gHudPage == 1, TAccent);
    y += SC(32);
 
    //================================================================
@@ -1610,8 +1726,9 @@ void PaintHud()
    else if(gHudPage == 1)
      {
       SunkenWell(pad, y, innerW, SC(26), SC(6), TBg2);
-      TextVC(pad + SC(10), y, SC(26), "FILTER", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-      TextVC(pad + SC(142), y, SC(26), "BIAS", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+      TextVC(pad + SC(10),  y, SC(26), "FILTER", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+      TextVC(pad + SC(100), y, SC(26), "DRAW",   TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+      TextVC(pad + SC(142), y, SC(26), "BIAS",   TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
       TextVC(pad + SC(212), y, SC(26), "VOTE", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
       TextRight(pad + innerW - SC(10), y + SC(9), "AGREEMENT", TAccent, 7,
                 "Segoe UI Black", SF_FW_BLACK);
@@ -1638,6 +1755,13 @@ void PaintHud()
          StatusDot(pad + SC(12), y + SC(11), SC(3), gEnabled[i], TAccent, TGridC);
          TextVC(pad + SC(22), y, cellH, gFilterName[i], gEnabled[i] ? TText : TTextDim, 7,
                 "Segoe UI Semibold", SF_FW_SEMI);
+
+         // DRAW toggle: sits BETWEEN the filter name and the bias card and
+         // adds/removes that indicator's plot on the price chart.
+         int tSz = SC(15);
+         int tX  = pad + SC(120), tY = y + (cellH - tSz) / 2;
+         DrawMiniToggle(tX, tY, tSz, "DRAW_" + IntegerToString(i),
+                        gDrawFilter[i], FilterHasOverlay(i));
 
          // BIAS card: SOLID RAISED, background carries the state colour and
          // the text is always white so it reads at a glance.
@@ -1678,171 +1802,243 @@ void PaintHud()
                  gPaused ? "RESUME" : "PAUSE", gPaused, TFlat);
      }
 
-   //================================================================
-   //            PAGE 2 : PERFORMANCE TRACKER
-   //================================================================
-   else
+   gCv.Update();
+  }
+
+//==================================================================//
+//        S T A N D A L O N E   T R A C K E R   P A N E L           //
+//==================================================================//
+// The performance tracker is no longer a tab inside the HUD: it is its own
+// bitmap pinned to the TOP-RIGHT corner, so the trader sees the running
+// P/L at the same time as the signal engine on the left.
+void PaintTracker()
+  {
+   if(!ShowHUD || !ShowTrackerPanel) { DestroyTracker(); return; }
+
+   long chartW = 0, chartH = 0;
+   ChartGetInteger(0, CHART_WIDTH_IN_PIXELS,  0, chartW);
+   ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0, chartH);
+
+   int W = SC(TrackerWidthPx);
+   // never let the two panels collide: the HUD owns the left side
+   int leftTaken = (gHudReady ? HudMargin + gHudW : 0) + SC(10);
+   int avail     = (int)chartW - leftTaken - HudMargin;
+   if(W > avail) W = avail;
+   if(W < SC(240)) { DestroyTracker(); return; }
+
+   int headerH = SC(34);
+   // Fixed content = KPI strip + 6-day table + FINAL P/L + pause button.
+   // Below this the blocks would collide, so the panel hides instead of
+   // drawing a broken layout. The sparkline takes whatever is left over.
+   int minH = headerH + SC(8) + SC(52) + SC(8)
+              + SC(26) + SC(20) + SF_TRACK_DAYS * SC(21) + SC(24) + SC(8)
+              + SC(46) + SC(8) + SC(40);
+   int H = gTrkCollapsed ? headerH + SC(8) : SC(TrackerHeightPx);
+   if(H > (int)chartH - HudMargin * 2) H = (int)chartH - HudMargin * 2;
+   if(!gTrkCollapsed && H < minH)      { DestroyTracker(); return; }
+   if(H < headerH + SC(8))             { DestroyTracker(); return; }
+
+   if(!EnsureTracker(W, H)) return;
+
+   // route every primitive to the tracker canvas, and tell RegisterButton
+   // where this panel sits on screen so its buttons hit-test correctly
+   gCv  = gTrk;
+   gCvOx = (int)chartW - HudMargin - W;
+   gCvOy = HudMargin;
+
+   // Erase fully TRANSPARENT (same as the HUD): the rounded shell is then
+   // drawn on top, so the corners stay round instead of being squared off by
+   // an opaque background. TBg is already a packed ARGB uint, not a `color`.
+   gCv.Erase(A(C'0,0,0', 0));
+   RaisedPlate(0, 0, W, H, SC(12), TBg, TBorder, false, 0);
+
+   int pad = SC(10);
+   int innerW = W - pad * 2;
+
+   //---------- header ----------
+   // inset like the HUD header, otherwise the square gradient paints over
+   // the rounded top corners of the shell
+   GradientRect(3, 3, W - 6, headerH - 5, TPanelHi, TBg2);
+   AccentSpine(pad, SC(9), headerH - SC(18), TAccent2);
+   Text(pad + SC(10), SC(7), "PERFORMANCE TRACKER", TText, 9, "Segoe UI Black", SF_FW_BLACK);
+   TextRight(W - pad - SC(30), SC(9), Symbol(), TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
+   DrawButton(W - pad - SC(22), SC(7), SC(22), SC(19), "TRK_COLLAPSE",
+              gTrkCollapsed ? "+" : "-", false, TAccent);
+   gCv.Line(SC(10), headerH - 1, W - SC(10), headerH - 1, TAccent);
+   gCv.Line(SC(10), headerH,     W - SC(10), headerH,     TDark);
+
+   if(gTrkCollapsed) { gCv.Update(); return; }
+
+   int y = headerH + SC(8);
+
+   RebuildStats();
+
+   //---------- headline KPI strip ----------
+   double wr = (gStatTrades > 0) ? 100.0 * gStatWins / gStatTrades : 0;
+   double pf = (gStatGL > 0) ? gStatGP / gStatGL : (gStatGP > 0 ? 99.9 : 0);
+   int kpiH = SC(52);
+   int kw = (innerW - SC(12)) / 4;
+   string klbl[4]; klbl[0]="TRADES"; klbl[1]="WIN RATE"; klbl[2]="P/FACTOR"; klbl[3]="MAX DD";
+   string kval[4];
+   kval[0] = IntegerToString(gStatTrades);
+   kval[1] = Fmt(wr, 1) + "%";
+   kval[2] = (pf >= 99.9 ? "MAX" : Fmt(pf, 2));
+   kval[3] = Fmt(gStatMaxDD, 1) + "%";
+   uint kcol[4];
+   kcol[0] = TAccent;
+   kcol[1] = (wr >= 50 ? TBull : TBear);
+   kcol[2] = (pf >= 1.0 ? TBull : TBear);
+   kcol[3] = (gStatMaxDD <= 15 ? TBull : TBear);
+   for(int k = 0; k < 4; k++)
      {
-      RebuildStats();
+      int kx = pad + k * (kw + SC(4));
+      RaisedPlate(kx, y, kw, kpiH, SC(6), TPanel, TBorder);
+      AccentSpine(kx + SC(3), y + SC(6), kpiH - SC(12), kcol[k]);
+      Text(kx + SC(11), y + SC(8),  klbl[k], TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
+      Text(kx + SC(11), y + SC(23), kval[k], kcol[k], 13, "Segoe UI Black", SF_FW_BLACK);
+     }
+   y += kpiH + SC(8);
 
-      //---------- headline KPI strip ----------
-      double wr = (gStatTrades > 0) ? 100.0 * gStatWins / gStatTrades : 0;
-      double pf = (gStatGL > 0) ? gStatGP / gStatGL : (gStatGP > 0 ? 99.9 : 0);
-      int kpiH = SC(52);
-      int kw = (innerW - SC(12)) / 4;
-      string klbl[4]; klbl[0]="TRADES"; klbl[1]="WIN RATE"; klbl[2]="P/FACTOR"; klbl[3]="MAX DD";
-      string kval[4];
-      kval[0] = IntegerToString(gStatTrades);
-      kval[1] = Fmt(wr, 1) + "%";
-      kval[2] = (pf >= 99.9 ? "MAX" : Fmt(pf, 2));
-      kval[3] = Fmt(gStatMaxDD, 1) + "%";
-      uint kcol[4];
-      kcol[0] = TAccent;
-      kcol[1] = (wr >= 50 ? TBull : TBear);
-      kcol[2] = (pf >= 1.0 ? TBull : TBear);
-      kcol[3] = (gStatMaxDD <= 15 ? TBull : TBear);
-      for(int k = 0; k < 4; k++)
-        {
-         int kx = pad + k * (kw + SC(4));
-         RaisedPlate(kx, y, kw, kpiH, SC(6), TPanel, TBorder);
-         AccentSpine(kx + SC(3), y + SC(6), kpiH - SC(12), kcol[k]);
-         Text(kx + SC(11), y + SC(8),  klbl[k], TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
-         Text(kx + SC(11), y + SC(23), kval[k], kcol[k], 13, "Segoe UI Black", SF_FW_BLACK);
-        }
-      y += kpiH + SC(8);
+   //---------- DAILY PERFORMANCE TRACKER TABLE ----------
+   int hdrH = SC(20), rowH = SC(21);
+   int tblH = SC(26) + hdrH + SF_TRACK_DAYS * rowH + SC(24);
+   RaisedPlate(pad, y, innerW, tblH, SC(8), TPanel, TBorder);
+   AccentSpine(pad + SC(4), y + SC(7), SC(13), TAccent);
+   Text(pad + SC(13), y + SC(6), "PERFORMANCE TRACKER", TText, 8, "Segoe UI Black", SF_FW_BLACK);
+   TextRight(pad + innerW - SC(10), y + SC(7), "LAST " + IntegerToString(SF_TRACK_DAYS) + " DAYS",
+             TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
 
-      //---------- DAILY PERFORMANCE TRACKER TABLE ----------
-      int hdrH = SC(20), rowH = SC(21);
-      int tblH = SC(26) + hdrH + SF_TRACK_DAYS * rowH + SC(24);
-      RaisedPlate(pad, y, innerW, tblH, SC(8), TPanel, TBorder);
-      AccentSpine(pad + SC(4), y + SC(7), SC(13), TAccent);
-      Text(pad + SC(13), y + SC(6), "PERFORMANCE TRACKER", TText, 8, "Segoe UI Black", SF_FW_BLACK);
-      TextRight(pad + innerW - SC(10), y + SC(7), "LAST " + IntegerToString(SF_TRACK_DAYS) + " DAYS",
-                TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
+   // column layout: DATE | LOTS | PROFIT | GAIN% | WIN% | COMM
+   int tx = pad + SC(6), tw = innerW - SC(12);
+   int cW[6];
+   cW[0] = (int)(tw * 0.21); // DATE
+   cW[1] = (int)(tw * 0.13); // LOTS
+   cW[2] = (int)(tw * 0.20); // PROFIT
+   cW[3] = (int)(tw * 0.17); // GAIN%
+   cW[4] = (int)(tw * 0.15); // WIN%
+   cW[5] = tw - cW[0] - cW[1] - cW[2] - cW[3] - cW[4]; // COMM
+   string cH[6]; cH[0]="DATE"; cH[1]="LOTS"; cH[2]="PROFIT"; cH[3]="GAIN%"; cH[4]="WIN%"; cH[5]="COMM";
 
-      // column layout: DATE | LOTS | PROFIT | GAIN% | WIN% | COMM
-      int tx = pad + SC(6), tw = innerW - SC(12);
-      int cW[6];
-      cW[0] = (int)(tw * 0.21); // DATE
-      cW[1] = (int)(tw * 0.13); // LOTS
-      cW[2] = (int)(tw * 0.20); // PROFIT
-      cW[3] = (int)(tw * 0.17); // GAIN%
-      cW[4] = (int)(tw * 0.15); // WIN%
-      cW[5] = tw - cW[0] - cW[1] - cW[2] - cW[3] - cW[4]; // COMM
-      string cH[6]; cH[0]="DATE"; cH[1]="LOTS"; cH[2]="PROFIT"; cH[3]="GAIN%"; cH[4]="WIN%"; cH[5]="COMM";
-
-      int hy2 = y + SC(26);
-      SunkenWell(tx, hy2, tw, hdrH, SC(3), TBg2);
-      int cx2 = tx;
-      for(int c = 0; c < 6; c++)
-        {
-         if(c == 0) TextVC(cx2 + SC(6), hy2, hdrH, cH[c], TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-         else TextRight(cx2 + cW[c] - SC(6), hy2 + SC(6), cH[c], TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-         cx2 += cW[c];
-        }
-
-      int ry = hy2 + hdrH;
-      for(int r2 = 0; r2 < SF_TRACK_DAYS; r2++)
-        {
-         bool isToday = (r2 == 0);
-         uint rowBg = isToday ? TPanelHi : ((r2 % 2 == 0) ? TBg2 : TPanel);
-         RoundRect(tx, ry, tw, rowH - 1, SC(2), rowBg, rowBg, false);
-         if(isToday) AccentSpine(tx + 1, ry + SC(3), rowH - SC(7), TAccent);
-
-         double prof = gTrkProfit[r2];
-         uint pcol = (prof > 0) ? TBull : (prof < 0 ? TBear : TTextDim);
-         double dwr = (gTrkTrades[r2] > 0) ? 100.0 * gTrkWins[r2] / gTrkTrades[r2] : 0;
-         bool had = (gTrkTrades[r2] > 0);
-
-         string v0 = TimeToString(gTrkDate[r2], TIME_DATE);
-         // trim year for width: yyyy.mm.dd -> mm.dd
-         if(StringLen(v0) > 5) v0 = StringSubstr(v0, 5);
-         if(isToday) v0 = v0 + "  *";
-         string v1 = had ? Fmt(gTrkLots[r2], 2) : "-";
-         string v2 = had ? Signed(prof, 2) : "-";
-         string v3 = had ? Signed(gTrkGainPct[r2], 2) + "%" : "-";
-         string v4 = had ? Fmt(dwr, 0) + "%" : "-";
-         string v5 = had ? "-" + Fmt(gTrkComm[r2], 2) : "-";
-
-         uint c4 = !had ? TTextDim : (dwr >= 50 ? TBull : TBear);
-         cx2 = tx;
-         Text(cx2 + SC(6), ry + SC(5), v0, isToday ? TText : TTextDim, 7,
-              "Segoe UI Semibold", SF_FW_SEMI);
-         cx2 += cW[0];
-         TextRight(cx2 + cW[1] - SC(6), ry + SC(5), v1, TText, 7, "Segoe UI Semibold", SF_FW_SEMI);
-         cx2 += cW[1];
-         TextRight(cx2 + cW[2] - SC(6), ry + SC(4), v2, pcol, 8, "Segoe UI Black", SF_FW_BLACK);
-         cx2 += cW[2];
-         TextRight(cx2 + cW[3] - SC(6), ry + SC(5), v3, pcol, 7, "Segoe UI Semibold", SF_FW_SEMI);
-         cx2 += cW[3];
-         TextRight(cx2 + cW[4] - SC(6), ry + SC(5), v4, c4, 7, "Segoe UI Semibold", SF_FW_SEMI);
-         cx2 += cW[4];
-         TextRight(cx2 + cW[5] - SC(6), ry + SC(5), v5, TWarn, 7, "Segoe UI Semibold", SF_FW_SEMI);
-         ry += rowH;
-        }
-
-      // ---- TOTAL row ----
-      SunkenWell(tx, ry + SC(2), tw, SC(19), SC(3), TBg);
-      cx2 = tx;
-      Text(cx2 + SC(6), ry + SC(6), "TOTAL", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-      cx2 += cW[0];
-      double sumLots = 0, sumComm = 0;
-      for(int a2 = 0; a2 < SF_TRACK_DAYS; a2++) { sumLots += gTrkLots[a2]; sumComm += gTrkComm[a2]; }
-      TextRight(cx2 + cW[1] - SC(6), ry + SC(6), Fmt(sumLots, 2), TText, 7, "Segoe UI Black", SF_FW_BLACK);
-      cx2 += cW[1];
-      TextRight(cx2 + cW[2] - SC(6), ry + SC(5), Signed(gStatNet, 2),
-                gStatNet >= 0 ? TBull : TBear, 8, "Segoe UI Black", SF_FW_BLACK);
-      cx2 += cW[2];
-      double totGain = (gTrkStartBal > 0) ? gStatNet / gTrkStartBal * 100.0 : 0;
-      TextRight(cx2 + cW[3] - SC(6), ry + SC(6), Signed(totGain, 2) + "%",
-                gStatNet >= 0 ? TBull : TBear, 7, "Segoe UI Black", SF_FW_BLACK);
-      cx2 += cW[3];
-      TextRight(cx2 + cW[4] - SC(6), ry + SC(6), Fmt(wr, 0) + "%",
-                wr >= 50 ? TBull : TBear, 7, "Segoe UI Black", SF_FW_BLACK);
-      cx2 += cW[4];
-      TextRight(cx2 + cW[5] - SC(6), ry + SC(6), "-" + Fmt(gStatCommission, 2), TWarn, 7,
-                "Segoe UI Black", SF_FW_BLACK);
-      y += tblH + SC(8);
-
-      //---------- FINAL P/L ----------
-      int flH = SC(46);
-      double gross = gStatNet + gStatCommission;
-      RaisedPlate(pad, y, innerW, flH, SC(8),
-                  gStatNet >= 0 ? TBullDeep : TBearDeep, gStatNet >= 0 ? TBull : TBear);
-      AccentSpine(pad + SC(4), y + SC(8), flH - SC(16), gStatNet >= 0 ? TBull : TBear);
-      Text(pad + SC(13), y + SC(6), "FINAL P/L  (NET OF COMMISSION)", TText, 7,
-           "Segoe UI Semibold", SF_FW_SEMI);
-      Text(pad + SC(13), y + SC(20), Signed(gStatNet, 2) + "  USD",
-           gStatNet >= 0 ? TBull : TBear, 15, "Segoe UI Black", SF_FW_BLACK);
-      TextRight(pad + innerW - SC(12), y + SC(8), "GROSS " + Signed(gross, 2), TTextDim, 7,
-                "Segoe UI Semibold", SF_FW_SEMI);
-      TextRight(pad + innerW - SC(12), y + SC(20), "FEES -" + Fmt(gStatCommission, 2), TWarn, 8,
-                "Segoe UI Black", SF_FW_BLACK);
-      TextRight(pad + innerW - SC(12), y + SC(32), "BAL " + Fmt(AccountBalance(), 2), TText, 7,
-                "Segoe UI Semibold", SF_FW_SEMI);
-      y += flH + SC(8);
-
-      //---------- equity sparkline ----------
-      int sparkH = H - y - SC(40);
-      if(sparkH >= SC(54))
-        {
-         RaisedPlate(pad, y, innerW, sparkH, SC(8), TPanel, TBorder);
-         AccentSpine(pad + SC(4), y + SC(7), SC(12), TAccent2);
-         Text(pad + SC(13), y + SC(6), "EQUITY CURVE", TText, 7, "Segoe UI Black", SF_FW_BLACK);
-         TextRight(pad + innerW - SC(10), y + SC(6),
-                   "TODAY " + Signed(gStatToday, 2) + "   WK " + Signed(gStatWeek, 2) +
-                   "   MO " + Signed(gStatMonth, 2), TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
-         SunkenWell(pad + SC(8), y + SC(21), innerW - SC(16), sparkH - SC(29), SC(4), TBg);
-         Sparkline(pad + SC(12), y + SC(25), innerW - SC(24), sparkH - SC(37),
-                   gStatNet >= 0 ? TBull : TBear, TGridC);
-         y += sparkH + SC(6);
-        }
-
-      DrawButton(pad, H - SC(34), innerW, SC(26), "BTN_PAUSE",
-                 gPaused ? "RESUME TRADING" : "PAUSE TRADING", gPaused, TFlat);
+   int hy2 = y + SC(26);
+   SunkenWell(tx, hy2, tw, hdrH, SC(3), TBg2);
+   int cx2 = tx;
+   for(int c = 0; c < 6; c++)
+     {
+      if(c == 0) TextVC(cx2 + SC(6), hy2, hdrH, cH[c], TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+      else TextRight(cx2 + cW[c] - SC(6), hy2 + SC(6), cH[c], TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+      cx2 += cW[c];
      }
 
-   gHud.Update();
+   int ry = hy2 + hdrH;
+   for(int r2 = 0; r2 < SF_TRACK_DAYS; r2++)
+     {
+      bool isToday = (r2 == 0);
+      uint rowBg = isToday ? TPanelHi : ((r2 % 2 == 0) ? TBg2 : TPanel);
+      RoundRect(tx, ry, tw, rowH - 1, SC(2), rowBg, rowBg, false);
+      if(isToday) AccentSpine(tx + 1, ry + SC(3), rowH - SC(7), TAccent);
+
+      double prof = gTrkProfit[r2];
+      uint pcol = (prof > 0) ? TBull : (prof < 0 ? TBear : TTextDim);
+      double dwr = (gTrkTrades[r2] > 0) ? 100.0 * gTrkWins[r2] / gTrkTrades[r2] : 0;
+      bool had = (gTrkTrades[r2] > 0);
+
+      string v0 = TimeToString(gTrkDate[r2], TIME_DATE);
+      // trim year for width: yyyy.mm.dd -> mm.dd
+      if(StringLen(v0) > 5) v0 = StringSubstr(v0, 5);
+      if(isToday) v0 = v0 + "  *";
+      string v1 = had ? Fmt(gTrkLots[r2], 2) : "-";
+      string v2 = had ? Signed(prof, 2) : "-";
+      string v3 = had ? Signed(gTrkGainPct[r2], 2) + "%" : "-";
+      string v4 = had ? Fmt(dwr, 0) + "%" : "-";
+      string v5 = had ? "-" + Fmt(gTrkComm[r2], 2) : "-";
+
+      uint c4 = !had ? TTextDim : (dwr >= 50 ? TBull : TBear);
+      cx2 = tx;
+      Text(cx2 + SC(6), ry + SC(5), v0, isToday ? TText : TTextDim, 7,
+           "Segoe UI Semibold", SF_FW_SEMI);
+      cx2 += cW[0];
+      TextRight(cx2 + cW[1] - SC(6), ry + SC(5), v1, TText, 7, "Segoe UI Semibold", SF_FW_SEMI);
+      cx2 += cW[1];
+      TextRight(cx2 + cW[2] - SC(6), ry + SC(4), v2, pcol, 8, "Segoe UI Black", SF_FW_BLACK);
+      cx2 += cW[2];
+      TextRight(cx2 + cW[3] - SC(6), ry + SC(5), v3, pcol, 7, "Segoe UI Semibold", SF_FW_SEMI);
+      cx2 += cW[3];
+      TextRight(cx2 + cW[4] - SC(6), ry + SC(5), v4, c4, 7, "Segoe UI Semibold", SF_FW_SEMI);
+      cx2 += cW[4];
+      TextRight(cx2 + cW[5] - SC(6), ry + SC(5), v5, TWarn, 7, "Segoe UI Semibold", SF_FW_SEMI);
+      ry += rowH;
+     }
+
+   // ---- TOTAL row ----
+   SunkenWell(tx, ry + SC(2), tw, SC(19), SC(3), TBg);
+   cx2 = tx;
+   Text(cx2 + SC(6), ry + SC(6), "TOTAL", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+   cx2 += cW[0];
+   double sumLots = 0, sumComm = 0;
+   for(int a2 = 0; a2 < SF_TRACK_DAYS; a2++) { sumLots += gTrkLots[a2]; sumComm += gTrkComm[a2]; }
+   TextRight(cx2 + cW[1] - SC(6), ry + SC(6), Fmt(sumLots, 2), TText, 7, "Segoe UI Black", SF_FW_BLACK);
+   cx2 += cW[1];
+   TextRight(cx2 + cW[2] - SC(6), ry + SC(5), Signed(gStatNet, 2),
+             gStatNet >= 0 ? TBull : TBear, 8, "Segoe UI Black", SF_FW_BLACK);
+   cx2 += cW[2];
+   double totGain = (gTrkStartBal > 0) ? gStatNet / gTrkStartBal * 100.0 : 0;
+   TextRight(cx2 + cW[3] - SC(6), ry + SC(6), Signed(totGain, 2) + "%",
+             gStatNet >= 0 ? TBull : TBear, 7, "Segoe UI Black", SF_FW_BLACK);
+   cx2 += cW[3];
+   TextRight(cx2 + cW[4] - SC(6), ry + SC(6), Fmt(wr, 0) + "%",
+             wr >= 50 ? TBull : TBear, 7, "Segoe UI Black", SF_FW_BLACK);
+   cx2 += cW[4];
+   TextRight(cx2 + cW[5] - SC(6), ry + SC(6), "-" + Fmt(gStatCommission, 2), TWarn, 7,
+             "Segoe UI Black", SF_FW_BLACK);
+   y += tblH + SC(8);
+
+   //---------- FINAL P/L ----------
+   int flH = SC(46);
+   double gross = gStatNet + gStatCommission;
+   RaisedPlate(pad, y, innerW, flH, SC(8),
+               gStatNet >= 0 ? TBullDeep : TBearDeep, gStatNet >= 0 ? TBull : TBear);
+   AccentSpine(pad + SC(4), y + SC(8), flH - SC(16), gStatNet >= 0 ? TBull : TBear);
+   Text(pad + SC(13), y + SC(6), "FINAL P/L  (NET OF COMMISSION)", TText, 7,
+        "Segoe UI Semibold", SF_FW_SEMI);
+   Text(pad + SC(13), y + SC(20), Signed(gStatNet, 2) + "  USD",
+        gStatNet >= 0 ? TBull : TBear, 15, "Segoe UI Black", SF_FW_BLACK);
+   TextRight(pad + innerW - SC(12), y + SC(8), "GROSS " + Signed(gross, 2), TTextDim, 7,
+             "Segoe UI Semibold", SF_FW_SEMI);
+   TextRight(pad + innerW - SC(12), y + SC(20), "FEES -" + Fmt(gStatCommission, 2), TWarn, 8,
+             "Segoe UI Black", SF_FW_BLACK);
+   TextRight(pad + innerW - SC(12), y + SC(32), "BAL " + Fmt(AccountBalance(), 2), TText, 7,
+             "Segoe UI Semibold", SF_FW_SEMI);
+   y += flH + SC(8);
+
+   //---------- equity sparkline ----------
+   int sparkH = H - y - SC(40);
+   if(sparkH >= SC(54))
+     {
+      RaisedPlate(pad, y, innerW, sparkH, SC(8), TPanel, TBorder);
+      AccentSpine(pad + SC(4), y + SC(7), SC(12), TAccent2);
+      Text(pad + SC(13), y + SC(6), "EQUITY CURVE", TText, 7, "Segoe UI Black", SF_FW_BLACK);
+      TextRight(pad + innerW - SC(10), y + SC(6),
+                "TODAY " + Signed(gStatToday, 2) + "   WK " + Signed(gStatWeek, 2) +
+                "   MO " + Signed(gStatMonth, 2), TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
+      SunkenWell(pad + SC(8), y + SC(21), innerW - SC(16), sparkH - SC(29), SC(4), TBg);
+      Sparkline(pad + SC(12), y + SC(25), innerW - SC(24), sparkH - SC(37),
+                gStatNet >= 0 ? TBull : TBear, TGridC);
+      y += sparkH + SC(6);
+     }
+
+   // distinct id from the HUD's pause button, otherwise both would light up
+   // together on hover (HitButton returns the first match)
+   DrawButton(pad, H - SC(34), innerW, SC(26), "TRK_PAUSE",
+              gPaused ? "RESUME TRADING" : "PAUSE TRADING", gPaused, TFlat);
+   gCv.Update();
+  }
+
+// Repaint both panels in the right order: PaintHud() clears the shared button
+// registry, so the tracker must register its own buttons afterwards.
+void PaintAll()
+  {
+   PaintHud();
+   PaintTracker();
   }
 
 //==================================================================//
@@ -2026,13 +2222,17 @@ void BuildSTSeries(int maxShift, double &line[], int &dir[])
      }
   }
 
+// Plots the filters the user has switched ON for the chart. This is driven by
+// gDrawFilter[], NOT gEnabled[]: an indicator can vote without being drawn,
+// and can be drawn without voting.
 void DrawOverlay()
   {
    ObjectsDeleteAll(0, PFX + "OV_");
+   gOverlayDirty = false;
    if(!DrawIndicatorOverlay) return;
    int bars = MathMax(10, MathMin(OverlayBars, Bars - 5));
 
-   if(gEnabled[0])   // SMA cross
+   if(gDrawFilter[0])   // SMA cross
       for(int s = bars; s >= 1; s--)
         {
          PlotSegment(0,0,s, iMA(NULL,0,SMAFastLength,0,MODE_SMA,PRICE_CLOSE,s+1),
@@ -2041,7 +2241,7 @@ void DrawOverlay()
                             iMA(NULL,0,SMASlowLength,0,MODE_SMA,PRICE_CLOSE,s), C'170,130,255', 1);
         }
 
-   if(gEnabled[3])   // Supertrend - one pass
+   if(gDrawFilter[3])   // Supertrend - one pass
      {
       double stl[]; int std[];
       BuildSTSeries(bars, stl, std);
@@ -2050,12 +2250,12 @@ void DrawOverlay()
             PlotSegment(3,0,s, stl[s+1], stl[s], std[s] == -1 ? C'0,230,160' : C'255,70,102', 2);
      }
 
-   if(gEnabled[5])   // Bollinger midline
+   if(gDrawFilter[5])   // Bollinger midline
       for(int s = bars; s >= 1; s--)
          PlotSegment(5,0,s, iMA(NULL,0,BollingerLength,0,MODE_SMA,PRICE_CLOSE,s+1),
                             iMA(NULL,0,BollingerLength,0,MODE_SMA,PRICE_CLOSE,s), C'255,206,84', 1);
 
-   if(gEnabled[6])   // EMA pair
+   if(gDrawFilter[6])   // EMA pair
       for(int s = bars; s >= 1; s--)
         {
          PlotSegment(6,0,s, iMA(NULL,0,EMAFastLength,0,MODE_EMA,PRICE_CLOSE,s+1),
@@ -2064,7 +2264,7 @@ void DrawOverlay()
                             iMA(NULL,0,EMASlowLength,0,MODE_EMA,PRICE_CLOSE,s), C'150,100,255', 1);
         }
 
-   if(gEnabled[8])   // Parabolic SAR
+   if(gDrawFilter[8])   // Parabolic SAR
       for(int s = bars; s >= 1; s--)
          PlotSegment(8,0,s, iSAR(NULL,0,SARStep,SARMaximum,s+1),
                             iSAR(NULL,0,SARStep,SARMaximum,s), C'90,120,180', 1);
@@ -2200,6 +2400,20 @@ void HudScreenRect(int &x1, int &y1, int &x2, int &y2)
    y2 = HudMargin + gHudH;
   }
 
+// The standalone tracker is a second no-go zone for result cards. It hugs the
+// TOP-RIGHT corner, so its left edge is measured back from the chart width.
+void TrackerScreenRect(int &x1, int &y1, int &x2, int &y2)
+  {
+   x1 = 0; y1 = 0; x2 = 0; y2 = 0;
+   if(!ShowHUD || !ShowTrackerPanel || !gTrkReady) return;
+   long chartW = 0;
+   ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0, chartW);
+   x2 = (int)chartW - HudMargin;
+   x1 = x2 - gTrkW;
+   y1 = HudMargin;
+   y2 = HudMargin + gTrkH;
+  }
+
 // --- find a vertical slot for a card whose x-span is [cx, cx+cw] so that
 //     it clears every candle in that span, plus any card already placed ---
 int FreeLaneY(int cx, int cw, int ch, int anchorY, bool preferAbove,
@@ -2243,6 +2457,9 @@ int FreeLaneY(int cx, int cw, int ch, int anchorY, bool preferAbove,
    int hx1 = 0, hy1 = 0, hx2 = 0, hy2 = 0;
    HudScreenRect(hx1, hy1, hx2, hy2);
    bool hudOverlapsX = (hx2 > hx1) && (cx < hx2 + sep) && (cx + cw > hx1 - sep);
+   int tx1 = 0, ty1 = 0, tx2 = 0, ty2 = 0;
+   TrackerScreenRect(tx1, ty1, tx2, ty2);
+   bool trkOverlapsX = (tx2 > tx1) && (cx < tx2 + sep) && (cx + cw > tx1 - sep);
 
    // Side preference (BUY above / SELL below) is a SOFT constraint: if the
    // preferred side is blocked by the panel, a card or the window edge we
@@ -2272,6 +2489,11 @@ int FreeLaneY(int cx, int cw, int ch, int anchorY, bool preferAbove,
             y = up ? (hy1 - sep - ch) : (hy2 + sep);
             clash = true;
            }
+         else if(trkOverlapsX && y < ty2 + sep && y + ch > ty1 - sep)
+           {
+            y = up ? (ty1 - sep - ch) : (ty2 + sep);
+            clash = true;
+           }
 
          if(!clash)
             for(int k = 0; k < occN; k++)
@@ -2298,6 +2520,7 @@ int FreeLaneY(int cx, int cw, int ch, int anchorY, bool preferAbove,
      {
       bool clash = false;
       if(hudOverlapsX && y2 < hy2 + sep && y2 + ch > hy1 - sep) clash = true;
+      if(trkOverlapsX && y2 < ty2 + sep && y2 + ch > ty1 - sep) clash = true;
       if(!clash)
          for(int k = 0; k < occN; k++)
             if(cx < oX2[k] + sep && cx + cw > oX1[k] - sep &&
@@ -2326,11 +2549,15 @@ int ForcedLaneY(int cx, int cw, int ch, int anchorY, bool preferAbove,
    int hx1 = 0, hy1 = 0, hx2 = 0, hy2 = 0;
    HudScreenRect(hx1, hy1, hx2, hy2);
    bool hudX = (hx2 > hx1) && (cx < hx2) && (cx + cw > hx1);
+   int tx1 = 0, ty1 = 0, tx2 = 0, ty2 = 0;
+   TrackerScreenRect(tx1, ty1, tx2, ty2);
+   bool trkX = (tx2 > tx1) && (cx < tx2) && (cx + cw > tx1);
 
    // first slot that at least clears the panel and hard-overlaps nothing
    for(int y3 = 4; y3 + ch <= (int)chH - 4; y3 += 6)
      {
       if(hudX && y3 < hy2 + 2 && y3 + ch > hy1 - 2) continue;
+      if(trkX && y3 < ty2 + 2 && y3 + ch > ty1 - 2) continue;
       bool hard = false;
       for(int k = 0; k < occN; k++)
          if(cx < oX2[k] && cx + cw > oX1[k] && y3 < oY2[k] && y3 + ch > oY1[k])
@@ -2475,14 +2702,28 @@ void DrawClosedTradeCards(int &oX1[], int &oY1[], int &oX2[], int &oY2[], int &o
       // HORIZONTALLY. Sliding it vertically instead would force it into the
       // thin strip above/below a tall panel, where only one card fits - which
       // is what used to make cards pile up on each other next to the HUD.
+      // Clear the panel's x-band by the FULL separation, not sepX. FreeLaneY()
+      // tests that band inflated by `sep`, so dodging by only sepX left the
+      // card still "inside" the band and it got shoved below the panel.
       int hx1 = 0, hy1 = 0, hx2 = 0, hy2 = 0;
       HudScreenRect(hx1, hy1, hx2, hy2);
-      if(hx2 > hx1 && x < hx2 + sepX && x + w > hx1 - sepX)
+      if(hx2 > hx1 && x < hx2 + sep && x + w > hx1 - sep)
         {
-         int altR = hx2 + sepX;                 // just right of the panel
-         int altL = hx1 - sepX - w;             // just left of the panel
+         int altR = hx2 + sep;                  // just right of the panel
+         int altL = hx1 - sep - w;              // just left of the panel
          if(altR + w <= (int)chW - SC(4))      x = altR;
          else if(altL >= 2)                    x = altL;
+        }
+
+      // same dodge for the top-right tracker; prefer sliding LEFT of it
+      // because there is no room between it and the right window edge.
+      int tx1 = 0, ty1 = 0, tx2 = 0, ty2 = 0;
+      TrackerScreenRect(tx1, ty1, tx2, ty2);
+      if(tx2 > tx1 && x < tx2 + sep && x + w > tx1 - sep)
+        {
+         int tAltL = tx1 - sep - w;
+         if(tAltL >= 2 && !(hx2 > hx1 && tAltL < hx2 + sep && tAltL + w > hx1 - sep))
+            x = tAltL;
         }
 
       // Cards that still share a column get staggered sideways so the
@@ -2644,6 +2885,7 @@ bool MayOpenNewTrade(string &why)
 //==================================================================//
 //              F I L T E R   R E G I S T R Y                       //
 //==================================================================//
+
 // The 11 original filters, in the exact index order GetConditions() writes.
 // Index 3 is Supertrend - the only one enabled by default, which is what
 // makes the shipped configuration the original Supertrend strategy.
@@ -2672,6 +2914,39 @@ void LoadFilterConfig()
    gEnabled[8]  = EnableSAR;
    gEnabled[9]  = EnableCCI;
    gEnabled[10] = EnableADX;
+
+   //--- which filters start visible on the chart -------------------
+   // "" = none, "all" = every one, otherwise a CSV of indices e.g. "0,3,6".
+   // Only indicators that HAVE a chart representation can be drawn; the
+   // oscillators (RSI, MACD, Stoch, AO, CCI, ADX) live in a sub-window we do
+   // not own, so they are never plotted and their button reads "--".
+   for(int d = 0; d < SF_FILTERS; d++) gDrawFilter[d] = false;
+
+   string spec = OverlayFilters;
+   StringTrimLeft(spec); StringTrimRight(spec);
+   string low = spec;
+   StringToLower(low);
+   if(low == "all")
+     {
+      for(int d2 = 0; d2 < SF_FILTERS; d2++) gDrawFilter[d2] = FilterHasOverlay(d2);
+     }
+   else if(StringLen(spec) > 0)
+     {
+      int cur = 0;
+      for(int c = 0; c <= StringLen(spec); c++)
+        {
+         // parse one CSV field at a time without allocating substrings
+         int ch = (c < StringLen(spec)) ? StringGetChar(spec, c) : ',';
+         if(ch >= '0' && ch <= '9') { cur = cur * 10 + (ch - '0'); continue; }
+         if(ch == ',')
+           {
+            if(cur >= 0 && cur < SF_FILTERS && FilterHasOverlay(cur))
+               gDrawFilter[cur] = true;
+            cur = 0;
+           }
+        }
+     }
+   gOverlayDirty = true;
   }
 
 //==================================================================//
@@ -2703,10 +2978,35 @@ int OnInit()
       Print("[SF-PRO] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("SF-PRO v2.06 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("SF-PRO v2.07 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
    gLastBar = 0;
+
+   // Paint the chart NOW. DrawOverlay() used to be reachable only from the
+   // new-bar branch of OnTick(), so on a live M5 chart the indicators did not
+   // appear for up to five minutes - while in the tester bars complete every
+   // few seconds, which is why they looked fine there and missing live.
+   if(!IsTesting() || IsVisualMode())
+     {
+      if(Bars > 100)
+        {
+         BuildHistoricalOrbs();
+         DrawOverlay();
+         DrawTradeLevelLines();
+         DrawResultPills();
+        }
+      PaintAll();
+      ChartRedraw(0);
+     }
    return INIT_SUCCEEDED;
+  }
+
+// new-allocated canvases must be deleted explicitly or MT4 logs a leak
+void FreeCanvases()
+  {
+   gCv = NULL;
+   if(gHud != NULL) { delete gHud; gHud = NULL; }
+   if(gTrk != NULL) { delete gTrk; gTrk = NULL; }
   }
 
 void OnDeinit(const int reason)
@@ -2716,10 +3016,14 @@ void OnDeinit(const int reason)
      {
       // Canvas dies with the EA; leave the chart objects for review.
       DestroyHud();
+      DestroyTracker();
+      FreeCanvases();
       ChartRedraw(0);
       return;
      }
    DestroyHud();
+   DestroyTracker();
+   FreeCanvases();
    ObjectsDeleteAll(0, PFX);
    if(gBuyOrb  != "") ResourceFree(gBuyOrb);
    if(gSellOrb != "") ResourceFree(gSellOrb);
@@ -2733,9 +3037,12 @@ void OnTimer()
   {
    RollDailyCounters();
    TrackClosedTrades();
+   // A DRAW toggle (or a fresh OnInit) marks the overlay dirty; repaint it
+   // here so the chart reacts instantly instead of waiting for a new bar.
+   if(gOverlayDirty) DrawOverlay();
    DrawTradeLevelLines();
    DrawResultPills();
-   PaintHud();
+   PaintAll();
    ChartRedraw(0);
   }
 
@@ -2743,12 +3050,27 @@ void HandleHudAction(string hit)
   {
    if(hit == "") return;
 
+   // per-filter chart overlay toggles: "DRAW_<index>"
+   if(StringSubstr(hit, 0, 5) == "DRAW_")
+     {
+      int fi = (int)StringToInteger(StringSubstr(hit, 5));
+      if(fi >= 0 && fi < SF_FILTERS && FilterHasOverlay(fi))
+        {
+         gDrawFilter[fi] = !gDrawFilter[fi];
+         DrawOverlay();                       // instant feedback
+         Journal((gDrawFilter[fi] ? "DRAW ON  " : "DRAW OFF ") + gFilterName[fi]);
+        }
+      PaintAll();
+      ChartRedraw(0);
+      return;
+     }
+
    if(hit == "BTN_COLLAPSE") gHudCollapsed = !gHudCollapsed;
    else if(hit == "TAB_CORE")    gHudPage = 0;
    else if(hit == "TAB_FILTERS") gHudPage = 1;
-   else if(hit == "TAB_LOG")     gHudPage = 2;
+   else if(hit == "TRK_COLLAPSE") gTrkCollapsed = !gTrkCollapsed;
    else if(hit == "BTN_VIEW")    gShowAllFilters = !gShowAllFilters;
-   else if(hit == "BTN_PAUSE")
+   else if(hit == "BTN_PAUSE" || hit == "TRK_PAUSE")
      {
       gPaused = !gPaused;
       Journal(gPaused ? "MANUAL PAUSE" : "MANUAL RESUME");
@@ -2761,10 +3083,16 @@ void HandleHudAction(string hit)
      }
    else if(hit == "BTN_THEME")
      {
+      // master toggle: if anything is drawn, clear it all; otherwise restore
+      // every filter that has a chart representation.
+      bool any = false;
+      for(int q = 0; q < SF_FILTERS; q++) if(gDrawFilter[q]) { any = true; break; }
+      for(int q2 = 0; q2 < SF_FILTERS; q2++)
+         gDrawFilter[q2] = any ? false : FilterHasOverlay(q2);
       DrawOverlay();
-      Journal("OVERLAY REDRAWN");
+      Journal(any ? "ALL OVERLAYS OFF" : "ALL OVERLAYS ON");
      }
-   PaintHud();
+   PaintAll();
    ChartRedraw(0);
   }
 
@@ -2777,7 +3105,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
      {
       gMouseX = (int)lparam; gMouseY = (int)dparam;
       string h = HitButton(gMouseX, gMouseY);
-      if(h != gHoverId) { gHoverId = h; PaintHud(); ChartRedraw(0); }
+      if(h != gHoverId) { gHoverId = h; PaintAll(); ChartRedraw(0); }
       return;
      }
 
@@ -2795,7 +3123,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       if(lparam == 'P') { gPaused = !gPaused; Journal(gPaused ? "HOTKEY PAUSE" : "HOTKEY RESUME"); }
       if(lparam == 'H') gHudCollapsed = !gHudCollapsed;
       if(lparam == 'C') CloseAllOwn("HOTKEY CLOSE ALL");
-      PaintHud(); ChartRedraw(0);
+      PaintAll(); ChartRedraw(0);
      }
 
    if(id == CHARTEVENT_CHART_CHANGE)
@@ -2805,7 +3133,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       gCardsDirty = true;
       DrawResultPills();
       DrawTradeLevelLines();
-      PaintHud();
+      PaintAll();
      }
   }
 
@@ -2830,8 +3158,11 @@ void OnTick()
       if(graphics)
         {
          uint tnow = GetTickCount();
+         // EventSetMillisecondTimer is not armed in the tester, so the
+         // intrabar path must also service a dirty overlay.
+         if(gOverlayDirty) DrawOverlay();
          if(tnow - gLastHudPaint >= (uint)MathMax(100, HudRefreshMs))
-           { DrawTradeLevelLines(); DrawResultPills(); PaintHud(); gLastHudPaint = tnow; }
+           { DrawTradeLevelLines(); DrawResultPills(); PaintAll(); gLastHudPaint = tnow; }
         }
       return;
      }
@@ -2898,7 +3229,7 @@ void OnTick()
      {
       DrawTradeLevelLines();
       DrawResultPills();
-      PaintHud();
+      PaintAll();
       ChartRedraw(0);
      }
   }

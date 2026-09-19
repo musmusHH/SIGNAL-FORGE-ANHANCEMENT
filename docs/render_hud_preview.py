@@ -125,8 +125,8 @@ def draw_header_text(p):
     p.TC(colX+colW//2,hy+SC(6),"-",TAccent,8,1,"col")
 
 def tabs_row(p,y,active):
-    pad=SC(12); innerW=W-pad*2; tabW=(innerW-SC(16))//3
-    for i,l in enumerate(["CORE","FILTERS","TRACKER"]):
+    pad=SC(12); innerW=W-pad*2; tabW=(innerW-SC(8))//2
+    for i,l in enumerate(["CORE","FILTERS"]):
         bx=pad+(tabW+SC(8))*i; a=(i==active)
         p.raised(bx,y,tabW,SC(24),SC(5),TAccent if a else TPanel,TAccent if a else TBorder,True,1)
     return pad,innerW,tabW
@@ -167,7 +167,7 @@ by=Hc-SC(34); bw=(innerW-SC(16))//3
 for i,(l,c) in enumerate([("PAUSE",TFlat),("CLOSE ALL",TBear),("OVERLAY",TAccent2)]):
     p.raised(pad+(bw+SC(8))*i,by,bw,SC(26),SC(5),TPanel,c,True,1)
 p.finish(); draw_header_text(p); chip_text()
-for i,l in enumerate(["CORE","FILTERS","TRACKER"]):
+for i,l in enumerate(["CORE","FILTERS"]):
     bx=pad+(tabW+SC(8))*i
     p.TC(bx+tabW//2,headerH+SC(6)+SC(5),l,(6,10,18) if i==0 else TText,8,1,f"tab{i}")
 p.T(pad+SC(13),gy+SC(6),"FILTER AGREEMENT",TText,8,1,"la","g1")
@@ -206,6 +206,10 @@ q.sunk(pad,y,innerW,SC(26),SC(6),TBg2); hdry=y; y+=SC(30)
 NAMES=["SMA CROSS","RSI","MACD","SUPERTREND","STOCHASTIC","BOLLINGER MID","EMA CROSS","AWESOME OSC"]
 WTS=[1,1,1,1,1,1,1,1]   # v1: every enabled filter is one equal vote
 BIAS=["BULLISH","FLAT","BULLISH","BEARISH","FLAT","BULLISH","BEARISH","FLAT"]
+# FilterHasOverlay(): only these indices can be plotted on the price chart
+HASOV=[True,False,False,True,False,True,True,False]
+DRAWN=[False,False,False,True,False,False,False,False]   # OverlayFilters="3"
+tSz=SC(15); tXoff=SC(120)
 rowH=SC(frowH); rows=[]
 for i,n in enumerate(NAMES):
     if y+rowH > Hf-SC(46): break
@@ -218,27 +222,41 @@ for i,n in enumerate(NAMES):
     st=BIAS[i]
     bg={"FLAT":TGreyDeep,"BULLISH":TBullDeep,"BEARISH":TBearDeep}[st]
     ed={"FLAT":TLite,"BULLISH":TBull,"BEARISH":TBear}[st]
+    tY=y+(cellH-tSz)//2
+    if HASOV[i]:
+        tf=TAccent if DRAWN[i] else TGridC
+        te=TAccent if DRAWN[i] else TBorder
+    else:
+        tf,te=TBg2,TBorder
+    q.raised(pad+tXoff,tY,tSz,tSz,SC(3),tf,te,True,1)
     q.raised(pad+SC(biasX),bY,SC(biasW),bH,SC(3),bg,ed,True,1)
     # EA: 1.0 when the filter sides with the live signal, 0.55 when it has a
     # bias that disagrees, 0.12 when flat. Preview signal here is BEARISH.
     norm={"BEARISH":1.0,"BULLISH":0.55,"FLAT":0.12}[BIAS[i]]
     strong={"FLAT":TFlat,"BULLISH":TBull,"BEARISH":TBear}[st]
     q.meter_graded(pad+SC(248),y+(cellH-SC(7))//2,innerW-SC(260),SC(7),norm,strong)
-    rows.append((y,n,WTS[i],st,bY,bH)); y+=rowH
+    rows.append((y,n,WTS[i],st,bY,bH,tY)); y+=rowH
 fy=Hf-SC(40); bw2=(innerW-SC(8))//2
 q.raised(pad,fy,bw2,SC(26),SC(5),TPanel,TAccent,True,1)
 q.raised(pad+bw2+SC(8),fy,bw2,SC(26),SC(5),TPanel,TFlat,True,1)
 q.finish(); draw_header_text(q)
-for i,l in enumerate(["CORE","FILTERS","TRACKER"]):
+for i,l in enumerate(["CORE","FILTERS"]):
     bx=pad+(tabW+SC(8))*i
     q.TC(bx+tabW//2,headerH+SC(6)+SC(5),l,(6,10,18) if i==1 else TText,8,1,f"tab{i}")
 q.T(pad+SC(10),hdry+SC(8),"FILTER",TAccent,7,1,"la","h0")
+q.T(pad+SC(100),hdry+SC(8),"DRAW",TAccent,7,1,"la","hD")
 q.T(pad+SC(biasX),hdry+SC(8),"BIAS",TAccent,7,1,"la","h1")
 q.T(pad+SC(212),hdry+SC(8),"VOTE",TAccent,7,1,"la","h2")
 q.TR(pad+innerW-SC(10),hdry+SC(9),"AGREEMENT",TAccent,7,1,"h3")
-for i,(ry2,n,w,st,bY,bH) in enumerate(rows):
+for i,(ry2,n,w,st,bY,bH,tY) in enumerate(rows):
     cellH=rowH-SC(3)
     q.TVC(pad+SC(22),ry2,cellH,n,TText,7,1,f"n{i}")
+    if HASOV[i]:
+        gl="O" if DRAWN[i] else "-"
+        gc=(6,10,18) if DRAWN[i] else TTextDim
+    else:
+        gl,gc="-",TTextDim
+    q.TCVC(pad+tXoff+tSz//2,tY,tSz,gl,gc,7,1,f"tg{i}")
     q.TCVC(pad+SC(biasX)+SC(biasW)//2,bY,bH,st,(255,255,255),7,1,f"bi{i}")
     q.TVC(pad+SC(216),ry2,cellH,f"{100.0/len(rows):.0f}%",TText,7,1,f"w{i}")
 q.TC(pad+bw2//2,fy+SC(6),"ACTIVE ONLY",TText,8,1,"f1")

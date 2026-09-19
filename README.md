@@ -1,4 +1,4 @@
-# Signal Forge PRO — XAUUSD M5 EA (v2.06)
+# Signal Forge PRO — XAUUSD M5 EA (v2.07)
 
 > **v2.05 — the ORIGINAL v1 trading strategy has been restored.**
 > The trading engine is now exactly the v1 engine. The entire v2 risk layer
@@ -572,3 +572,119 @@ candles and 15 anchors, then reports the three hard invariants on the image
 itself. Note the 3 "wrong side" cards: with a 656 px panel on an 800 px chart
 only 8 px remain above it, so a card in that column is *forced* below — the soft
 constraint yielding to the hard ones, as designed.
+
+---
+
+## v2.07 — live-chart overlay, per-filter plots, standalone tracker
+
+Three issues reported against v2.06.
+
+### 1. Indicators drew in the Strategy Tester but were invisible on a live chart
+
+**Root cause.** `DrawOverlay()` was only ever called from *inside* the new-bar
+branch of `OnTick()`:
+
+```
+if(Time[0] == gLastBar) { ...intrabar work...; return; }   // <-- returns here
+gLastBar = Time[0];
+...
+if(graphics) { BuildHistoricalOrbs(); DrawOverlay(); }     // <-- only here
+```
+
+In the Strategy Tester a bar completes every few seconds, so the overlay
+appeared instantly and looked correct. On a live **M5** chart that branch runs
+once every **five minutes** — and never at all during `OnInit` — so after
+attaching the EA the chart stayed bare. Nothing was wrong with the plotting
+code itself; it simply was not being reached.
+
+**Fix.**
+* `OnInit()` now paints the chart immediately (overlay, orbs, level lines,
+  cards, HUD) instead of waiting for a bar close.
+* A new `gOverlayDirty` flag is serviced by `OnTimer()`, so any change
+  repaints within one HUD refresh (~220 ms).
+* The intrabar path of `OnTick()` services it too, because
+  `EventSetMillisecondTimer` is **not armed in the tester**.
+
+### 2. Per-indicator visibility control
+
+Each filter row on the **FILTERS** page now carries a small **DRAW** toggle,
+positioned between the filter name and the BIAS card, that adds or removes
+just that indicator's plot:
+
+| state | glyph | meaning |
+|---|---|---|
+| lit (cyan) | `O` | drawn on the chart |
+| dark | `-` | available, currently hidden |
+| flat grey | `-` | no chart representation — not clickable |
+
+Visibility is driven by a **new** `gDrawFilter[]` array, deliberately
+independent of `gEnabled[]`: an indicator can vote **without** cluttering the
+chart, or be drawn **without** voting.
+
+Only the five filters that have a price-chart representation can be plotted
+(`FilterHasOverlay()`): **SMA CROSS, SUPERTREND, BOLLINGER MID, EMA CROSS,
+PARABOLIC SAR**. The oscillators (RSI, MACD, Stochastic, Awesome, CCI, ADX/DI)
+are read from buffers belonging in a separate sub-window, so there is nothing
+meaningful to draw over the candles — their toggle shows `-` and is inert.
+
+New input `OverlayFilters` seeds the startup state — a CSV of indices
+(default `"3"` = Supertrend only), `"all"`, or `""` for none. The header
+button also acts as a master all-on / all-off.
+
+### 3. Tracker separated into its own panel
+
+The performance tracker is no longer a tab. It is now a **standalone solid
+raised panel pinned to the top-right corner**, so the running P/L and the
+signal engine are readable at the same time. The HUD tab bar drops from three
+tabs to two (**CORE**, **FILTERS**), each now wider.
+
+All required fields are retained: **DATE, LOT, PROFIT, GAIN%, WINRATE,
+COMMISSION, FINAL P/L**, plus the KPI strip and equity curve. It has its own
+collapse button and pause button, and new inputs `ShowTrackerPanel`,
+`TrackerWidthPx` (430), `TrackerHeightPx` (660).
+
+**Implementation.** Both panels are `CCanvas` **pointers**, and every drawing
+primitive writes to `gCv`, the current target, so one set of primitives serves
+both. `RegisterButton` converts canvas-local coordinates to chart pixels via
+the active panel origin (`gCvOx/gCvOy`), which keeps hit-testing correct for
+the right-hand panel. `PaintAll()` repaints the HUD first — it owns the shared
+button registry — then the tracker.
+
+The button array was resized **16 → 40**: 11 filter rows could otherwise
+overflow it. Worst case is now 12 registered buttons.
+
+### Result cards treat the tracker as a second obstacle
+
+`TrackerScreenRect()` joins `HudScreenRect()` in `FreeLaneY()`,
+`ForcedLaneY()` and the caller's dodge, so no card lands on either panel.
+
+Fixing this exposed a **latent bug in v2.06**: the horizontal dodge cleared a
+panel by `sepX` (20 px) while `FreeLaneY()` tested that band inflated by the
+full `sep` (40 px). Cards therefore dodged sideways and were *still* judged to
+be in the band, and got shoved below the panel — which is why a BUY card could
+appear below price. Both now use `sep`.
+
+### Verification
+
+```
+brace / paren / bracket balance ........ 0 / 0 / 0
+duplicate function definitions ......... none
+used-before-defined (MQL4 is top-down) . none
+inputs ................................. 92, all read
+presets ................................ 3 files x 92 keys, no missing/extra
+render_hud_preview ..................... 0 text overlaps, 0 corner artefacts
+render_tracker_preview ................. 0 overlaps, fits 652/660 px
+render_chart_cards ..................... no card/candle or card/card overlap
+verify_card_layout ..................... ALL PLACEMENT INVARIANTS HOLD
+render_two_panel_proof ................. 0 cards on either panel, 0 tight pairs
+```
+
+![two-panel proof](docs/two_panel_proof.png)
+
+`docs/render_two_panel_proof.py` is new: it renders both panels over synthetic
+candles, drives the **real** allocator, and exits non-zero if any card lands on
+a panel, breaches the 40 px separation, or leaves the window.
+
+> **Still unverified:** there is no MQL4 compiler in this environment. The
+> structural audits above are static analysis, not a build.
+
