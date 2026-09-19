@@ -16,16 +16,20 @@ headerH = grab(r'int headerH = SC\((\d+)\);', 54)
 Hc      = grab(r'int pageH = SC\((\d+)\);\s*// CORE', 652)
 Hf      = grab(r'if\(gHudPage == 1\) pageH = SC\((\d+)\);', 500)
 gaugeH  = grab(r'int gaugeH = SC\((\d+)\);', 126)
+frowH   = grab(r'int rowH = SC\((\d+)\);\s*\n\s*for\(int i = 0; i < SF_FILTERS', 27)
+biasW   = grab(r'int bW = SC\((\d+)\), bH', 62)
+biasH   = grab(r'int bW = SC\(\d+\), bH = SC\((\d+)\);', 17)
+biasX   = grab(r'int bX = pad \+ SC\((\d+)\)', 142)
 costH   = grab(r'int costH = SC\((\d+)\);', 92)
 riskH   = grab(r'int riskH = SC\((\d+)\);', 112)
 tkH     = grab(r'int tkH = SC\((\d+)\);', 74)
-print(f"from source: W={W} core={Hc} filters={Hf} gauge={gaugeH} cost={costH} risk={riskH} tk={tkH}")
+print(f"from source: W={W} core={Hc} filters={Hf} frowH={frowH} bias={biasW}x{biasH}@{biasX}")
 
 TBg=(12,18,34);TBg2=(20,30,54);TPanel=(28,40,72);TPanelHi=(40,56,98)
 TBorder=(86,116,190);TAccent=(0,245,255);TAccent2=(178,110,255)
 TText=(240,248,255);TTextDim=(158,180,220);TBull=(0,255,170);TBear=(255,60,110)
 TFlat=(255,215,70);TWarn=(255,160,50);TGridC=(58,80,132)
-TLite=(110,146,225);TDark=(5,8,16)
+TLite=(110,146,225);TDark=(5,8,16);TBullDeep=(0,104,74);TBearDeep=(128,20,50);TGreyDeep=(86,92,104)
 def SC(v): return v
 DJ="/usr/share/fonts/truetype/dejavu/DejaVuSans%s.ttf"
 def F(sz,b=0):
@@ -57,6 +61,11 @@ class Page:
     def dot(self,x,y,r,on,onC,offC):
         self.cv.FillCircle(x+self.OX,y+self.OY,r,onC if on else offC)
         self.cv.Circle(x+self.OX,y+self.OY,r+1,onC if on else TGridC)
+    def meter_graded(self,x,y,w,h,v,strong):
+        def mix(a,b,t):
+            t=max(0.0,min(1.0,t)); return tuple(int(a[k]+(b[k]-a[k])*t) for k in range(3))
+        c = mix(TWarn,TAccent,v/0.5) if v<0.5 else mix(TAccent,strong,(v-0.5)/0.5)
+        self.meter(x,y,w,h,v,c)
     def meter(self,x,y,w,h,v,fc):
         self.sunk(x,y,w,h,h//2,TBg)
         fw=int(max(0.0,min(1.0,v))*(w-2))
@@ -67,6 +76,12 @@ class Page:
         f=F(int(sz*1.45),b); self.d.text((x+self.OX,y+self.OY),s,fill=c,font=f,anchor=anchor)
         if tag: self.spans.append((tag,self.d.textbbox((x+self.OX,y+self.OY),s,font=f,anchor=anchor)))
     def TR(self,x,y,s,c,sz=8,b=0,tag=None): self.T(x,y,s,c,sz,b,"ra",tag)
+    def TVC(self,x,y,h,s,c,sz=8,b=0,tag=None):
+        f=F(int(sz*1.45),b); bb=self.d.textbbox((0,0),s,font=f)
+        self.T(x,y+(h-(bb[3]-bb[1]))//2-bb[1],s,c,sz,b,"la",tag)
+    def TCVC(self,cx,y,h,s,c,sz=8,b=0,tag=None):
+        f=F(int(sz*1.45),b); bb=self.d.textbbox((0,0),s,font=f)
+        self.T(cx,y+(h-(bb[3]-bb[1]))//2-bb[1],s,c,sz,b,"ma",tag)
     def TC(self,x,y,s,c,sz=8,b=0,tag=None): self.T(x,y,s,c,sz,b,"ma",tag)
     def check(self,label):
         def ov(a,b): return not(a[2]<=b[0] or b[2]<=a[0] or a[3]<=b[1] or b[3]<=a[1])
@@ -184,16 +199,24 @@ y=headerH+SC(6)+SC(32)
 q.sunk(pad,y,innerW,SC(26),SC(6),TBg2); hdry=y; y+=SC(30)
 NAMES=["RSI","MACD","SUPERTREND","EMA CROSS","ADX / DI","HTF BIAS","STRUCTURE","VWAP"]
 WTS=[1.5,1.5,3.0,2.0,2.0,2.5,2.0,1.5]
-rowH=SC(25); rows=[]
+BIAS=["BULLISH","FLAT","BULLISH","BEARISH","FLAT","BULLISH","BEARISH","FLAT"]
+rowH=SC(frowH); rows=[]
 for i,n in enumerate(NAMES):
     if y+rowH > Hf-SC(46): break
     bg=TPanel if i%2==0 else TBg2
     q.rr(pad,y,innerW,rowH-SC(3),SC(4),bg,bg,False)
-    q.spine(pad+1,y+SC(3),rowH-SC(9),TFlat)
+    q.spine(pad+1,y+SC(3),rowH-SC(9),{"FLAT":TFlat,"BULLISH":TBull,"BEARISH":TBear}[BIAS[i]])
     q.dot(pad+SC(12),y+SC(11),SC(3),True,TAccent,TGridC)
-    q.rr(pad+SC(148),y+SC(3),SC(48),SC(16),SC(3),TPanelHi,TFlat)
-    q.meter(pad+SC(268),y+SC(7),innerW-SC(290),SC(7),WTS[i]/16.0*2.5,TGridC)
-    rows.append((y,n,WTS[i])); y+=rowH
+    cellH=rowH-SC(3)
+    bH=SC(biasH); bY=y+(cellH-bH)//2
+    st=BIAS[i]
+    bg={"FLAT":TGreyDeep,"BULLISH":TBullDeep,"BEARISH":TBearDeep}[st]
+    ed={"FLAT":TLite,"BULLISH":TBull,"BEARISH":TBear}[st]
+    q.raised(pad+SC(biasX),bY,SC(biasW),bH,SC(3),bg,ed,True,1)
+    share=WTS[i]/sum(WTS); norm=min(1.0,share*2.5)
+    strong={"FLAT":TFlat,"BULLISH":TBull,"BEARISH":TBear}[st]
+    q.meter_graded(pad+SC(248),y+(cellH-SC(7))//2,innerW-SC(260),SC(7),norm,strong)
+    rows.append((y,n,WTS[i],st,bY,bH)); y+=rowH
 fy=Hf-SC(40); bw2=(innerW-SC(8))//2
 q.raised(pad,fy,bw2,SC(26),SC(5),TPanel,TAccent,True,1)
 q.raised(pad+bw2+SC(8),fy,bw2,SC(26),SC(5),TPanel,TFlat,True,1)
@@ -201,14 +224,15 @@ q.finish(); draw_header_text(q)
 for i,l in enumerate(["CORE","FILTERS","TRACKER"]):
     bx=pad+(tabW+SC(8))*i
     q.TC(bx+tabW//2,headerH+SC(6)+SC(5),l,(6,10,18) if i==1 else TText,8,1,f"tab{i}")
-q.T(pad+SC(10),hdry+SC(6),"FILTER",TTextDim,7,1,"la","h0")
-q.T(pad+SC(150),hdry+SC(6),"BIAS",TTextDim,7,1,"la","h1")
-q.T(pad+SC(232),hdry+SC(6),"WEIGHT",TTextDim,7,1,"la","h2")
-q.TR(pad+innerW-SC(10),hdry+SC(6),"CONTRIBUTION",TTextDim,7,1,"h3")
-for i,(ry2,n,w) in enumerate(rows):
-    q.T(pad+SC(22),ry2+SC(5),n,TText,7,1,"la",f"n{i}")
-    q.TC(pad+SC(148)+SC(24),ry2+SC(4),"FLAT",TFlat,7,1,f"bi{i}")
-    q.T(pad+SC(234),ry2+SC(5),f"{w:.1f}",TText,7,0,"la",f"w{i}")
+q.T(pad+SC(10),hdry+SC(8),"FILTER",TAccent,7,1,"la","h0")
+q.T(pad+SC(biasX),hdry+SC(8),"BIAS",TAccent,7,1,"la","h1")
+q.T(pad+SC(212),hdry+SC(8),"WGT",TAccent,7,1,"la","h2")
+q.TR(pad+innerW-SC(10),hdry+SC(9),"CONTRIBUTION",TAccent,7,1,"h3")
+for i,(ry2,n,w,st,bY,bH) in enumerate(rows):
+    cellH=rowH-SC(3)
+    q.TVC(pad+SC(22),ry2,cellH,n,TText,7,1,f"n{i}")
+    q.TCVC(pad+SC(biasX)+SC(biasW)//2,bY,bH,st,(255,255,255),7,1,f"bi{i}")
+    q.TVC(pad+SC(216),ry2,cellH,f"{w:.1f}",TText,7,1,f"w{i}")
 q.TC(pad+bw2//2,fy+SC(6),"ACTIVE ONLY",TText,8,1,"f1")
 q.TC(pad+bw2+SC(8)+bw2//2,fy+SC(6),"PAUSE",TText,8,1,"f2")
 q.check("FILTERS")

@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Signal Forge PRO XAUUSD M5 EA   |
-//|                    QUANTUM HUD  ·  v2.02  ·  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  ·  v2.03  ·  MQL4 / MetaTrader 4 |
 //|------------------------------------------------------------------|
 //| Evolution of "Signal Forge XAUUSD M5 EA".                        |
 //| Original indicator concept: Signal Forge [LuxAlgo]               |
@@ -16,7 +16,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Signal Forge PRO - CC BY-NC-SA 4.0"
 #property link      "https://creativecommons.org/licenses/by-nc-sa/4.0/"
-#property version   "2.02"
+#property version   "2.03"
 #property strict
 
 #include <Canvas\Canvas.mqh>
@@ -392,7 +392,7 @@ uint TBg, TBg2, TPanel, TPanelHi, TBorder, TAccent, TAccent2;
 uint TText, TTextDim, TBull, TBear, TFlat, TWarn, TGridC;
 // Bevel pair: TLite is the top-left highlight, TDark the bottom-right shadow.
 // Every raised surface is drawn with these so the HUD reads as physical.
-uint TLite, TDark, TBullDeep, TBearDeep;
+uint TLite, TDark, TBullDeep, TBearDeep, TGreyDeep;
 
 uint A(color c, uchar alpha) { return ColorToARGB(c, alpha); }
 
@@ -411,6 +411,7 @@ void LoadTheme()
          TGridC   = A(C'70,80,92',255);
          TLite    = A(C'96,110,126',255); TDark = A(C'8,10,12',255);
          TBullDeep= A(C'58,110,20',255);  TBearDeep = A(C'120,26,26',255);
+         TGreyDeep= A(C'78,86,96',255);
          break;
       case SF_THEME_SOLAR:
          TBg      = A(C'26,20,14',255); TBg2    = A(C'40,31,21',255);
@@ -423,6 +424,7 @@ void LoadTheme()
          TGridC   = A(C'102,80,50',255);
          TLite    = A(C'150,118,70',255); TDark = A(C'12,8,4',255);
          TBullDeep= A(C'20,110,62',255);  TBearDeep = A(C'128,32,24',255);
+         TGreyDeep= A(C'96,80,60',255);
          break;
       default: // QUANTUM - high-chroma neon on deep navy
          TBg      = A(C'12,18,34',255); TBg2    = A(C'20,30,54',255);
@@ -435,6 +437,7 @@ void LoadTheme()
          TGridC   = A(C'58,80,132',255);
          TLite    = A(C'110,146,225',255); TDark = A(C'5,8,16',255);
          TBullDeep= A(C'0,104,74',255);   TBearDeep = A(C'128,20,50',255);
+         TGreyDeep= A(C'86,92,104',255);
          break;
      }
   }
@@ -1657,7 +1660,31 @@ void GradientRect(int x, int y, int w, int h, uint top, uint bottom)
 void Text(int x, int y, string s, uint c, int size = 8, string font = "Segoe UI", uint flags = 0)
   {
    gHud.FontSet(font, SC(size) * -10, flags);
-   gHud.TextOut(x, y, s, c);
+   gHud.TextOut(x, y, s, c, SF_AL_LEFT | SF_AL_TOP);
+  }
+
+// Vertically centre one line inside a box of height h.
+// Every label used to be placed with a hand-tuned magic offset (y + SC(5),
+// y + h/2 - SC(7), ...). Those offsets were tuned at HudScalePercent = 100
+// and for one particular font, so text drifted out of its panel as soon as
+// the scale or the installed font changed. Measuring the glyph box with
+// TextSize() and centring on it removes the guesswork.
+void TextVC(int x, int y, int h, string s, uint c, int size = 8,
+            string font = "Segoe UI", uint flags = 0)
+  {
+   gHud.FontSet(font, SC(size) * -10, flags);
+   int tw = 0, th = 0;
+   gHud.TextSize(s, tw, th);
+   gHud.TextOut(x, y + (h - th) / 2, s, c, SF_AL_LEFT | SF_AL_TOP);
+  }
+
+void TextCenterVC(int cx, int y, int h, string s, uint c, int size = 8,
+                  string font = "Segoe UI", uint flags = 0)
+  {
+   gHud.FontSet(font, SC(size) * -10, flags);
+   int tw = 0, th = 0;
+   gHud.TextSize(s, tw, th);
+   gHud.TextOut(cx, y + (h - th) / 2, s, c, SF_AL_CENTER | SF_AL_TOP);
   }
 
 void TextRight(int x, int y, string s, uint c, int size = 8, string font = "Segoe UI", uint flags = 0)
@@ -1673,6 +1700,27 @@ void TextCenter(int x, int y, string s, uint c, int size = 8, string font = "Seg
   }
 
 // Horizontal meter with a filled portion - used for score, risk and cost.
+// blend two ARGB colours (t = 0..1)
+uint MixC(uint a, uint b, double t)
+  {
+   t = MathMax(0.0, MathMin(1.0, t));
+   int ar = (int)((a >> 16) & 0xFF), ag = (int)((a >> 8) & 0xFF), ab = (int)(a & 0xFF);
+   int br = (int)((b >> 16) & 0xFF), bg = (int)((b >> 8) & 0xFF), bb = (int)(b & 0xFF);
+   int rr = (int)(ar + (br - ar) * t);
+   int rg = (int)(ag + (bg - ag) * t);
+   int rb = (int)(ab + (bb - ab) * t);
+   return (uint)(0xFF000000 | ((uint)rr << 16) | ((uint)rg << 8) | (uint)rb);
+  }
+
+// Strength-graded fill: weak -> amber, mid -> accent, strong -> bull/bear.
+// Lets you read signal conviction from the bar colour, not just its length.
+uint StrengthColor(double pct01, uint strongC)
+  {
+   pct01 = MathMax(0.0, MathMin(1.0, pct01));
+   if(pct01 < 0.5) return MixC(TWarn, TAccent, pct01 / 0.5);
+   return MixC(TAccent, strongC, (pct01 - 0.5) / 0.5);
+  }
+
 void Meter(int x, int y, int w, int h, double pct01, uint fill, uint track)
   {
    pct01 = MathMax(0.0, MathMin(1.0, pct01));
@@ -1684,6 +1732,12 @@ void Meter(int x, int y, int w, int h, double pct01, uint fill, uint track)
    // glossy top edge on the filled portion
    gHud.Line(x + 2, y + 2, x + fw - 1, y + 2, A(C'255,255,255',70));
   }
+
+void MeterGraded(int x, int y, int w, int h, double pct01, uint strongC, uint track)
+  {
+   Meter(x, y, w, h, pct01, StrengthColor(pct01, strongC), track);
+  }
+
 
 // Semi-circular conviction gauge. The needle sweeps from full bear (left)
 // to full bull (right); the arc itself is coloured by the live score.
@@ -1780,6 +1834,22 @@ void DestroyHud()
 bool EnsureHud(int w, int h)
   {
    if(gHudReady && w == gHudW && h == gHudH) return true;
+
+   // Resize IN PLACE when the object already exists. Destroying and
+   // re-creating the bitmap label on every size change (i.e. every collapse
+   // or page switch) threw away the click target mid-dispatch, which is why
+   // the minimise/maximise button felt dead.
+   if(gHudReady && ObjectFind(0, PFX + "HUD") >= 0)
+     {
+      if(gHud.Resize(w, h))
+        {
+         gHudW = w; gHudH = h;
+         ObjectSetInteger(0, PFX + "HUD", OBJPROP_XSIZE, w);
+         ObjectSetInteger(0, PFX + "HUD", OBJPROP_YSIZE, h);
+         return true;
+        }
+     }
+
    DestroyHud();
    if(!gHud.CreateBitmapLabel(0, 0, PFX + "HUD", HudMargin, HudMargin, w, h, COLOR_FORMAT_ARGB_NORMALIZE))
       return false;
@@ -1798,8 +1868,8 @@ void DrawChip(int x, int y, int w, int h, string label, string value, uint value
   {
    RaisedPlate(x, y, w, h, SC(6), TPanel, TBorder);
    AccentSpine(x + SC(3), y + SC(5), h - SC(10), accent);
-   Text(x + SC(12), y + SC(5), label, TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
-   Text(x + SC(12), y + SC(16), value, valueColor, 10, "Segoe UI Black", SF_FW_BLACK);
+   Text(x + SC(12), y + SC(6),  label, TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
+   Text(x + SC(12), y + SC(19), value, valueColor, 10, "Segoe UI Black", SF_FW_BLACK);
   }
 
 void DrawButton(int x, int y, int w, int h, string id, string caption, bool active, uint accent)
@@ -1808,9 +1878,9 @@ void DrawButton(int x, int y, int w, int h, string id, string caption, bool acti
    uint fill  = active ? accent : (hover ? TPanelHi : TPanel);
    uint edge  = active ? accent : (hover ? TAccent : TBorder);
    uint txt   = active ? A(C'6,10,18',255) : (hover ? TAccent : TText);
-   RaisedPlate(x, y, w, h, SC(5), fill, edge, true, 1);
+   RaisedPlate(x, y, w, h, SC(5), fill, edge, true, 2);
    if(hover && !active) gHud.Line(x + SC(6), y + h - 3, x + w - SC(6), y + h - 3, TAccent);
-   TextCenter(x + w / 2, y + h / 2 - SC(7), caption, txt, 8, "Segoe UI Semibold", SF_FW_SEMI);
+   TextCenterVC(x + w / 2, y, h, caption, txt, 8, "Segoe UI Semibold", SF_FW_SEMI);
    RegisterButton(id, HudMargin + x, HudMargin + y, w, h);
   }
 
@@ -1865,7 +1935,7 @@ void PaintHud()
    string st = StateText();
    int pillW = SC(92), pillH = SC(22);
    int pillX = W - pillW - SC(12);
-   int colW  = SC(24);
+   int colW  = SC(28);
    int colX  = pillX - colW - SC(7);
 
    int badgeW = SC(32), badgeH = SC(14);
@@ -1878,7 +1948,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v2.02", TTextDim, 7);
+        "  ·  RAW  ·  v2.03", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused && !gHalted, StateColor(), TGridC);
@@ -1886,9 +1956,9 @@ void PaintHud()
               "Segoe UI Semibold", SF_FW_SEMI);
 
    DrawButton(colX, hy + SC(3), colW, pillH, "BTN_COLLAPSE",
-              gHudCollapsed ? "+" : "-", false, TAccent);
+              gHudCollapsed ? "+" : "–", false, TAccent);
 
-   if(gHudCollapsed) { gHud.Update(); return; }
+   if(gHudCollapsed) { gHud.Update(); ChartRedraw(0); return; }
 
    int y = headerH + SC(6);
    int pad = SC(12);
@@ -2052,17 +2122,18 @@ void PaintHud()
    else if(gHudPage == 1)
      {
       SunkenWell(pad, y, innerW, SC(26), SC(6), TBg2);
-      Text(pad + SC(10), y + SC(6), "FILTER", TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
-      Text(pad + SC(150), y + SC(6), "BIAS", TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
-      Text(pad + SC(232), y + SC(6), "WEIGHT", TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
-      TextRight(pad + innerW - SC(10), y + SC(6), "CONTRIBUTION", TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
+      TextVC(pad + SC(10), y, SC(26), "FILTER", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+      TextVC(pad + SC(142), y, SC(26), "BIAS", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+      TextVC(pad + SC(212), y, SC(26), "WGT", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+      TextRight(pad + innerW - SC(10), y + SC(9), "CONTRIBUTION", TAccent, 7,
+                "Segoe UI Black", SF_FW_BLACK);
       y += SC(30);
 
       double totalW = 0;
       for(int i = 0; i < SF_FILTERS; i++) if(gEnabled[i]) totalW += gWeight[i];
       if(totalW <= 0) totalW = 1;
 
-      int rowH = SC(25);
+      int rowH = SC(27);
       for(int i = 0; i < SF_FILTERS; i++)
         {
          if(!gShowAllFilters && !gEnabled[i]) continue;
@@ -2072,25 +2143,38 @@ void PaintHud()
          if(gEnabled[i]) AccentSpine(pad + 1, y + SC(3), rowH - SC(9),
                                      gBull[i] ? TBull : (gBear[i] ? TBear : TFlat));
 
+         int cellH = rowH - SC(3);
          StatusDot(pad + SC(12), y + SC(11), SC(3), gEnabled[i], TAccent, TGridC);
-         Text(pad + SC(22), y + SC(5), gFilterName[i], gEnabled[i] ? TText : TTextDim, 7,
-              "Segoe UI Semibold", SF_FW_SEMI);
+         TextVC(pad + SC(22), y, cellH, gFilterName[i], gEnabled[i] ? TText : TTextDim, 7,
+                "Segoe UI Semibold", SF_FW_SEMI);
 
-         string bias = gBull[i] ? "BULL" : (gBear[i] ? "BEAR" : "FLAT");
-         uint   bc   = gBull[i] ? TBull : (gBear[i] ? TBear : TFlat);
-         if(!gEnabled[i]) bc = TTextDim;
-         RoundRect(pad + SC(148), y + SC(3), SC(48), SC(16), SC(3),
-                   gEnabled[i] ? TPanelHi : TBg2, bc);
-         TextCenter(pad + SC(148) + SC(24), y + SC(4), bias, bc, 7,
-                    "Segoe UI Semibold", SF_FW_SEMI);
+         // BIAS card: SOLID RAISED, background carries the state colour and
+         // the text is always white so it reads at a glance.
+         string bias = gBull[i] ? "BULLISH" : (gBear[i] ? "BEARISH" : "FLAT");
+         uint bgC, edC;
+         if(!gEnabled[i])      { bgC = TGridC;    edC = TBorder; }
+         else if(gBull[i])     { bgC = TBullDeep; edC = TBull;   }
+         else if(gBear[i])     { bgC = TBearDeep; edC = TBear;   }
+         else                  { bgC = TGreyDeep; edC = TLite;   }  // FLAT = grey
+         int bW = SC(62), bH = SC(17);
+         int bX = pad + SC(142), bY = y + (cellH - bH) / 2;
+         RaisedPlate(bX, bY, bW, bH, SC(3), bgC, edC, true, 1);
+         TextCenterVC(bX + bW / 2, bY, bH, bias, A(C'255,255,255',255), 7,
+                      "Segoe UI Black", SF_FW_BLACK);
 
-         Text(pad + SC(234), y + SC(5), Fmt(gWeight[i], 1), gEnabled[i] ? TText : TTextDim, 7);
+         TextVC(pad + SC(216), y, cellH, Fmt(gWeight[i], 1),
+                gEnabled[i] ? TText : TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
 
+         // contribution bar, colour graded by this filter's share of the vote
          double share = gEnabled[i] ? gWeight[i] / totalW : 0;
-         int barX = pad + SC(268), barW = innerW - SC(290);
-         uint fillC = gBull[i] ? TBull : (gBear[i] ? TBear : TGridC);
-         if(!gEnabled[i]) fillC = TGridC;
-         Meter(barX, y + SC(7), barW, SC(7), share * 2.5, fillC, TGridC);
+         double norm  = MathMin(1.0, share * 2.5);
+         int barX = pad + SC(248), barW = innerW - SC(260);
+         if(!gEnabled[i]) Meter(barX, y + (cellH - SC(7)) / 2, barW, SC(7), 0, TGridC, TGridC);
+         else
+           {
+            uint strongC = gBull[i] ? TBull : (gBear[i] ? TBear : TFlat);
+            MeterGraded(barX, y + (cellH - SC(7)) / 2, barW, SC(7), norm, strongC, TGridC);
+           }
          y += rowH;
         }
 
@@ -2130,8 +2214,8 @@ void PaintHud()
          int kx = pad + k * (kw + SC(4));
          RaisedPlate(kx, y, kw, kpiH, SC(6), TPanel, TBorder);
          AccentSpine(kx + SC(3), y + SC(6), kpiH - SC(12), kcol[k]);
-         Text(kx + SC(11), y + SC(7), klbl[k], TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
-         Text(kx + SC(11), y + SC(22), kval[k], kcol[k], 13, "Segoe UI Black", SF_FW_BLACK);
+         Text(kx + SC(11), y + SC(8),  klbl[k], TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
+         Text(kx + SC(11), y + SC(23), kval[k], kcol[k], 13, "Segoe UI Black", SF_FW_BLACK);
         }
       y += kpiH + SC(8);
 
@@ -2160,8 +2244,8 @@ void PaintHud()
       int cx2 = tx;
       for(int c = 0; c < 6; c++)
         {
-         if(c == 0) Text(cx2 + SC(6), hy2 + SC(4), cH[c], TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-         else TextRight(cx2 + cW[c] - SC(6), hy2 + SC(4), cH[c], TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+         if(c == 0) TextVC(cx2 + SC(6), hy2, hdrH, cH[c], TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+         else TextRight(cx2 + cW[c] - SC(6), hy2 + SC(6), cH[c], TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
          cx2 += cW[c];
         }
 
@@ -2943,7 +3027,7 @@ int OnInit()
       Print("[SF-PRO] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("SF-PRO v2.02 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("SF-PRO v2.03 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
    gLastBar = 0;
    return INIT_SUCCEEDED;

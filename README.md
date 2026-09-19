@@ -331,3 +331,36 @@ asserts zero card/candle and card/card overlaps
 **Performance note:** closed cards are only rebuilt when history changes or the
 chart moves (`gCardsDirty`); only the cheap live card redraws every tick.
 Rebuilding ~125 chart objects at the HUD refresh rate would flicker badly.
+
+## v2.03 — text metrics, working minimise, graded bars, solid bias cards
+
+**Text positioning.** Every label was placed with a hand-tuned magic offset
+(`y + SC(5)`, `y + h/2 - SC(7)`, ...) that was calibrated at
+`HudScalePercent = 100` for one specific font. Any other scale or font and the
+text drifted out of its box. Added `TextVC()` / `TextCenterVC()`, which measure
+the real glyph box with `CCanvas::TextSize()` and centre on it. Buttons, chips,
+filter rows, KPI cards and the tracker header now use them.
+
+**Minimise / maximise button.** `EnsureHud()` called `DestroyHud()` and
+re-created the bitmap label on *every* size change — and a collapse *is* a size
+change. The click that triggered it was being dispatched against an object that
+had just been deleted, so the toggle appeared dead. It now calls
+`CCanvas::Resize()` in place, keeping the object (and the click target) alive.
+The glyph is a clear `-` / `+` and the hit box grew to `SC(28)`.
+
+**Strength-graded progress bars.** `MeterGraded()` + `StrengthColor()` blend the
+fill colour with the level: weak signals read amber, mid cyan, strong resolves
+to the filter's bull/bear colour. Conviction is now readable from colour, not
+just bar length.
+
+**BIAS cards — solid raised, white text.** Each filter's bias is a raised plate
+whose *background* carries the state, with white `Segoe UI Black` text:
+
+| state | background | text |
+|-------|-----------|------|
+| FLAT | grey (`TGreyDeep`) | white |
+| BULLISH | green (`TBullDeep`) | white |
+| BEARISH | red (`TBearDeep`) | white |
+
+`TGreyDeep` was added to all three themes. Labels widened to
+BULLISH/BEARISH/FLAT and the row pitch grew to `SC(27)` to fit.
