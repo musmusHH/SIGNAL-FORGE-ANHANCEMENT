@@ -1,4 +1,4 @@
-; Signal Forge PRO v2.08 - XAUUSD M5
+; Signal Forge PRO v2.09 - XAUUSD M5
 ; ORIGINAL v1 STRATEGY. No risk layer: no sessions, no daily loss cap,
 ; no equity kill-switch, no cooldown. The only hard gate before a fill
 ; is MaximumSpreadPoints. Size the account accordingly.
@@ -75,6 +75,7 @@ FilterView=0
 HudMargin=12
 HudRefreshMs=220
 HudInteractive=true
+UseClickHotspots=true
 HudScalePercent=100
 DrawSignalOrbs=true
 SignalHistoryBars=250

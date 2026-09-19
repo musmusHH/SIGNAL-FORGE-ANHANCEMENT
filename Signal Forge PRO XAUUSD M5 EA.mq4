@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Signal Forge PRO XAUUSD M5 EA   |
-//|                    QUANTUM HUD  ·  v2.08  ·  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  ·  v2.09  ·  MQL4 / MetaTrader 4 |
 //|------------------------------------------------------------------|
 //| Evolution of "Signal Forge XAUUSD M5 EA".                        |
 //|                                                                  |
@@ -22,6 +22,16 @@
 //| OnChartEvent is never delivered and they used to freeze in place.|
 //| A hard 40 px of daylight is enforced between cards; BUY results  |
 //| sit above price and SELL results below.                          |
+//| v2.09 - EVERY BUTTON WAS DEAD (minimise, tabs, DRAW toggles).    |
+//| The "buttons" were only PIXELS painted into a bitmap: there was   |
+//| not a single clickable object on the chart. Dispatch relied on    |
+//| raw click coordinates, but MT4 swallows CHARTEVENT_CLICK when the |
+//| click lands on an object, and a non-selectable bitmap label never |
+//| raises CHARTEVENT_OBJECT_CLICK - so nothing was ever delivered.   |
+//| Each control now carries a real, fully transparent OBJ_BUTTON     |
+//| hotspot; MT4 always reports those by NAME, so no coordinate       |
+//| guessing is involved. Stale hotspots are pruned every repaint.    |
+//|                                                                  |
 //| v2.08 - OVERLAY INVISIBLE ON LIVE CHARTS (real root cause).      |
 //| On a live chart MT4 backfills history asynchronously, so iMA()   |
 //| and iSAR() return 0.0 - NOT EMPTY_VALUE - for bars that are not  |
@@ -59,7 +69,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Signal Forge PRO - CC BY-NC-SA 4.0"
 #property link      "https://creativecommons.org/licenses/by-nc-sa/4.0/"
-#property version   "2.08"
+#property version   "2.09"
 #property strict
 
 #include <Canvas\Canvas.mqh>
@@ -172,6 +182,7 @@ input ENUM_SF_FILTERVIEW FilterView = SF_VIEW_ACTIVE; // Filter list mode
 input int    HudMargin              = 12;       // Outer margin (px)
 input int    HudRefreshMs           = 220;      // Repaint interval (ms)
 input bool   HudInteractive         = true;     // Buttons + hover + hotkeys
+input bool   UseClickHotspots       = true;     // Real OBJ_BUTTON hit targets (reliable clicks)
 input int    HudScalePercent        = 100;      // 80..130 UI scale
 
 input string __12 = "======== CHART VISUALS ========"; // .
@@ -1035,6 +1046,44 @@ struct SFButton
 SFButton gButtons[40];   // 11 per-filter DRAW toggles + chrome
 int      gButtonCount = 0;
 
+// A canvas "button" is only painted PIXELS inside a bitmap - MT4 has no idea
+// it exists, so dispatch used to depend entirely on raw click coordinates,
+// which MT4 does not deliver reliably (CHARTEVENT_CLICK is swallowed whenever
+// the click lands on an object, and a non-selectable bitmap never raises
+// CHARTEVENT_OBJECT_CLICK). That is why every button felt dead.
+//
+// Fix: lay a REAL, fully transparent OBJ_BUTTON over each painted control.
+// MT4 always reports OBJECT_CLICK for a genuine button, so the HUD becomes
+// clickable no matter how the terminal routes coordinates. The object is
+// invisible: the canvas underneath supplies all the visuals.
+void SyncHotspot(string id, int x, int y, int w, int h)
+  {
+   string n = PFX + "BTN_" + id;
+   if(ObjectFind(0, n) < 0)
+     {
+      ObjectCreate(0, n, OBJ_BUTTON, 0, 0, 0);
+      ObjectSetString(0, n, OBJPROP_TEXT, "");
+      ObjectSetString(0, n, OBJPROP_FONT, "Arial");
+      ObjectSetInteger(0, n, OBJPROP_FONTSIZE, 1);
+     }
+   ObjectSetInteger(0, n, OBJPROP_CORNER,    CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, n, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, n, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, n, OBJPROP_XSIZE,     w);
+   ObjectSetInteger(0, n, OBJPROP_YSIZE,     h);
+   // fully transparent so the painted canvas below shows through untouched
+   ObjectSetInteger(0, n, OBJPROP_BGCOLOR,   clrNONE);
+   ObjectSetInteger(0, n, OBJPROP_BORDER_COLOR, clrNONE);
+   ObjectSetInteger(0, n, OBJPROP_COLOR,     clrNONE);
+   ObjectSetInteger(0, n, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, n, OBJPROP_BACK,      false);
+   ObjectSetInteger(0, n, OBJPROP_STATE,     false);
+   ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, n, OBJPROP_SELECTED,  false);
+   ObjectSetInteger(0, n, OBJPROP_HIDDEN,    true);
+   ObjectSetInteger(0, n, OBJPROP_ZORDER,    1000);   // above the bitmap
+  }
+
 void RegisterButton(string id, int x, int y, int w, int h)
   {
    if(gButtonCount >= 40) return;
@@ -1044,6 +1093,25 @@ void RegisterButton(string id, int x, int y, int w, int h)
    gButtons[gButtonCount].w  = w;
    gButtons[gButtonCount].h  = h;
    gButtonCount++;
+   if(HudInteractive && UseClickHotspots) SyncHotspot(id, x, y, w, h);
+  }
+
+// Remove hotspots that belong to controls no longer on screen (e.g. the
+// FILTERS rows after switching to CORE), otherwise a stale invisible button
+// keeps swallowing clicks over empty chart space.
+void PruneHotspots()
+  {
+   int total = ObjectsTotal(0, -1, OBJ_BUTTON);
+   for(int i = total - 1; i >= 0; i--)
+     {
+      string n = ObjectName(0, i, -1, OBJ_BUTTON);
+      if(StringFind(n, PFX + "BTN_") != 0) continue;
+      string id = StringSubstr(n, StringLen(PFX + "BTN_"));
+      bool live = false;
+      for(int k = 0; k < gButtonCount; k++)
+         if(gButtons[k].id == id) { live = true; break; }
+      if(!live) ObjectDelete(0, n);
+     }
   }
 
 string HitButton(int x, int y)
@@ -1464,7 +1532,13 @@ void DrawMiniToggle(int x, int y, int w, int h, string id, bool on, bool availab
 
 void PaintHud()
   {
-   if(!ShowHUD) { DestroyHud(); DestroyTracker(); return; }
+   if(!ShowHUD)
+     {
+      DestroyHud(); DestroyTracker();
+      gButtonCount = 0;
+      ObjectsDeleteAll(0, PFX + "BTN_");   // no invisible click traps left behind
+      return;
+     }
 
    long chartW = 0, chartH = 0;
    ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0, chartW);
@@ -1535,7 +1609,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v2.08", TTextDim, 7);
+        "  ·  RAW  ·  v2.09", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -2053,6 +2127,10 @@ void PaintAll()
   {
    PaintHud();
    PaintTracker();
+   // both panels have now re-registered their buttons, so anything left over
+   // belongs to a control that is no longer displayed
+   if(HudInteractive && UseClickHotspots) PruneHotspots();
+   else if(!UseClickHotspots) ObjectsDeleteAll(0, PFX + "BTN_");
   }
 
 //==================================================================//
@@ -3019,7 +3097,7 @@ int OnInit()
       Print("[SF-PRO] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("SF-PRO v2.08 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("SF-PRO v2.09 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
 
    // Print exactly which overlays are armed, so a "nothing is drawn" report
@@ -3027,7 +3105,7 @@ int OnInit()
    string ov = "";
    for(int v = 0; v < SF_FILTERS; v++)
       if(gDrawFilter[v]) ov += (ov == "" ? "" : ",") + gFilterName[v];
-   Print("[SF-PRO] v2.08 build | overlay master=", DrawIndicatorOverlay,
+   Print("[SF-PRO] v2.09 build | overlay master=", DrawIndicatorOverlay,
          " | bars=", Bars, " | seriesReady=", SeriesReady(),
          " | drawing: ", (ov == "" ? "(none - switch one ON in FILTERS)" : ov));
    gLastBar = 0;
@@ -3065,8 +3143,11 @@ void OnDeinit(const int reason)
    if(IsTesting() && IsVisualMode() && KeepVisualsAfterTest)
      {
       // Canvas dies with the EA; leave the chart objects for review.
+      // The invisible hotspots must go, though - they would otherwise sit on
+      // the chart swallowing clicks with no EA behind them.
       DestroyHud();
       DestroyTracker();
+      ObjectsDeleteAll(0, PFX + "BTN_");
       FreeCanvases();
       ChartRedraw(0);
       return;
@@ -3102,6 +3183,7 @@ void OnTimer()
 void HandleHudAction(string hit)
   {
    if(hit == "") return;
+   if(VerboseJournal) Print("[SF-PRO] click -> ", hit);
 
    // per-filter chart overlay toggles: "DRAW_<index>"
    if(StringSubstr(hit, 0, 5) == "DRAW_")
@@ -3162,13 +3244,25 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       return;
      }
 
-   // Non-selectable canvas objects normally pass the click through as
-   // CHARTEVENT_CLICK; some builds report OBJECT_CLICK instead, so accept both.
+   // PRIMARY path: a real OBJ_BUTTON hotspot was clicked. MT4 always reports
+   // this for a genuine button and hands us the object NAME, so no coordinate
+   // guessing is involved - this is what makes the HUD reliably clickable.
+   if(id == CHARTEVENT_OBJECT_CLICK)
+     {
+      if(StringFind(sparam, PFX + "BTN_") == 0)
+        {
+         // a button latches itself down; release it so it can be clicked again
+         ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
+         HandleHudAction(StringSubstr(sparam, StringLen(PFX + "BTN_")));
+         return;
+        }
+      if(sparam == PFX + "HUD" || sparam == PFX + "TRK")
+        { HandleHudAction(HitButton(gMouseX, gMouseY)); return; }
+     }
+
+   // FALLBACK: bare chart click, still hit-tested against the registry.
    if(id == CHARTEVENT_CLICK)
       HandleHudAction(HitButton((int)lparam, (int)dparam));
-
-   if(id == CHARTEVENT_OBJECT_CLICK && sparam == PFX + "HUD")
-      HandleHudAction(HitButton(gMouseX, gMouseY));
 
    if(id == CHARTEVENT_KEYDOWN)
      {

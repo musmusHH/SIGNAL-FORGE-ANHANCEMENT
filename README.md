@@ -1,4 +1,4 @@
-# Signal Forge PRO — XAUUSD M5 EA (v2.08)
+# Signal Forge PRO — XAUUSD M5 EA (v2.09)
 
 > **v2.05 — the ORIGINAL v1 trading strategy has been restored.**
 > The trading engine is now exactly the v1 engine. The entire v2 risk layer
@@ -759,4 +759,101 @@ all five renderers/verifiers ........... pass
 ```
 
 > Still no MQL4 compiler in this environment — static analysis, not a build.
+
+---
+
+## v2.09 — every button was dead (minimise, tabs, DRAW toggles)
+
+### Root cause: there were no buttons
+
+The HUD's "buttons" were never buttons. They were **pixels painted into a
+`CCanvas` bitmap**, plus an in-memory list of rectangles:
+
+```
+grep -c OBJ_BUTTON "Signal Forge PRO XAUUSD M5 EA.mq4"   ->  0
+```
+
+Not one clickable object existed on the chart. Dispatch depended entirely on
+MT4 handing back raw click coordinates, and both routes it used are
+unreliable:
+
+* `CHARTEVENT_CLICK` is **not** sent when the click lands on a chart object —
+  and the HUD bitmap covers the whole panel, so it swallowed its own clicks.
+* `CHARTEVENT_OBJECT_CLICK` is only raised for objects MT4 considers
+  interactive. The bitmap is created `SELECTABLE=false` / `HIDDEN=true`, so it
+  never qualified.
+
+The result: the minimise button, the tabs and the new DRAW toggles all looked
+alive (hover states worked, because those ride on `MOUSE_MOVE`) but no click
+was ever delivered. This is why *v2.07's per-filter toggles appeared to do
+nothing* — the toggle logic was correct, the click simply never arrived.
+
+### Fix: a real transparent hotspot over every control
+
+`RegisterButton()` now also creates a genuine **`OBJ_BUTTON`** at the same
+rectangle, named `SFP_BTN_<id>`, fully transparent (`BGCOLOR`/`BORDER_COLOR`/
+`COLOR` = `clrNONE`) with `ZORDER 1000` so it sits above the bitmap. The canvas
+still supplies **all** the visuals; the button contributes only a hit target.
+
+MT4 always reports a real button by **name**, so dispatch no longer guesses
+coordinates:
+
+```cpp
+if(id == CHARTEVENT_OBJECT_CLICK && StringFind(sparam, PFX + "BTN_") == 0)
+  {
+   ObjectSetInteger(0, sparam, OBJPROP_STATE, false);   // un-latch
+   HandleHudAction(StringSubstr(sparam, StringLen(PFX + "BTN_")));
+  }
+```
+
+Supporting details that matter:
+
+* **Un-latching** — an `OBJ_BUTTON` stays visually pressed after a click;
+  without resetting `OBJPROP_STATE` it would fire once and then look stuck.
+* **Pruning** — `PruneHotspots()` runs after both panels repaint and deletes
+  hotspots whose control is no longer on screen. Otherwise switching CORE →
+  FILTERS would leave 11 invisible buttons swallowing clicks over blank chart.
+* **Ordering** — pruning happens *after* `PaintHud()` + `PaintTracker()` have
+  re-registered, so the button currently being clicked always survives.
+* **Cleanup** — hotspots are removed when `ShowHUD=false` and on deinit,
+  including the "keep visuals after a visual test" path. An invisible button
+  with no EA behind it would otherwise eat clicks forever.
+* **Escape hatch** — new input `UseClickHotspots` (default `true`). If any
+  broker's build renders the transparent button as a visible grey box, set it
+  `false` to fall back to the old coordinate path.
+
+The coordinate fallback is **retained**, so both routes are now live.
+
+### Diagnostics
+
+With `VerboseJournal=true` every dispatched action is logged:
+
+```
+[SF-PRO] click -> BTN_COLLAPSE
+[SF-PRO] click -> DRAW_3
+[SF-PRO] DRAW ON  SUPERTREND
+```
+
+If a click produces **no** `click ->` line, the event is not reaching the EA
+(check that *AutoTrading* is on and the chart is not in a modal state). If it
+logs but nothing changes, the handler is at fault — two very different bugs,
+now trivially distinguishable.
+
+### Verification
+
+New `docs/verify_click_targets.py` statically proves the whole chain:
+
+```
+1. registration wiring ....... DrawButton/DrawMiniToggle -> hotspot   OK
+2. every control has a handler  10/10 ids routed                      OK
+3. dispatch path ............. by name, un-latched, fallback kept     OK
+4. hotspot geometry .......... 0 overlaps, toggle ends 138 < bias 148 OK
+5. tracker origin ............ gCvOx/gCvOy applied                    OK
+6. cleanup ................... prune + wipe-on-off                    OK
+```
+
+Plus the existing suite: 93 inputs all read, 3 presets × 93 keys, and all five
+renderers/verifiers pass.
+
+> Still no MQL4 compiler here — static analysis, not a build.
 
