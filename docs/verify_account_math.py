@@ -26,8 +26,40 @@ print("1. the account-wide pass exists")
 check("gAcctStart / gAcctNetAll / gAcctDeposits declared",
       all(re.search(r'^double\s+%s' % g, SRC, re.M) for g in
           ("gAcctDeposits", "gAcctNetAll", "gAcctStart")))
-check("OP_BALANCE (deposits/withdrawals) is read",
-      "OP_BALANCE" in SRC)
+check("balance/credit rows (deposits/withdrawals) are read",
+      re.search(r'#define SF_OP_BALANCE 6', SRC) is not None
+      and re.search(r'#define SF_OP_CREDIT\s+7', SRC) is not None
+      and SRC.count("SF_OP_BALANCE") >= 3)
+
+# MQL4 has no OP_BALANCE/OP_CREDIT - they are MQL5 constants and the compiler
+# rejects them as undeclared identifiers. Guard the whole MQL5-only family so
+# this class of error cannot come back.
+def strip_comments_strings(t):
+    o = []; i = 0; n = len(t)
+    while i < n:
+        if t[i:i+2] == "//":
+            while i < n and t[i] != "\n": i += 1
+        elif t[i:i+2] == "/*":
+            i += 2
+            while i + 1 < n and t[i:i+2] != "*/": i += 1
+            i += 2
+        elif t[i] in "\"'":
+            q = t[i]; i += 1
+            while i < n and t[i] != q:
+                if t[i] == "\\": i += 1
+                i += 1
+            i += 1
+        else:
+            o.append(t[i]); i += 1
+    return "".join(o)
+
+CODE = strip_comments_strings(SRC)
+MQL5_ONLY = ("OP_BALANCE OP_CREDIT ORDER_TYPE_BUY ORDER_TYPE_SELL DEAL_TYPE_BALANCE "
+             "PositionSelect PositionsTotal HistorySelect HistoryDealsTotal "
+             "AccountInfoDouble AccountInfoInteger SymbolInfoInteger CopyBuffer "
+             "MqlTradeRequest MqlTradeResult ZeroMemory CopyClose CopyTime").split()
+leaked = sorted({t for t in MQL5_ONLY if re.search(r"\b" + t + r"\b", CODE)})
+check("no MQL5-only identifiers in MQL4 code", not leaked, str(leaked))
 check("the account pass is NOT filtered by magic",
       re.search(r'gAcctNetAll \+= OrderProfit\(\) \+ OrderSwap\(\) \+ OrderCommission\(\);',
                 SRC) is not None)

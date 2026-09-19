@@ -1,4 +1,4 @@
-# Signal Forge PRO — XAUUSD M5 EA (v2.15)
+# Signal Forge PRO — XAUUSD M5 EA (v2.16)
 
 > **v2.05 — the ORIGINAL v1 trading strategy has been restored.**
 > The trading engine is now exactly the v1 engine. The entire v2 risk layer
@@ -1314,4 +1314,38 @@ gAcctStart = deposits found ? sum(OP_BALANCE)
   column and agreement bar shifted with it — verified for collisions.
 
 > Still no MQL4 compiler in this environment — static analysis, not a build.
+
+---
+
+## v2.16 — compile fix: `OP_BALANCE` is MQL5, not MQL4
+
+```
+'OP_BALANCE' - undeclared identifier   line 1129
+'OP_BALANCE' - undeclared identifier   line 1231
+```
+
+v2.15 read deposit rows out of the account history to recover the true opening
+balance, and reached for `OP_BALANCE` to identify them. That constant belongs
+to **MQL5**. MQL4 defines only `OP_BUY`, `OP_SELL`, `OP_BUYLIMIT`,
+`OP_SELLLIMIT`, `OP_BUYSTOP`, `OP_SELLSTOP` — the non-trade history rows come
+back from `OrderType()` as bare integers.
+
+They are now named once, near the other constants:
+
+```mql4
+#define SF_OP_BALANCE 6   // deposit or withdrawal
+#define SF_OP_CREDIT  7   // credit in or out
+```
+
+The v2.15 source also had the numbering wrong in a comment — it called `6`
+"credit" when 6 is balance and 7 is credit. Both were already accepted by the
+condition, so **behaviour is unchanged**; only the names and the comment are
+corrected.
+
+`docs/verify_account_math.py` now fails the build on any MQL5-only identifier
+(`OP_BALANCE`, `PositionSelect`, `HistorySelect`, `AccountInfoDouble`,
+`CopyBuffer`, …) appearing in code, so this class of error cannot return.
+
+> There is still no MQL4 compiler in this environment — please keep reporting
+> compiler output, it is the only real build signal available here.
 

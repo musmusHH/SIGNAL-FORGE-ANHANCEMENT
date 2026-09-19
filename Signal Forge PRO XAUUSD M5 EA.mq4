@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Signal Forge PRO XAUUSD M5 EA   |
-//|                    QUANTUM HUD  ·  v2.15  ·  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  ·  v2.16  ·  MQL4 / MetaTrader 4 |
 //|------------------------------------------------------------------|
 //| Evolution of "Signal Forge XAUUSD M5 EA".                        |
 //|                                                                  |
@@ -22,6 +22,16 @@
 //| OnChartEvent is never delivered and they used to freeze in place.|
 //| A hard 40 px of daylight is enforced between cards; BUY results  |
 //| sit above price and SELL results below.                          |
+//| v2.16 - COMPILE FIX: OP_BALANCE is an MQL5 constant, not MQL4.    |
+//|         v2.15 used it to spot deposit rows in the history and the |
+//|         MQL4 compiler rejected it as an undeclared identifier at  |
+//|         both call sites. In MQL4 OrderType() returns these as     |
+//|         bare integers, so they are now named constants:           |
+//|           SF_OP_BALANCE 6  (deposit / withdrawal)                 |
+//|           SF_OP_CREDIT  7  (credit)                               |
+//|         The v2.15 code also mislabelled 6 as "credit" in a        |
+//|         comment; 6 is balance and 7 is credit. Behaviour is       |
+//|         unchanged - both row types were already accepted.         |
 //| v2.15 - THE TRACKER WAS REPORTING A PROFIT ON A LOSING ACCOUNT.  |
 //|         A demo funded with 200.00 sitting at 157.79 - down 42.21 |
 //|         - displayed "+11.03 USD" with a RISING equity curve.     |
@@ -35,7 +45,7 @@
 //|         filtered figure - so it agreed with itself and was       |
 //|         wrong. A tracker that hides losses is worse than none.   |
 //|         Fix: an ACCOUNT-WIDE pass over the full history reads    |
-//|         OP_BALANCE funding records and every closed trade        |
+//|         balance/credit funding rows and every closed trade      |
 //|         regardless of magic or symbol, giving the true opening   |
 //|         balance. The headline card now shows ACCOUNT P/L with    |
 //|         START and BAL beside it so the arithmetic is visible,    |
@@ -190,7 +200,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Signal Forge PRO - CC BY-NC-SA 4.0"
 #property link      "https://creativecommons.org/licenses/by-nc-sa/4.0/"
-#property version   "2.15"
+#property version   "2.16"
 #property strict
 
 #include <Canvas\Canvas.mqh>
@@ -341,6 +351,13 @@ input bool   VerboseJournal         = true;     // Detailed journal logging
 //                    G L O B A L   S T A T E                       //
 //==================================================================//
 #define SF_FILTERS 11
+
+// MQL4 has no OP_BALANCE / OP_CREDIT constants - those belong to MQL5. In
+// MQL4 the non-trade rows in the account history report these bare values
+// from OrderType(), so name them here rather than leaving 6 and 7 loose in
+// the statistics code.
+#define SF_OP_BALANCE 6   // deposit or withdrawal
+#define SF_OP_CREDIT  7   // credit in or out
 
 // Win32 GDI text-alignment and font-weight values, spelled out so the EA
 // compiles on every MT4 build regardless of which TA_/FW_ enums it exposes.
@@ -494,7 +511,7 @@ double   gStatToday = 0, gStatWeek = 0, gStatMonth = 0;
 // manual trades, other EAs and other magics are all invisible to that filter.
 // Reporting only the filtered figure made a losing account look profitable,
 // so the tracker now carries both and shows the real one where it matters.
-double   gAcctDeposits = 0;   // sum of OP_BALANCE credits/debits (real funding)
+double   gAcctDeposits = 0;   // sum of balance/credit rows (the real funding)
 double   gAcctNetAll   = 0;   // net of EVERY closed trade, any magic/symbol
 double   gAcctStart    = 0;   // true opening balance of the account
 bool     gAcctHasDep   = false;   // did we actually find a deposit record?
@@ -1117,7 +1134,7 @@ void RebuildStats()
    gStatToday = 0; gStatWeek = 0; gStatMonth = 0;
 
    //---- ACCOUNT-WIDE pass: every order, any magic, any symbol -------------
-   // OP_BALANCE entries are deposits and withdrawals; everything else that is
+   // Balance/credit entries are deposits and withdrawals; everything else that is
    // a real BUY/SELL contributes its net result. Together they reconstruct
    // the true opening balance:  start = balance_now - all_trades - deposits
    // ...which is the figure the equity curve and GAIN% must be measured from.
@@ -1126,7 +1143,7 @@ void RebuildStats()
      {
       if(!OrderSelect(a, SELECT_BY_POS, MODE_HISTORY)) continue;
       int at = OrderType();
-      if(at == OP_BALANCE || at == 6 /* credit */)
+      if(at == SF_OP_BALANCE || at == SF_OP_CREDIT)
         {
          gAcctDeposits += OrderProfit();
          gAcctHasDep = true;
@@ -1228,7 +1245,7 @@ void RebuildStats()
      {
       if(!OrderSelect(j, SELECT_BY_POS, MODE_HISTORY)) continue;
       int jt = OrderType();
-      if(jt == OP_BALANCE || jt == 6) { run += OrderProfit(); }   // funding
+      if(jt == SF_OP_BALANCE || jt == SF_OP_CREDIT) { run += OrderProfit(); } // funding
       else if(jt == OP_BUY || jt == OP_SELL)
          run += OrderProfit() + OrderSwap() + OrderCommission();
       else continue;
@@ -2370,7 +2387,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v2.15", TTextDim, 7);
+        "  ·  RAW  ·  v2.16", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -3896,7 +3913,7 @@ int OnInit()
       Print("[SF-PRO] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("SF-PRO v2.15 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("SF-PRO v2.16 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
 
    // Print exactly which overlays are armed, so a "nothing is drawn" report
@@ -3904,7 +3921,7 @@ int OnInit()
    string ov = "";
    for(int v = 0; v < SF_FILTERS; v++)
       if(gDrawFilter[v]) ov += (ov == "" ? "" : ",") + gFilterName[v];
-   Print("[SF-PRO] v2.15 build | overlay master=", DrawIndicatorOverlay,
+   Print("[SF-PRO] v2.16 build | overlay master=", DrawIndicatorOverlay,
          " | bars=", Bars, " | seriesReady=", SeriesReady(),
          " | drawing: ", (ov == "" ? "(none - switch one ON in FILTERS)" : ov));
 
