@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Signal Forge PRO XAUUSD M5 EA   |
-//|                    QUANTUM HUD  ·  v2.09  ·  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  ·  v2.10  ·  MQL4 / MetaTrader 4 |
 //|------------------------------------------------------------------|
 //| Evolution of "Signal Forge XAUUSD M5 EA".                        |
 //|                                                                  |
@@ -22,6 +22,16 @@
 //| OnChartEvent is never delivered and they used to freeze in place.|
 //| A hard 40 px of daylight is enforced between cards; BUY results  |
 //| sit above price and SELL results below.                          |
+//| v2.10 - REAL BUTTONS. NO BITMAP CONTROLS.                        |
+//| MT4 has no transparent OBJ_BUTTON: clrNONE renders BLACK, and the |
+//| object is drawn ON TOP of the canvas - which is why v2.09 covered |
+//| the panel in black boxes. Controls are no longer faked with       |
+//| pixels: every button is a real OBJ_BUTTON styled with the theme,  |
+//| drawn and hit-tested by MT4 itself. Two further click-eaters were |
+//| removed: the HUD repainted on every mouse-move (tearing the       |
+//| control down mid-press, so it only flashed), and each repaint     |
+//| rewrote every property; updates are now idempotent.               |
+//|                                                                  |
 //| v2.09 - EVERY BUTTON WAS DEAD (minimise, tabs, DRAW toggles).    |
 //| The "buttons" were only PIXELS painted into a bitmap: there was   |
 //| not a single clickable object on the chart. Dispatch relied on    |
@@ -69,7 +79,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Signal Forge PRO - CC BY-NC-SA 4.0"
 #property link      "https://creativecommons.org/licenses/by-nc-sa/4.0/"
-#property version   "2.09"
+#property version   "2.10"
 #property strict
 
 #include <Canvas\Canvas.mqh>
@@ -182,7 +192,6 @@ input ENUM_SF_FILTERVIEW FilterView = SF_VIEW_ACTIVE; // Filter list mode
 input int    HudMargin              = 12;       // Outer margin (px)
 input int    HudRefreshMs           = 220;      // Repaint interval (ms)
 input bool   HudInteractive         = true;     // Buttons + hover + hotkeys
-input bool   UseClickHotspots       = true;     // Real OBJ_BUTTON hit targets (reliable clicks)
 input int    HudScalePercent        = 100;      // 80..130 UI scale
 
 input string __12 = "======== CHART VISUALS ========"; // .
@@ -308,7 +317,6 @@ bool     gTrkCollapsed = false; // standalone tracker panel collapsed?
 bool     gShowAllFilters = false;
 bool     gPaused = false;
 int      gMouseX = -1, gMouseY = -1;   // chart-space cursor, for hover + click fallback
-string   gHoverId = "";
 datetime gSignalHistoryBuilt = 0;
 int      gKnownResultHistory = -1;
 bool     gCardsDirty = true;      // force a closed-card rebuild (chart moved)
@@ -1046,42 +1054,70 @@ struct SFButton
 SFButton gButtons[40];   // 11 per-filter DRAW toggles + chrome
 int      gButtonCount = 0;
 
-// A canvas "button" is only painted PIXELS inside a bitmap - MT4 has no idea
-// it exists, so dispatch used to depend entirely on raw click coordinates,
-// which MT4 does not deliver reliably (CHARTEVENT_CLICK is swallowed whenever
-// the click lands on an object, and a non-selectable bitmap never raises
-// CHARTEVENT_OBJECT_CLICK). That is why every button felt dead.
+// MT4 has NO transparent OBJ_BUTTON: clrNONE is rendered as BLACK, and the
+// object is drawn ON TOP of the canvas bitmap. v2.09 used invisible hotspots
+// for hit-testing, which is exactly why the panel sprouted black boxes.
 //
-// Fix: lay a REAL, fully transparent OBJ_BUTTON over each painted control.
-// MT4 always reports OBJECT_CLICK for a genuine button, so the HUD becomes
-// clickable no matter how the terminal routes coordinates. The object is
-// invisible: the canvas underneath supplies all the visuals.
-void SyncHotspot(string id, int x, int y, int w, int h)
+// v2.10 therefore stops faking controls with pixels. Every button is now a
+// REAL OBJ_BUTTON, styled with the theme colours, carrying its own caption.
+// MT4 draws it, MT4 reports its clicks by name - nothing depends on the
+// bitmap or on coordinate routing any more.
+
+// CCanvas colours are packed ARGB uints; MT4 object colours are BGR `color`.
+color CLR(uint argb)
+  {
+   int r = (int)((argb >> 16) & 0xFF);
+   int g = (int)((argb >>  8) & 0xFF);
+   int b = (int)( argb        & 0xFF);
+   return (color)((b << 16) | (g << 8) | r);
+  }
+
+// Create or update the real control. x/y are CHART pixels.
+void ChartButton(string id, int x, int y, int w, int h, string caption,
+                 color bg, color fg, color border, int fsize, string font)
   {
    string n = PFX + "BTN_" + id;
-   if(ObjectFind(0, n) < 0)
+   bool fresh = (ObjectFind(0, n) < 0);
+   if(fresh) ObjectCreate(0, n, OBJ_BUTTON, 0, 0, 0);
+   else
      {
-      ObjectCreate(0, n, OBJ_BUTTON, 0, 0, 0);
-      ObjectSetString(0, n, OBJPROP_TEXT, "");
-      ObjectSetString(0, n, OBJPROP_FONT, "Arial");
-      ObjectSetInteger(0, n, OBJPROP_FONTSIZE, 1);
+      // Already on the chart: only write properties that actually CHANGED.
+      // The HUD repaints ~5x a second, and blindly rewriting every property
+      // (or deleting and recreating the object) tears down the control while
+      // MT4 is still processing the press - the click is then lost and the
+      // button just "flashes". Skipping no-op writes keeps it stable.
+      if((int)ObjectGetInteger(0, n, OBJPROP_XDISTANCE) == x &&
+         (int)ObjectGetInteger(0, n, OBJPROP_YDISTANCE) == y &&
+         (int)ObjectGetInteger(0, n, OBJPROP_XSIZE)     == w &&
+         (int)ObjectGetInteger(0, n, OBJPROP_YSIZE)     == h &&
+         (color)ObjectGetInteger(0, n, OBJPROP_BGCOLOR) == bg &&
+         (color)ObjectGetInteger(0, n, OBJPROP_COLOR)   == fg &&
+         ObjectGetString(0, n, OBJPROP_TEXT)            == caption)
+        {
+         // nothing visual changed; just make sure it is not stuck pressed
+         if((bool)ObjectGetInteger(0, n, OBJPROP_STATE))
+            ObjectSetInteger(0, n, OBJPROP_STATE, false);
+         return;
+        }
      }
-   ObjectSetInteger(0, n, OBJPROP_CORNER,    CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, n, OBJPROP_XDISTANCE, x);
-   ObjectSetInteger(0, n, OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, n, OBJPROP_XSIZE,     w);
-   ObjectSetInteger(0, n, OBJPROP_YSIZE,     h);
-   // fully transparent so the painted canvas below shows through untouched
-   ObjectSetInteger(0, n, OBJPROP_BGCOLOR,   clrNONE);
-   ObjectSetInteger(0, n, OBJPROP_BORDER_COLOR, clrNONE);
-   ObjectSetInteger(0, n, OBJPROP_COLOR,     clrNONE);
-   ObjectSetInteger(0, n, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-   ObjectSetInteger(0, n, OBJPROP_BACK,      false);
-   ObjectSetInteger(0, n, OBJPROP_STATE,     false);
-   ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, n, OBJPROP_SELECTED,  false);
-   ObjectSetInteger(0, n, OBJPROP_HIDDEN,    true);
-   ObjectSetInteger(0, n, OBJPROP_ZORDER,    1000);   // above the bitmap
+   ObjectSetInteger(0, n, OBJPROP_CORNER,       CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, n, OBJPROP_XDISTANCE,    x);
+   ObjectSetInteger(0, n, OBJPROP_YDISTANCE,    y);
+   ObjectSetInteger(0, n, OBJPROP_XSIZE,        w);
+   ObjectSetInteger(0, n, OBJPROP_YSIZE,        h);
+   ObjectSetString (0, n, OBJPROP_TEXT,         caption);
+   ObjectSetString (0, n, OBJPROP_FONT,         font);
+   ObjectSetInteger(0, n, OBJPROP_FONTSIZE,     fsize);
+   ObjectSetInteger(0, n, OBJPROP_BGCOLOR,      bg);
+   ObjectSetInteger(0, n, OBJPROP_COLOR,        fg);
+   ObjectSetInteger(0, n, OBJPROP_BORDER_COLOR, border);
+   ObjectSetInteger(0, n, OBJPROP_BORDER_TYPE,  BORDER_RAISED);
+   ObjectSetInteger(0, n, OBJPROP_BACK,         false);
+   ObjectSetInteger(0, n, OBJPROP_STATE,        false);
+   ObjectSetInteger(0, n, OBJPROP_SELECTABLE,   false);
+   ObjectSetInteger(0, n, OBJPROP_SELECTED,     false);
+   ObjectSetInteger(0, n, OBJPROP_HIDDEN,       true);
+   ObjectSetInteger(0, n, OBJPROP_ZORDER,       1000);
   }
 
 void RegisterButton(string id, int x, int y, int w, int h)
@@ -1093,12 +1129,8 @@ void RegisterButton(string id, int x, int y, int w, int h)
    gButtons[gButtonCount].w  = w;
    gButtons[gButtonCount].h  = h;
    gButtonCount++;
-   if(HudInteractive && UseClickHotspots) SyncHotspot(id, x, y, w, h);
   }
 
-// Remove hotspots that belong to controls no longer on screen (e.g. the
-// FILTERS rows after switching to CORE), otherwise a stale invisible button
-// keeps swallowing clicks over empty chart space.
 void PruneHotspots()
   {
    int total = ObjectsTotal(0, -1, OBJ_BUTTON);
@@ -1489,22 +1521,16 @@ void DrawChip(int x, int y, int w, int h, string label, string value, uint value
    Text(x + SC(12), y + SC(19), value, valueColor, 10, "Segoe UI Black", SF_FW_BLACK);
   }
 
-// Registers in CHART pixels: canvas-local coords plus the active panel origin.
-void RegisterButtonLocal(string id, int x, int y, int w, int h)
-  {
-   RegisterButton(id, gCvOx + x, gCvOy + y, w, h);
-  }
-
+// A REAL MT4 button. Nothing is painted into the bitmap for it, so the canvas
+// can never be covered by the control (that was the black-box bug).
 void DrawButton(int x, int y, int w, int h, string id, string caption, bool active, uint accent)
   {
-   bool hover = (gHoverId == id);
-   uint fill  = active ? accent : (hover ? TPanelHi : TPanel);
-   uint edge  = active ? accent : (hover ? TAccent : TBorder);
-   uint txt   = active ? A(C'6,10,18',255) : (hover ? TAccent : TText);
-   RaisedPlate(x, y, w, h, SC(5), fill, edge, true, 2);
-   if(hover && !active) gCv.Line(x + SC(6), y + h - 3, x + w - SC(6), y + h - 3, TAccent);
-   TextCenterVC(x + w / 2, y, h, caption, txt, 8, "Segoe UI Semibold", SF_FW_SEMI);
-   RegisterButtonLocal(id, x, y, w, h);
+   uint fill = active ? accent : TPanel;
+   uint txt  = active ? A(C'6,10,18',255) : TText;
+   uint edge = active ? accent : TBorder;
+   ChartButton(id, gCvOx + x, gCvOy + y, w, h, caption,
+               CLR(fill), CLR(txt), CLR(edge), 8, "Segoe UI Semibold");
+   RegisterButton(id, gCvOx + x, gCvOy + y, w, h);
   }
 
 // Small square ON/OFF used per filter row to add or remove its chart overlay.
@@ -1514,21 +1540,22 @@ void DrawButton(int x, int y, int w, int h, string id, string caption, bool acti
 // enough to hit comfortably with the mouse.
 void DrawMiniToggle(int x, int y, int w, int h, string id, bool on, bool available)
   {
-   bool hover = (gHoverId == id);
    if(!available)
      {
-      // no chart representation for this filter - inert, never registered
+      // no chart representation - draw an inert plate on the canvas, with no
+      // clickable object behind it
       RaisedPlate(x, y, w, h, SC(3), TBg2, TBorder, true, 1);
       TextCenterVC(x + w / 2, y, h, "N/A", TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
       return;
      }
-   uint fill = on ? TBullDeep : (hover ? TPanelHi : TGridC);
-   uint edge = on ? TBull     : (hover ? TAccent  : TBorder);
-   uint tcol = on ? A(C'255,255,255',255) : (hover ? TAccent : TTextDim);
-   RaisedPlate(x, y, w, h, SC(3), fill, edge, true, 1);
-   TextCenterVC(x + w / 2, y, h, on ? "ON" : "OFF", tcol, 7, "Segoe UI Black", SF_FW_BLACK);
-   RegisterButtonLocal(id, x, y, w, h);
+   uint fill = on ? TBullDeep : TGridC;
+   uint txt  = on ? A(C'255,255,255',255) : TTextDim;
+   uint edge = on ? TBull : TBorder;
+   ChartButton(id, gCvOx + x, gCvOy + y, w, h, on ? "ON" : "OFF",
+               CLR(fill), CLR(txt), CLR(edge), 7, "Segoe UI Black");
+   RegisterButton(id, gCvOx + x, gCvOy + y, w, h);
   }
+
 
 void PaintHud()
   {
@@ -1609,7 +1636,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v2.09", TTextDim, 7);
+        "  ·  RAW  ·  v2.10", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -2127,10 +2154,11 @@ void PaintAll()
   {
    PaintHud();
    PaintTracker();
-   // both panels have now re-registered their buttons, so anything left over
-   // belongs to a control that is no longer displayed
-   if(HudInteractive && UseClickHotspots) PruneHotspots();
-   else if(!UseClickHotspots) ObjectsDeleteAll(0, PFX + "BTN_");
+   // Both panels have re-registered their buttons, so any control object left
+   // over belongs to something no longer on screen (a collapsed panel, the
+   // other tab's rows). Deleting them is what makes collapse actually hide
+   // the buttons instead of leaving them floating over the chart.
+   PruneHotspots();
   }
 
 //==================================================================//
@@ -3097,7 +3125,7 @@ int OnInit()
       Print("[SF-PRO] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("SF-PRO v2.09 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("SF-PRO v2.10 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
 
    // Print exactly which overlays are armed, so a "nothing is drawn" report
@@ -3105,7 +3133,7 @@ int OnInit()
    string ov = "";
    for(int v = 0; v < SF_FILTERS; v++)
       if(gDrawFilter[v]) ov += (ov == "" ? "" : ",") + gFilterName[v];
-   Print("[SF-PRO] v2.09 build | overlay master=", DrawIndicatorOverlay,
+   Print("[SF-PRO] v2.10 build | overlay master=", DrawIndicatorOverlay,
          " | bars=", Bars, " | seriesReady=", SeriesReady(),
          " | drawing: ", (ov == "" ? "(none - switch one ON in FILTERS)" : ov));
    gLastBar = 0;
@@ -3235,12 +3263,13 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
   {
    if(!HudInteractive) return;
 
-   //--- track the cursor: powers hover states and gives OBJECT_CLICK its coords
+   //--- track the cursor only; MT4 renders hover on a real button itself, so
+   //    repainting the whole HUD on every mouse move is pure overhead (and it
+   //    used to fight the click, because the repaint deleted and recreated
+   //    objects while the button was being pressed).
    if(id == CHARTEVENT_MOUSE_MOVE)
      {
       gMouseX = (int)lparam; gMouseY = (int)dparam;
-      string h = HitButton(gMouseX, gMouseY);
-      if(h != gHoverId) { gHoverId = h; PaintAll(); ChartRedraw(0); }
       return;
      }
 

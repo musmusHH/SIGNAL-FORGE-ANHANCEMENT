@@ -1,4 +1,4 @@
-# Signal Forge PRO — XAUUSD M5 EA (v2.09)
+# Signal Forge PRO — XAUUSD M5 EA (v2.10)
 
 > **v2.05 — the ORIGINAL v1 trading strategy has been restored.**
 > The trading engine is now exactly the v1 engine. The entire v2 risk layer
@@ -856,4 +856,85 @@ Plus the existing suite: 93 inputs all read, 3 presets × 93 keys, and all five
 renderers/verifiers pass.
 
 > Still no MQL4 compiler here — static analysis, not a build.
+
+---
+
+## v2.10 — real buttons, no bitmap controls
+
+Two defects reported against v2.09, both visible in the user's screenshots:
+**black boxes all over the panel**, and buttons that *flash but do nothing*.
+
+### Defect 1 — the black boxes
+
+v2.09 laid an "invisible" `OBJ_BUTTON` over each painted control. That
+premise was wrong:
+
+**MT4 has no transparent `OBJ_BUTTON`.** `clrNONE` on a button's `BGCOLOR` is
+rendered as **black**, and the object is drawn *on top of* the canvas bitmap.
+So every hotspot became an opaque black rectangle covering the artwork
+underneath — the minimise button, the tabs, the DRAW toggles, the tracker's
+collapse and pause buttons.
+
+### Defect 2 — flash but no action
+
+Two separate click-eaters:
+
+1. **Repaint on every mouse move.** `CHARTEVENT_MOUSE_MOVE` called
+   `PaintAll()` to redraw hover states. Moving the cursor onto a button
+   therefore *rebuilt the control* — MT4 was still processing the press when
+   the object was torn down, so the click was discarded. The button flashed
+   and nothing happened. Hover repainting is gone; MT4 renders a real
+   button's hover state itself.
+2. **Property rewrites at 5 Hz.** The HUD repaints ~every 220 ms and blindly
+   rewrote every property of every button, which is enough to disturb a press
+   in flight.
+
+### Fix: stop faking controls with pixels
+
+Per the request — *"CREATE REAL BUTTONS, DON'T USE BITMAP"* — the controls are
+no longer drawn into the canvas at all. Each one is a genuine `OBJ_BUTTON`
+styled with the theme palette, carrying its own caption, drawn and hit-tested
+by MT4:
+
+```cpp
+ChartButton(id, x, y, w, h, caption, CLR(fill), CLR(txt), CLR(edge), 8, font);
+```
+
+* `DrawButton()` paints **nothing** into the bitmap, so a control can never
+  cover the artwork — the black-box class of bug is structurally impossible.
+* `CLR()` converts the canvas's packed **ARGB** `uint` into MT4's **BGR**
+  `color`; getting this backwards would have swapped red and blue.
+* `ChartButton()` compares position, size, colours and caption first and
+  **returns early when nothing changed**, so a repaint never disturbs a press.
+* Buttons are un-latched (`OBJPROP_STATE=false`) so they fire repeatedly.
+* `PruneHotspots()` deletes controls whose panel collapsed or whose tab is not
+  showing — this is what makes **minimise actually hide the buttons**.
+
+The canvas keeps doing what it is good at: plates, gauges, meters, the equity
+curve, all text. MT4 owns the interactive parts.
+
+`UseClickHotspots` was removed — with real controls there is no second path to
+fall back to.
+
+### Verification
+
+`docs/verify_click_targets.py` was rewritten for the new architecture:
+
+```
+1. DrawButton/DrawMiniToggle -> ChartButton + RegisterButton   OK
+   DrawButton paints nothing into the bitmap                   OK
+   ChartButton avoids clrNONE                                  OK
+   ChartButton skips no-op updates                             OK
+2. all 10 control ids have handlers                            OK
+3. mouse-move does not repaint                                 OK
+   dispatch by object name, button un-latched                  OK
+4. toggle ends 138 < bias card 148, 0 overlapping rows         OK
+5. tracker controls use the tracker origin                     OK
+6. prune stale controls + wipe on HUD off                      OK
+```
+
+Header geometry re-checked at 100 %: collapse button `287..315`, ARMED pill
+`322..418` — 7 px clear, both inside the 430 px panel.
+
+> Still no MQL4 compiler in this environment — static analysis, not a build.
 

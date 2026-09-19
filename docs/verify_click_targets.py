@@ -1,14 +1,18 @@
-"""Verifies the v2.09 click-dispatch layer.
+"""Verifies the v2.10 control layer.
 
-The HUD's controls are pixels painted into a CCanvas bitmap; MT4 knows nothing
-about them. v2.09 lays a real transparent OBJ_BUTTON over each one so clicks
-are delivered by NAME. This script checks the parts that can be checked
-statically:
+MT4 has no transparent OBJ_BUTTON - clrNONE renders BLACK and the object is
+drawn ON TOP of the canvas, which is why v2.09 covered the panel in black
+boxes. v2.10 stops faking controls with pixels: every button is a REAL
+OBJ_BUTTON styled with the theme colours, drawn and hit-tested by MT4 itself.
 
-  1. every DrawButton / DrawMiniToggle call site registers a hotspot
-  2. every registered id has a branch in HandleHudAction (no dead controls)
-  3. hotspot rects are inside their panel and do not overlap each other
-  4. the tracker's hotspots are offset by the panel origin, not the HUD's
+Checked statically:
+  1. DrawButton / DrawMiniToggle emit a real control and register it
+  2. no control paints a plate into the bitmap underneath itself
+  3. every registered id has a branch in HandleHudAction
+  4. dispatch is by object NAME, and the button is un-latched
+  5. repaints are idempotent (no delete/recreate mid-click)
+  6. geometry: toggle clears the bias card, rows do not overlap
+  7. tracker controls use the tracker origin; stale controls are pruned
 
 Exits non-zero on failure.
 """
@@ -38,26 +42,33 @@ for fn in ("DrawButton", "DrawMiniToggle"):
     if not body:
         fails.append(f"{fn}: body not found")
         continue
-    if "RegisterButtonLocal" not in body.group(1):
-        fails.append(f"{fn}: does not call RegisterButtonLocal")
+    b = body.group(1)
+    if "ChartButton" not in b:
+        fails.append(f"{fn}: does not emit a real OBJ_BUTTON")
+    elif "RegisterButton" not in b:
+        fails.append(f"{fn}: does not register its rect")
     else:
-        print(f"   {fn:15s} -> RegisterButtonLocal  OK")
+        print(f"   {fn:15s} -> ChartButton + RegisterButton  OK")
 
-reg = re.search(r'^void RegisterButton\(.*?\n  \}', SRC, re.S | re.M).group(0)
-if "SyncHotspot" not in reg:
-    fails.append("RegisterButton does not create a hotspot")
+# the clickable path must NOT paint a plate under itself (that is what the
+# real button now draws); only the inert N/A branch may do so
+db = re.search(r'^void DrawButton\(.*?\n  \}', SRC, re.S | re.M).group(0)
+if "RaisedPlate" in db:
+    fails.append("DrawButton still paints a plate into the bitmap")
 else:
-    print("   RegisterButton  -> SyncHotspot         OK")
+    print("   DrawButton paints nothing into the bitmap   OK")
 
-sync = re.search(r'^void SyncHotspot\(.*?\n  \}', SRC, re.S | re.M).group(0)
-if "OBJ_BUTTON" not in sync:
-    fails.append("SyncHotspot does not create an OBJ_BUTTON")
-for prop, why in [("OBJPROP_BGCOLOR", "transparent background"),
-                  ("OBJPROP_ZORDER", "must sit above the bitmap"),
-                  ("OBJPROP_STATE", "must not stay latched")]:
-    if prop not in sync:
-        fails.append(f"SyncHotspot missing {prop} ({why})")
-print("   SyncHotspot     -> OBJ_BUTTON, clrNONE, ZORDER  OK")
+cb = re.search(r'^void ChartButton\(.*?\n  \}', SRC, re.S | re.M).group(0)
+if "OBJ_BUTTON" not in cb:
+    fails.append("ChartButton does not create an OBJ_BUTTON")
+if "clrNONE" in cb:
+    fails.append("ChartButton uses clrNONE (renders BLACK in MT4)")
+else:
+    print("   ChartButton avoids clrNONE                  OK")
+if "ObjectGetInteger" not in cb or "return;" not in cb:
+    fails.append("ChartButton rewrites properties every repaint (click-eating)")
+else:
+    print("   ChartButton skips no-op updates             OK")
 
 # ------------------------------------------------------- 2. every id handled
 print("\n2. every control has a handler")
@@ -78,10 +89,14 @@ print("\n3. dispatch path")
 ev = re.search(r'^void OnChartEvent\(.*?\n  \}', SRC, re.S | re.M).group(0)
 checks = [
     ('CHARTEVENT_OBJECT_CLICK', "listens for object clicks"),
-    ('PFX + "BTN_"', "matches our hotspot namespace"),
+    ('PFX + "BTN_"', "matches our control namespace"),
     ('StringSubstr(sparam', "recovers the id from the object name"),
     ('OBJPROP_STATE, false', "releases the latched button"),
 ]
+if "PaintAll()" in re.search(r'if\(id == CHARTEVENT_MOUSE_MOVE\).*?\n     \}', SRC, re.S).group(0):
+    fails.append("mouse-move still repaints (tears down buttons mid-click)")
+else:
+    print("   mouse-move does not repaint             OK")
 for token, why in checks:
     ok = token in ev
     print(f"   {why:38s} {'OK' if ok else 'MISSING'}")
@@ -132,21 +147,20 @@ if bad:
 print(f"   first row hotspot at chart px {rects[0][:2]}, last {rects[-1][:2]}")
 
 # ------------------------------------------------- 5. tracker origin offset
-print("\n5. tracker hotspots use the tracker origin")
+print("\n5. tracker controls use the tracker origin")
 pt = re.search(r'^void PaintTracker\(\).*?\n  \}', SRC, re.S | re.M).group(0)
 if "gCvOx" not in pt or "gCvOy" not in pt:
     fails.append("PaintTracker does not set the canvas origin")
 else:
     print("   PaintTracker sets gCvOx/gCvOy           OK")
-rbl = re.search(r'^void RegisterButtonLocal\(.*?\n  \}', SRC, re.S | re.M).group(0)
-if "gCvOx" not in rbl:
-    fails.append("RegisterButtonLocal ignores the panel origin")
+if "gCvOx + x" not in db:
+    fails.append("DrawButton ignores the panel origin")
 else:
-    print("   RegisterButtonLocal applies the origin  OK")
+    print("   DrawButton applies gCvOx/gCvOy          OK")
 
 # ------------------------------------------------------------- 6. cleanup
 print("\n6. cleanup")
-for what, pat in [("prune stale hotspots", r'PruneHotspots\(\)'),
+for what, pat in [("prune stale controls", r'PruneHotspots\(\)'),
                   ("wipe on HUD off", r'ObjectsDeleteAll\(0, PFX \+ "BTN_"\)')]:
     ok = re.search(pat, SRC) is not None
     print(f"   {what:24s} {'OK' if ok else 'MISSING'}")
@@ -159,4 +173,4 @@ if fails:
     for f in fails:
         print("  -", f)
     sys.exit(1)
-print("ALL CLICK-DISPATCH CHECKS PASS")
+print("ALL CONTROL-LAYER CHECKS PASS")
