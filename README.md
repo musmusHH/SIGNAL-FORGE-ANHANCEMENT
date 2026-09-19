@@ -1,4 +1,4 @@
-# Signal Forge PRO — XAUUSD M5 EA (v2.11)
+# Signal Forge PRO — XAUUSD M5 EA (v2.12)
 
 > **v2.05 — the ORIGINAL v1 trading strategy has been restored.**
 > The trading engine is now exactly the v1 engine. The entire v2 risk layer
@@ -1001,6 +1001,61 @@ And every chart event is logged, so one click settles it:
 
 Each points at a different fault, so the next report can be resolved in one
 step instead of guessing.
+
+> Still no MQL4 compiler in this environment — static analysis, not a build.
+
+---
+
+## v2.12 — one press was delivered twice, so every action undid itself
+
+The v2.11 diagnostics answered the question immediately. The buttons were
+**never broken**. They were doing the job exactly twice.
+
+Every single press produced **two** events about 31 ms apart:
+
+```
+06:48:15.224  event id=1  obj=SFP_BTN_TRK_PAUSE   ->  click -> TRK_PAUSE  ->  MANUAL PAUSE
+06:48:15.255  event id=4  lp=1136 dp=530.0        ->  click -> TRK_PAUSE  ->  MANUAL RESUME
+```
+
+* `id=1` is `CHARTEVENT_OBJECT_CLICK` — MT4 naming the button.
+* `id=4` is `CHARTEVENT_CLICK` — the same press reported again as bare coordinates.
+
+This build emits **both**. The coordinate fallback added in v2.09 (as a safety
+net for builds that only send `id=4`) hit-tested the second event, landed on the
+same button, and ran the action a second time:
+
+| control | first event | second event | what the user saw |
+|---|---|---|---|
+| `TRK_PAUSE` | MANUAL PAUSE | MANUAL RESUME | nothing |
+| `DRAW_3` | DRAW ON SUPERTREND | DRAW OFF SUPERTREND | nothing |
+| `TAB_FILTERS` | page → FILTERS | page → FILTERS again | nothing |
+| `BTN_COLLAPSE` | collapse | expand | nothing |
+
+Every control is a toggle, so an even number of activations is
+indistinguishable from a dead button. That is why the panel looked completely
+inert while the log shows it responding perfectly to all eight controls.
+
+**Fix:** `DuplicateClick()` records the last control id and the moment it fired,
+and swallows a repeat of the **same** control within **350 ms**. The first event
+wins whichever route it arrives by, so the HUD behaves identically on builds
+that send one event and on builds that send two — the fallback stays in place
+for builds that need it, without double-firing on builds that do not.
+
+Deliberate double-clicks are unaffected: 350 ms is shorter than a comfortable
+repeat press, and every control here is a toggle whose result the user sees
+before pressing again. The keyboard path is intentionally **not** debounced.
+
+### Why the self-test reported 8 buttons, not 12
+
+```
+[SF-PRO] controls created: 8 real OBJ_BUTTON objects | e.g. SFP_BTN_TRK_PAUSE x=877 y=379 w=410 h=26
+```
+
+Correct: `BTN_COLLAPSE`, `TAB_CORE`, `TAB_FILTERS`, `BTN_PAUSE`, `BTN_CLOSE`,
+`BTN_THEME`, `TRK_COLLAPSE`, `TRK_PAUSE`. The eleven `DRAW_*` toggles and
+`BTN_VIEW` belong to the FILTERS page and are created when that tab is opened —
+visible in the log the moment `TAB_FILTERS` was pressed.
 
 > Still no MQL4 compiler in this environment — static analysis, not a build.
 

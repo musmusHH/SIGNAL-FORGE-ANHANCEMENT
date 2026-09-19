@@ -167,6 +167,53 @@ for what, pat in [("prune stale controls", r'PruneHotspots\(\)'),
     if not ok:
         fails.append(what + " missing")
 
+# ------------------------------------------- 7. duplicate-press debounce
+# One physical press can arrive TWICE: OBJECT_CLICK (by name) *and* a plain
+# CHARTEVENT_CLICK (by coordinate), ~30 ms apart on some builds. Acting on
+# both runs every action twice, which silently undoes it.
+print("\n7. duplicate-press debounce (v2.12)")
+
+ev = re.search(r'^void OnChartEvent\(.*?\n  \}', SRC, re.S | re.M).group(0)
+
+dbg = [
+    ("DuplicateClick() defined",
+     re.search(r"bool\s+DuplicateClick\s*\(", SRC) is not None),
+    ("keyed on the control id",
+     "gLastActionId" in SRC and re.search(r"id\s*==\s*gLastActionId", SRC) is not None),
+    ("empty id never debounced",
+     re.search(r'if\(id\s*==\s*""\)\s*return\s+false;', SRC) is not None),
+    ("named-button route guarded",
+     re.search(r"DuplicateClick\(btnId\)", ev) is not None),
+    ("coordinate fallback guarded",
+     re.search(r"DuplicateClick\(hitId\)", ev) is not None),
+    ("panel-bitmap route guarded",
+     re.search(r"DuplicateClick\(panelId\)", ev) is not None),
+]
+for what, ok in dbg:
+    print(f"   {what:30s} {'OK' if ok else 'MISSING'}")
+    if not ok:
+        fails.append(what + " missing")
+
+m = re.search(r"#define\s+SF_CLICK_DEBOUNCE_MS\s+(\d+)", SRC)
+if not m or not (150 <= int(m.group(1)) <= 600):
+    fails.append("debounce window missing or out of range")
+else:
+    print(f"   window {m.group(1)} ms in 150..600         OK")
+
+# the keyboard path must stay un-debounced: holding a hotkey is legitimate
+kd = ev[ev.index("CHARTEVENT_KEYDOWN"):]
+if "DuplicateClick" in kd:
+    fails.append("keyboard path must not be debounced")
+else:
+    print("   keyboard path not debounced    OK")
+
+# every user-press route into HandleHudAction must be gated
+routes = len(re.findall(r"HandleHudAction\(", ev))
+guards = len(re.findall(r"DuplicateClick\(", ev))
+print(f"   {guards} guards covering {routes} dispatch routes")
+if guards < 3:
+    fails.append("not every click route is debounced")
+
 print()
 if fails:
     print("FAILURES:")

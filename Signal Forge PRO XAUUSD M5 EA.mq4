@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Signal Forge PRO XAUUSD M5 EA   |
-//|                    QUANTUM HUD  ·  v2.11  ·  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  ·  v2.12  ·  MQL4 / MetaTrader 4 |
 //|------------------------------------------------------------------|
 //| Evolution of "Signal Forge XAUUSD M5 EA".                        |
 //|                                                                  |
@@ -22,6 +22,28 @@
 //| OnChartEvent is never delivered and they used to freeze in place.|
 //| A hard 40 px of daylight is enforced between cards; BUY results  |
 //| sit above price and SELL results below.                          |
+//| v2.12 - ONE PRESS WAS BEING DELIVERED TWICE, SO EVERY ACTION     |
+//|         UNDID ITSELF.                                            |
+//|         The v2.11 journal proved the buttons worked all along.   |
+//|         Every press logged TWO events ~31 ms apart:              |
+//|           event id=1 obj=SFP_BTN_TRK_PAUSE -> MANUAL PAUSE       |
+//|           event id=4 lp=1136 dp=530        -> MANUAL RESUME      |
+//|         id=1 is CHARTEVENT_OBJECT_CLICK (by name), id=4 is a     |
+//|         plain CHARTEVENT_CLICK (by coordinate). This build emits |
+//|         BOTH for a single press, so the coordinate fallback      |
+//|         hit-tested the same button and ran the action a second   |
+//|         time - toggling it straight back. Pause became resume,   |
+//|         draw-on became draw-off, the page flipped and returned:  |
+//|         the HUD looked dead while it was in fact doing the job   |
+//|         exactly twice.                                           |
+//|         Fix: DuplicateClick() remembers the last control and the |
+//|         time it fired, and swallows a repeat of the SAME control |
+//|         within 350 ms. The first event wins whichever route it   |
+//|         arrives by, so the HUD behaves identically on builds     |
+//|         that send one event and on builds that send two.         |
+//|         Deliberate double-clicks are unaffected: 350 ms is below |
+//|         a comfortable repeat press, and every control here is a  |
+//|         toggle the user watches before pressing again.           |
 //| v2.11 - THE CLICK WAS BEING CANCELLED BY OUR OWN REPAINT.        |
 //| MT4 sets OBJPROP_STATE=true on mouse DOWN and only queues the    |
 //| click event on mouse UP. The HUD repaints every 220 ms and each  |
@@ -88,7 +110,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Signal Forge PRO - CC BY-NC-SA 4.0"
 #property link      "https://creativecommons.org/licenses/by-nc-sa/4.0/"
-#property version   "2.11"
+#property version   "2.12"
 #property strict
 
 #include <Canvas\Canvas.mqh>
@@ -331,6 +353,25 @@ uint     gLastMouseMs = 0;             // when the pointer last moved/clicked
 // mouse-UP, MT4 discards the pending click - the button flashes and nothing
 // fires. Freeze automatic repaints for a moment around any pointer activity.
 bool RepaintLocked() { return (GetTickCount() - gLastMouseMs) < 600; }
+// ONE physical press can be delivered TWICE: many builds send both
+// CHARTEVENT_OBJECT_CLICK (named, id=1) and a plain CHARTEVENT_CLICK
+// (coordinates, id=4) about 30 ms apart. Acting on both runs every action
+// twice, which silently UNDOES it - pause then resume, draw on then off - so
+// the HUD looks dead while actually working perfectly. Remember the last
+// action and ignore a repeat of the same control inside this window.
+uint     gLastActionMs = 0;            // when the last HUD action ran
+string   gLastActionId = "";           // which control it was
+#define  SF_CLICK_DEBOUNCE_MS 350
+// True if this press is the echo of the one we just handled.
+bool DuplicateClick(const string id)
+  {
+   if(id == "") return false;
+   if(id == gLastActionId && (GetTickCount() - gLastActionMs) < SF_CLICK_DEBOUNCE_MS)
+      return true;
+   gLastActionId = id;
+   gLastActionMs = GetTickCount();
+   return false;
+  }
 datetime gSignalHistoryBuilt = 0;
 int      gKnownResultHistory = -1;
 bool     gCardsDirty = true;      // force a closed-card rebuild (chart moved)
@@ -1653,7 +1694,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v2.11", TTextDim, 7);
+        "  ·  RAW  ·  v2.12", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -3142,7 +3183,7 @@ int OnInit()
       Print("[SF-PRO] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("SF-PRO v2.11 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("SF-PRO v2.12 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
 
    // Print exactly which overlays are armed, so a "nothing is drawn" report
@@ -3150,7 +3191,7 @@ int OnInit()
    string ov = "";
    for(int v = 0; v < SF_FILTERS; v++)
       if(gDrawFilter[v]) ov += (ov == "" ? "" : ",") + gFilterName[v];
-   Print("[SF-PRO] v2.11 build | overlay master=", DrawIndicatorOverlay,
+   Print("[SF-PRO] v2.12 build | overlay master=", DrawIndicatorOverlay,
          " | bars=", Bars, " | seriesReady=", SeriesReady(),
          " | drawing: ", (ov == "" ? "(none - switch one ON in FILTERS)" : ov));
 
@@ -3340,11 +3381,21 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
          gLastMouseMs = GetTickCount();
          // a button latches itself down; release it so it can be clicked again
          ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
-         HandleHudAction(StringSubstr(sparam, StringLen(PFX + "BTN_")));
+         string btnId = StringSubstr(sparam, StringLen(PFX + "BTN_"));
+         if(DuplicateClick(btnId))
+           {
+            if(VerboseJournal) Print("[SF-PRO] ignored duplicate click -> ", btnId);
+            return;
+           }
+         HandleHudAction(btnId);
          return;
         }
       if(sparam == PFX + "HUD" || sparam == PFX + "TRK")
-        { HandleHudAction(HitButton(gMouseX, gMouseY)); return; }
+        {
+         string panelId = HitButton(gMouseX, gMouseY);
+         if(!DuplicateClick(panelId)) HandleHudAction(panelId);
+         return;
+        }
      }
 
    // FALLBACK: bare chart click, hit-tested against the registry.
@@ -3355,6 +3406,11 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       if(hitId == "" && VerboseJournal)
          Print("[SF-PRO] click at ", lparam, ",", dparam,
                " matched no control (", gButtonCount, " registered)");
+      if(DuplicateClick(hitId))
+        {
+         if(VerboseJournal) Print("[SF-PRO] ignored duplicate click -> ", hitId);
+         return;
+        }
       HandleHudAction(hitId);
      }
 
