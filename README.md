@@ -1,4 +1,4 @@
-# Signal Forge PRO — XAUUSD M5 EA (v2.14)
+# Signal Forge PRO — XAUUSD M5 EA (v2.15)
 
 > **v2.05 — the ORIGINAL v1 trading strategy has been restored.**
 > The trading engine is now exactly the v1 engine. The entire v2 risk layer
@@ -1242,6 +1242,76 @@ one row above ~400 px of nothing. It now sizes to the visible rows:
 still uses `ArFix`) and the live switches. It also caught a real compile error:
 `T()` was called by the trade gate at line ~863 but defined at ~1517, and MQL4
 resolves top-down — now forward-declared.
+
+> Still no MQL4 compiler in this environment — static analysis, not a build.
+
+---
+
+## v2.15 — the tracker was reporting a profit on a losing account
+
+This was the serious one. A demo funded with **200.00** sitting at **157.79** —
+down **42.21** — displayed **“+11.03 USD”** with a **rising** equity curve.
+
+![account math fix](docs/account_math_fix.png)
+
+### Cause
+
+Every statistic was filtered by:
+
+```mql4
+if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber) continue;
+```
+
+That filter is correct for judging *this strategy*, and wrong for reporting
+*the account*. Trades from other magic numbers, manual trades and other EAs
+were invisible, so **53.24 USD of losses were never in the series**.
+
+The start balance made it self-consistent and therefore invisible:
+
+```
+start = AccountBalance() - gStatNet = 157.79 - 11.03 = 146.76   // wrong
+real deposit                                          = 200.00
+```
+
+The EA measured its gain against a balance it had invented from its own
+filtered total, so every number agreed with every other number and all of them
+were wrong. **A tracker that hides losses is worse than no tracker.**
+
+### Fix
+
+An **account-wide pass** over the full history reads `OP_BALANCE` funding
+records *and* every closed trade regardless of magic or symbol:
+
+```
+gAcctStart = deposits found ? sum(OP_BALANCE)
+                            : AccountBalance() - net_of_ALL_trades
+```
+
+* The headline card now reads **ACCOUNT P/L**, with **START** and **BAL**
+  printed beside it so the arithmetic can be checked at a glance.
+* The EA's own filtered result is still shown, explicitly labelled **THIS EA** —
+  useful, but no longer masquerading as the account result.
+* **Equity curve and max drawdown** plot the real account, including deposits.
+
+| | before | after |
+|---|---|---|
+| headline | `+11.03 USD` (green) | `-42.21 USD` (red) |
+| curve | rising | the real account |
+| start | 146.76 (invented) | 200.00 (the deposit) |
+
+### Also in this build
+
+* **`BALANCE`, `EQUITY`, `FLOATING P/L`, `DAY P/L` translated.** `DrawChip`
+  now translates its own label, so every chip is covered at the chokepoint
+  rather than per call site.
+* **`FLAT` → `سوق عرضي`** (sideways market) instead of `بدون صفقة`.
+* **Measured centring.** `TextBoxCenter()` centres on the **measured glyph box
+  in both axes**. The `PRO` badge, the `ARMED` pill and the bias card were
+  placed with offsets hand-tuned for Segoe UI; the Arabic face has different
+  ascent/descent, so they sat high. Measuring fixes English and Arabic at once.
+* **Bias card widened 62 → 76 px.** `سوق عرضي` measures ~57 px at 7 pt and
+  Tahoma runs wider than the test font, so 62 px would have clipped. The VOTE
+  column and agreement bar shifted with it — verified for collisions.
 
 > Still no MQL4 compiler in this environment — static analysis, not a build.
 

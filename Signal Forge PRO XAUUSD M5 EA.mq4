@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Signal Forge PRO XAUUSD M5 EA   |
-//|                    QUANTUM HUD  ·  v2.14  ·  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  ·  v2.15  ·  MQL4 / MetaTrader 4 |
 //|------------------------------------------------------------------|
 //| Evolution of "Signal Forge XAUUSD M5 EA".                        |
 //|                                                                  |
@@ -22,6 +22,34 @@
 //| OnChartEvent is never delivered and they used to freeze in place.|
 //| A hard 40 px of daylight is enforced between cards; BUY results  |
 //| sit above price and SELL results below.                          |
+//| v2.15 - THE TRACKER WAS REPORTING A PROFIT ON A LOSING ACCOUNT.  |
+//|         A demo funded with 200.00 sitting at 157.79 - down 42.21 |
+//|         - displayed "+11.03 USD" with a RISING equity curve.     |
+//|         Cause: every statistic was filtered by                   |
+//|           OrderMagicNumber() == MagicNumber && OrderSymbol()     |
+//|         which is right for judging THIS strategy but wrong for   |
+//|         reporting the ACCOUNT. Trades from other magics, manual  |
+//|         trades and other EAs were invisible, so 53.24 USD of     |
+//|         losses were simply not in the series being plotted, and  |
+//|         the start balance was back-derived from the same         |
+//|         filtered figure - so it agreed with itself and was       |
+//|         wrong. A tracker that hides losses is worse than none.   |
+//|         Fix: an ACCOUNT-WIDE pass over the full history reads    |
+//|         OP_BALANCE funding records and every closed trade        |
+//|         regardless of magic or symbol, giving the true opening   |
+//|         balance. The headline card now shows ACCOUNT P/L with    |
+//|         START and BAL beside it so the arithmetic is visible,    |
+//|         the EA's own figure is labelled THIS EA, and the equity  |
+//|         curve and max drawdown plot the real account.            |
+//|         Also: BALANCE / EQUITY / FLOATING P/L / DAY P/L are      |
+//|         translated (DrawChip now translates its own label, so    |
+//|         every chip is covered); FLAT reads "sideways market";    |
+//|         and TextBoxCenter() centres on the MEASURED glyph box in |
+//|         both axes, fixing the PRO badge, the ARMED pill and the  |
+//|         bias card, which were placed with offsets hand-tuned for |
+//|         Segoe UI and drifted under the Arabic font. The bias     |
+//|         card widened 62 -> 76 px to fit the longer Arabic word   |
+//|         without clipping.                                        |
 //| v2.14 - ARABIC ON BUTTONS WAS REVERSED TWICE + FULL TRANSLATION  |
 //|         v2.13 shaped and reordered EVERY string the same way.    |
 //|         That is right for the canvas and WRONG for objects:      |
@@ -162,7 +190,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Signal Forge PRO - CC BY-NC-SA 4.0"
 #property link      "https://creativecommons.org/licenses/by-nc-sa/4.0/"
-#property version   "2.14"
+#property version   "2.15"
 #property strict
 
 #include <Canvas\Canvas.mqh>
@@ -459,6 +487,17 @@ double   gStatNet = 0, gStatGP = 0, gStatGL = 0, gStatMaxDD = 0;
 double   gStatBestTrade = 0, gStatWorstTrade = 0;
 double   gStatCommission = 0;
 double   gStatToday = 0, gStatWeek = 0, gStatMonth = 0;
+// ACCOUNT-WIDE figures. The stats above are filtered to this EA's own magic
+// number, which is what you want for judging the strategy - but it is NOT
+// what the account actually did. A demo that was funded with 200 and now
+// shows 157.79 is down 42.21 even if this EA's own trades are green, because
+// manual trades, other EAs and other magics are all invisible to that filter.
+// Reporting only the filtered figure made a losing account look profitable,
+// so the tracker now carries both and shows the real one where it matters.
+double   gAcctDeposits = 0;   // sum of OP_BALANCE credits/debits (real funding)
+double   gAcctNetAll   = 0;   // net of EVERY closed trade, any magic/symbol
+double   gAcctStart    = 0;   // true opening balance of the account
+bool     gAcctHasDep   = false;   // did we actually find a deposit record?
 double   gEquityCurve[512];
 int      gEquityPoints = 0;
 
@@ -1077,6 +1116,31 @@ void RebuildStats()
    gEquityPoints = 0;
    gStatToday = 0; gStatWeek = 0; gStatMonth = 0;
 
+   //---- ACCOUNT-WIDE pass: every order, any magic, any symbol -------------
+   // OP_BALANCE entries are deposits and withdrawals; everything else that is
+   // a real BUY/SELL contributes its net result. Together they reconstruct
+   // the true opening balance:  start = balance_now - all_trades - deposits
+   // ...which is the figure the equity curve and GAIN% must be measured from.
+   gAcctDeposits = 0; gAcctNetAll = 0; gAcctHasDep = false;
+   for(int a = 0; a < total; a++)
+     {
+      if(!OrderSelect(a, SELECT_BY_POS, MODE_HISTORY)) continue;
+      int at = OrderType();
+      if(at == OP_BALANCE || at == 6 /* credit */)
+        {
+         gAcctDeposits += OrderProfit();
+         gAcctHasDep = true;
+         continue;
+        }
+      if(at != OP_BUY && at != OP_SELL) continue;
+      gAcctNetAll += OrderProfit() + OrderSwap() + OrderCommission();
+     }
+   // If MT4 gave us the funding records, the opening balance is simply the
+   // first deposit. Otherwise fall back to reconstructing it from the current
+   // balance, which is still account-wide and therefore still honest.
+   gAcctStart = gAcctHasDep ? gAcctDeposits
+                            : (AccountBalance() - gAcctNetAll);
+
    datetime day = DayStart(TimeCurrent());
    MqlDateTime dt; TimeToStruct(day, dt);
    int fromMon = (dt.day_of_week == 0) ? 6 : dt.day_of_week - 1;
@@ -1154,15 +1218,20 @@ void RebuildStats()
       gTrkGainPct[od] = (before > 0) ? gTrkProfit[od] / before * 100.0 : 0.0;
      }
 
-   double run = start, peak = start;
+   // EQUITY CURVE: plot the REAL account, not just this EA's slice of it.
+   // Filtering by magic here is what made a losing account draw a rising
+   // curve - the trades that lost the money were simply not in the series.
+   double run = gAcctStart, peak = gAcctStart;
    gStatMaxDD = 0;
-   if(gEquityPoints < 512) gEquityCurve[gEquityPoints++] = start;
+   if(gEquityPoints < 512) gEquityCurve[gEquityPoints++] = run;
    for(int j = 0; j < total && gEquityPoints < 512; j++)
      {
       if(!OrderSelect(j, SELECT_BY_POS, MODE_HISTORY)) continue;
-      if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber) continue;
-      if(OrderType() != OP_BUY && OrderType() != OP_SELL) continue;
-      run += SelectedNetUSD();
+      int jt = OrderType();
+      if(jt == OP_BALANCE || jt == 6) { run += OrderProfit(); }   // funding
+      else if(jt == OP_BUY || jt == OP_SELL)
+         run += OrderProfit() + OrderSwap() + OrderCommission();
+      else continue;
       peak = MathMax(peak, run);
       if(peak > 0) gStatMaxDD = MathMax(gStatMaxDD, (peak - run) / peak * 100.0);
       gEquityCurve[gEquityPoints++] = run;
@@ -1563,7 +1632,7 @@ string T(const string k)
    if(k == "NEUTRAL")             return "\x0645\x062D\x0627\x064A\x062F";
    if(k == "LONG")                return "\x0634\x0631\x0627\x0621";
    if(k == "SHORT")               return "\x0628\x064A\x0639";
-   if(k == "FLAT")                return "\x0628\x062F\x0648\x0646\x0020\x0635\x0641\x0642\x0629";
+   if(k == "FLAT")                return "\x0633\x0648\x0642\x0020\x0639\x0631\x0636\x064A";
    if(k == "N/A")                 return "\x063A\x064A\x0631\x0020\x0645\x062A\x0627\x062D";
    if(k == "ON")                  return "\x062A\x0634\x063A\x064A\x0644";
    if(k == "OFF")                 return "\x0625\x064A\x0642\x0627\x0641";
@@ -1608,6 +1677,9 @@ string T(const string k)
    if(k == "POSITION OPEN")             return "\x0635\x0641\x0642\x0629\x0020\x0645\x0641\x062A\x0648\x062D\x0629";
    if(k == "pts")                       return "\x0646\x0642\x0637\x0629";
    if(k == "SHOWING ALL")               return "\x0639\x0631\x0636\x0020\x0627\x0644\x0643\x0644";
+   if(k == "ACCOUNT P/L")               return "\x0631\x0628\x062D\x002F\x062E\x0633\x0627\x0631\x0629\x0020\x0627\x0644\x062D\x0633\x0627\x0628";
+   if(k == "START")                     return "\x0627\x0644\x0628\x062F\x0627\x064A\x0629";
+   if(k == "THIS EA")                   return "\x0647\x0630\x0627\x0020\x0627\x0644\x062E\x0628\x064A\x0631";
    if(k == "TODAY")               return "\x0627\x0644\x064A\x0648\x0645";
    if(k == "WIN")                       return "\x0631\x0628\x062D";
    if(k == "LOSS")                      return "\x062E\x0633\x0627\x0631\x0629";
@@ -1940,6 +2012,21 @@ void TextCenter(int x, int y, string s, uint c, int size = 8, string font = "Seg
    gCv.TextOut(x, y, ArFix(s), c, SF_AL_CENTER | SF_AL_TOP);
   }
 
+// Centre a label inside a rectangle on BOTH axes, using the measured glyph
+// box. Anything that centres by eye (a hardcoded y + SC(6)) is only correct
+// for the font it was tuned against: the Arabic face has different ascent and
+// descent, so those labels sat high in the Arabic build. Measuring fixes both
+// languages at once.
+void TextBoxCenter(int x, int y, int w, int h, string s, uint c, int size = 8,
+                   string font = "Segoe UI", uint flags = 0)
+  {
+   gCv.FontSet(UIFont(font), SC(size) * -10, flags);
+   string d = ArFix(s);
+   int tw = 0, th = 0;
+   gCv.TextSize(d, tw, th);
+   gCv.TextOut(x + w / 2, y + (h - th) / 2, d, c, SF_AL_CENTER | SF_AL_TOP);
+  }
+
 // Horizontal meter with a filled portion - used for score, risk and cost.
 // blend two ARGB colours (t = 0..1)
 uint MixC(uint a, uint b, double t)
@@ -2151,7 +2238,8 @@ void DrawChip(int x, int y, int w, int h, string label, string value, uint value
   {
    RaisedPlate(x, y, w, h, SC(6), TPanel, TBorder);
    AccentSpine(x + SC(3), y + SC(5), h - SC(10), accent);
-   Text(x + SC(12), y + SC(6),  label, TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
+   // translate here rather than at each call site, so every chip is covered
+   Text(x + SC(12), y + SC(6),  T(label), TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
    Text(x + SC(12), y + SC(19), value, valueColor, 10, "Segoe UI Black", SF_FW_BLACK);
   }
 
@@ -2179,7 +2267,7 @@ void DrawMiniToggle(int x, int y, int w, int h, string id, bool on, bool availab
       // no chart representation - draw an inert plate on the canvas, with no
       // clickable object behind it
       RaisedPlate(x, y, w, h, SC(3), TBg2, TBorder, true, 1);
-      TextCenterVC(x + w / 2, y, h, "N/A", TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
+      TextBoxCenter(x, y, w, h, T("N/A"), TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
       return;
      }
    uint fill = on ? TBullDeep : TGridC;
@@ -2277,17 +2365,17 @@ void PaintHud()
    if(badgeX + badgeW < colX - SC(6))
      {
       RoundRect(badgeX, hy + SC(2), badgeW, badgeH, SC(3), TAccent, TAccent);
-      TextCenter(badgeX + badgeW / 2, hy + SC(2), "PRO", A(C'6,10,18',255), 7,
-                 "Segoe UI Black", SF_FW_BLACK);
+      TextBoxCenter(badgeX, hy + SC(2), badgeW, badgeH, "PRO", A(C'6,10,18',255), 7,
+                    "Segoe UI Black", SF_FW_BLACK);
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v2.14", TTextDim, 7);
+        "  ·  RAW  ·  v2.15", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
-   TextCenter(pillX + SC(13) + (pillW - SC(13)) / 2, hy + SC(6), st, StateColor(), 7,
-              "Segoe UI Semibold", SF_FW_SEMI);
+   TextBoxCenter(pillX + SC(18), hy + SC(3), pillW - SC(24), pillH, st, StateColor(), 7,
+                 "Segoe UI Semibold", SF_FW_SEMI);
 
    DrawButton(colX, hy + SC(3), colW, pillH, "BTN_COLLAPSE",
               gHudCollapsed ? "+" : "–", false, TAccent);
@@ -2504,7 +2592,7 @@ void PaintHud()
       TextVC(pad + SC(10),  y, SC(26), T("FILTER"), TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
       TextVC(pad + SC(106), y, SC(26), T("DRAW"),   TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
       TextVC(pad + SC(148), y, SC(26), T("BIAS"),   TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-      TextVC(pad + SC(212), y, SC(26), T("VOTE"), TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+      TextVC(pad + SC(226), y, SC(26), T("VOTE"), TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
       TextRight(pad + innerW - SC(10), y + SC(9), T("AGREEMENT"), TAccent, 7,
                 "Segoe UI Black", SF_FW_BLACK);
       y += SC(30);
@@ -2546,18 +2634,18 @@ void PaintHud()
          else if(gBull[i])     { bgC = TBullDeep; edC = TBull;   }
          else if(gBear[i])     { bgC = TBearDeep; edC = TBear;   }
          else                  { bgC = TGreyDeep; edC = TLite;   }  // FLAT = grey
-         int bW = SC(62), bH = SC(17);
+         int bW = SC(76), bH = SC(17);   // fits the longest bias word in both languages
          int bX = pad + SC(148), bY = y + (cellH - bH) / 2;
          RaisedPlate(bX, bY, bW, bH, SC(3), bgC, edC, true, 1);
-         TextCenterVC(bX + bW / 2, bY, bH, bias, A(C'255,255,255',255), 7,
-                      "Segoe UI Black", SF_FW_BLACK);
+         TextBoxCenter(bX, bY, bW, bH, bias, A(C'255,255,255',255), 7,
+                       "Segoe UI Black", SF_FW_BLACK);
 
-         TextVC(pad + SC(216), y, cellH,
+         TextVC(pad + SC(230), y, cellH,
                 gEnabled[i] ? (Fmt(share * 100.0, 0) + "%") : "--",
                 gEnabled[i] ? TText : TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
 
          // AGREEMENT bar: full when this filter votes with the current signal
-         int barX = pad + SC(248), barW = innerW - SC(260);
+         int barX = pad + SC(262), barW = innerW - SC(274);
          if(!gEnabled[i]) Meter(barX, y + (cellH - SC(7)) / 2, barW, SC(7), 0, TGridC, TGridC);
          else
            {
@@ -2760,7 +2848,8 @@ void PaintTracker()
    TextRight(cx2 + cW[2] - SC(6), ry + SC(5), Signed(gStatNet, 2),
              gStatNet >= 0 ? TBull : TBear, 8, "Segoe UI Black", SF_FW_BLACK);
    cx2 += cW[2];
-   double totGain = (gTrkStartBal > 0) ? gStatNet / gTrkStartBal * 100.0 : 0;
+   double gainBase = (gAcctStart > 0) ? gAcctStart : gTrkStartBal;
+   double totGain  = (gainBase > 0) ? gStatNet / gainBase * 100.0 : 0;
    TextRight(cx2 + cW[3] - SC(6), ry + SC(6), Signed(totGain, 2) + "%",
              gStatNet >= 0 ? TBull : TBear, 7, "Segoe UI Black", SF_FW_BLACK);
    cx2 += cW[3];
@@ -2772,21 +2861,31 @@ void PaintTracker()
    y += tblH + SC(8);
 
    //---------- FINAL P/L ----------
+   // This is the headline number, so it reports the ACCOUNT, not this EA's
+   // filtered slice of it. Showing the magic-filtered figure here is what
+   // made a demo that went 200.00 -> 157.79 display "+11.03": the trades
+   // that lost the money carried a different magic and were skipped.
    int flH = SC(46);
-   double gross = gStatNet + gStatCommission;
+   double acctPL   = AccountBalance() - gAcctStart;   // the truth
+   double gross    = gStatNet + gStatCommission;
+   bool   acctUp   = (acctPL >= 0);
    RaisedPlate(pad, y, innerW, flH, SC(8),
-               gStatNet >= 0 ? TBullDeep : TBearDeep, gStatNet >= 0 ? TBull : TBear);
-   AccentSpine(pad + SC(4), y + SC(8), flH - SC(16), gStatNet >= 0 ? TBull : TBear);
-   Text(pad + SC(13), y + SC(6), T("FINAL P/L  (NET OF COMMISSION)"), TText, 7,
+               acctUp ? TBullDeep : TBearDeep, acctUp ? TBull : TBear);
+   AccentSpine(pad + SC(4), y + SC(8), flH - SC(16), acctUp ? TBull : TBear);
+   Text(pad + SC(13), y + SC(6), T("ACCOUNT P/L"), TText, 7,
         "Segoe UI Semibold", SF_FW_SEMI);
-   Text(pad + SC(13), y + SC(20), Signed(gStatNet, 2) + "  USD",
-        gStatNet >= 0 ? TBull : TBear, 15, "Segoe UI Black", SF_FW_BLACK);
-   TextRight(pad + innerW - SC(12), y + SC(8), T("GROSS") + " " + Signed(gross, 2), TTextDim, 7,
-             "Segoe UI Semibold", SF_FW_SEMI);
-   TextRight(pad + innerW - SC(12), y + SC(20), T("FEES") + " -" + Fmt(gStatCommission, 2), TWarn, 8,
-             "Segoe UI Black", SF_FW_BLACK);
-   TextRight(pad + innerW - SC(12), y + SC(32), T("BAL") + " " + Fmt(AccountBalance(), 2), TText, 7,
-             "Segoe UI Semibold", SF_FW_SEMI);
+   Text(pad + SC(13), y + SC(20), Signed(acctPL, 2) + "  USD",
+        acctUp ? TBull : TBear, 15, "Segoe UI Black", SF_FW_BLACK);
+   // right column: where that number comes from, so the two can never
+   // silently disagree again
+   TextRight(pad + innerW - SC(12), y + SC(6), T("START") + " " + Fmt(gAcctStart, 2),
+             TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
+   TextRight(pad + innerW - SC(12), y + SC(18), T("BAL") + " " + Fmt(AccountBalance(), 2),
+             TText, 8, "Segoe UI Black", SF_FW_BLACK);
+   TextRight(pad + innerW - SC(12), y + SC(31),
+             T("THIS EA") + " " + Signed(gStatNet, 2) + "  " +
+             T("FEES") + " -" + Fmt(gStatCommission, 2),
+             gStatNet >= 0 ? TBull : TWarn, 7, "Segoe UI Semibold", SF_FW_SEMI);
    y += flH + SC(8);
 
    //---------- equity sparkline ----------
@@ -3797,7 +3896,7 @@ int OnInit()
       Print("[SF-PRO] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("SF-PRO v2.14 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("SF-PRO v2.15 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
 
    // Print exactly which overlays are armed, so a "nothing is drawn" report
@@ -3805,7 +3904,7 @@ int OnInit()
    string ov = "";
    for(int v = 0; v < SF_FILTERS; v++)
       if(gDrawFilter[v]) ov += (ov == "" ? "" : ",") + gFilterName[v];
-   Print("[SF-PRO] v2.14 build | overlay master=", DrawIndicatorOverlay,
+   Print("[SF-PRO] v2.15 build | overlay master=", DrawIndicatorOverlay,
          " | bars=", Bars, " | seriesReady=", SeriesReady(),
          " | drawing: ", (ov == "" ? "(none - switch one ON in FILTERS)" : ov));
 
