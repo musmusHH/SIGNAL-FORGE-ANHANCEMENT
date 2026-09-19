@@ -203,13 +203,13 @@ q=Page(Hf); header(q,3,1)
 pad,innerW,tabW=tabs_row(q,headerH+SC(6),1)
 y=headerH+SC(6)+SC(32)
 q.sunk(pad,y,innerW,SC(26),SC(6),TBg2); hdry=y; y+=SC(30)
-NAMES=["SMA CROSS","RSI","MACD","SUPERTREND","STOCHASTIC","BOLLINGER MID","EMA CROSS","AWESOME OSC"]
+NAMES=["SMA CROSS","RSI","MACD","SUPERTREND","STOCH","BOLL MID","EMA CROSS","AWESOME"]
 WTS=[1,1,1,1,1,1,1,1]   # v1: every enabled filter is one equal vote
 BIAS=["BULLISH","FLAT","BULLISH","BEARISH","FLAT","BULLISH","BEARISH","FLAT"]
 # FilterHasOverlay(): only these indices can be plotted on the price chart
 HASOV=[True,False,False,True,False,True,True,False]
 DRAWN=[False,False,False,True,False,False,False,False]   # OverlayFilters="3"
-tSz=SC(15); tXoff=SC(120)
+tW=SC(32); tH=SC(15); tXoff=SC(106)
 rowH=SC(frowH); rows=[]
 for i,n in enumerate(NAMES):
     if y+rowH > Hf-SC(46): break
@@ -222,13 +222,13 @@ for i,n in enumerate(NAMES):
     st=BIAS[i]
     bg={"FLAT":TGreyDeep,"BULLISH":TBullDeep,"BEARISH":TBearDeep}[st]
     ed={"FLAT":TLite,"BULLISH":TBull,"BEARISH":TBear}[st]
-    tY=y+(cellH-tSz)//2
+    tY=y+(cellH-tH)//2
     if HASOV[i]:
-        tf=TAccent if DRAWN[i] else TGridC
-        te=TAccent if DRAWN[i] else TBorder
+        tf=TBullDeep if DRAWN[i] else TGridC
+        te=TBull     if DRAWN[i] else TBorder
     else:
         tf,te=TBg2,TBorder
-    q.raised(pad+tXoff,tY,tSz,tSz,SC(3),tf,te,True,1)
+    q.raised(pad+tXoff,tY,tW,tH,SC(3),tf,te,True,1)
     q.raised(pad+SC(biasX),bY,SC(biasW),bH,SC(3),bg,ed,True,1)
     # EA: 1.0 when the filter sides with the live signal, 0.55 when it has a
     # bias that disagrees, 0.12 when flat. Preview signal here is BEARISH.
@@ -244,7 +244,7 @@ for i,l in enumerate(["CORE","FILTERS"]):
     bx=pad+(tabW+SC(8))*i
     q.TC(bx+tabW//2,headerH+SC(6)+SC(5),l,(6,10,18) if i==1 else TText,8,1,f"tab{i}")
 q.T(pad+SC(10),hdry+SC(8),"FILTER",TAccent,7,1,"la","h0")
-q.T(pad+SC(100),hdry+SC(8),"DRAW",TAccent,7,1,"la","hD")
+q.T(pad+SC(106),hdry+SC(8),"DRAW",TAccent,7,1,"la","hD")
 q.T(pad+SC(biasX),hdry+SC(8),"BIAS",TAccent,7,1,"la","h1")
 q.T(pad+SC(212),hdry+SC(8),"VOTE",TAccent,7,1,"la","h2")
 q.TR(pad+innerW-SC(10),hdry+SC(9),"AGREEMENT",TAccent,7,1,"h3")
@@ -252,11 +252,11 @@ for i,(ry2,n,w,st,bY,bH,tY) in enumerate(rows):
     cellH=rowH-SC(3)
     q.TVC(pad+SC(22),ry2,cellH,n,TText,7,1,f"n{i}")
     if HASOV[i]:
-        gl="O" if DRAWN[i] else "-"
-        gc=(6,10,18) if DRAWN[i] else TTextDim
+        gl="ON" if DRAWN[i] else "OFF"
+        gc=(255,255,255) if DRAWN[i] else TTextDim
     else:
-        gl,gc="-",TTextDim
-    q.TCVC(pad+tXoff+tSz//2,tY,tSz,gl,gc,7,1,f"tg{i}")
+        gl,gc="N/A",TTextDim
+    q.TCVC(pad+tXoff+tW//2,tY,tH,gl,gc,7,1,f"tg{i}")
     q.TCVC(pad+SC(biasX)+SC(biasW)//2,bY,bH,st,(255,255,255),7,1,f"bi{i}")
     q.TVC(pad+SC(216),ry2,cellH,f"{100.0/len(rows):.0f}%",TText,7,1,f"w{i}")
 q.TC(pad+bw2//2,fy+SC(6),"ACTIVE ONLY",TText,8,1,"f1")

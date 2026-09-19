@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Signal Forge PRO XAUUSD M5 EA   |
-//|                    QUANTUM HUD  ·  v2.07  ·  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  ·  v2.08  ·  MQL4 / MetaTrader 4 |
 //|------------------------------------------------------------------|
 //| Evolution of "Signal Forge XAUUSD M5 EA".                        |
 //|                                                                  |
@@ -22,6 +22,17 @@
 //| OnChartEvent is never delivered and they used to freeze in place.|
 //| A hard 40 px of daylight is enforced between cards; BUY results  |
 //| sit above price and SELL results below.                          |
+//| v2.08 - OVERLAY INVISIBLE ON LIVE CHARTS (real root cause).      |
+//| On a live chart MT4 backfills history asynchronously, so iMA()   |
+//| and iSAR() return 0.0 - NOT EMPTY_VALUE - for bars that are not  |
+//| downloaded yet. PlotSegment only rejected EMPTY_VALUE, so it     |
+//| created trend lines at price 0.0: present on the chart but far   |
+//| below the visible range, i.e. invisible. In the Strategy Tester  |
+//| history is complete before the first tick, which is exactly why  |
+//| every indicator appeared there. Values <= 0 are now rejected,    |
+//| SeriesReady() gates the overlay, and the dirty flag re-arms      |
+//| until real data exists so it self-heals during backfill.         |
+//|                                                                  |
 //| v2.07 - LIVE OVERLAY, PER-FILTER PLOTS, STANDALONE TRACKER.      |
 //| The indicator overlay was only ever drawn from the NEW-BAR branch |
 //| of OnTick, so on a live M5 chart nothing appeared for up to five  |
@@ -48,7 +59,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Signal Forge PRO - CC BY-NC-SA 4.0"
 #property link      "https://creativecommons.org/licenses/by-nc-sa/4.0/"
-#property version   "2.07"
+#property version   "2.08"
 #property strict
 
 #include <Canvas\Canvas.mqh>
@@ -1431,21 +1442,24 @@ void DrawButton(int x, int y, int w, int h, string id, string caption, bool acti
 // Small square ON/OFF used per filter row to add or remove its chart overlay.
 // Three states: lit (drawn), dark (available but off), and "--" for the
 // oscillators that have no price-chart representation at all.
-void DrawMiniToggle(int x, int y, int sz, string id, bool on, bool available)
+// Reads "ON" / "OFF" explicitly rather than a cryptic glyph, and is wide
+// enough to hit comfortably with the mouse.
+void DrawMiniToggle(int x, int y, int w, int h, string id, bool on, bool available)
   {
    bool hover = (gHoverId == id);
    if(!available)
      {
-      RaisedPlate(x, y, sz, sz, SC(3), TBg2, TBorder, true, 1);
-      TextCenterVC(x + sz / 2, y, sz, "-", TTextDim, 7, "Segoe UI Black", SF_FW_BLACK);
-      return;   // deliberately NOT registered: nothing to toggle
+      // no chart representation for this filter - inert, never registered
+      RaisedPlate(x, y, w, h, SC(3), TBg2, TBorder, true, 1);
+      TextCenterVC(x + w / 2, y, h, "N/A", TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
+      return;
      }
-   uint fill = on ? TAccent : (hover ? TPanelHi : TGridC);
-   uint edge = on ? TAccent : (hover ? TAccent   : TBorder);
-   uint tcol = on ? A(C'6,10,18',255) : (hover ? TAccent : TTextDim);
-   RaisedPlate(x, y, sz, sz, SC(3), fill, edge, true, 1);
-   TextCenterVC(x + sz / 2, y, sz, on ? "O" : "-", tcol, 7, "Segoe UI Black", SF_FW_BLACK);
-   RegisterButtonLocal(id, x, y, sz, sz);
+   uint fill = on ? TBullDeep : (hover ? TPanelHi : TGridC);
+   uint edge = on ? TBull     : (hover ? TAccent  : TBorder);
+   uint tcol = on ? A(C'255,255,255',255) : (hover ? TAccent : TTextDim);
+   RaisedPlate(x, y, w, h, SC(3), fill, edge, true, 1);
+   TextCenterVC(x + w / 2, y, h, on ? "ON" : "OFF", tcol, 7, "Segoe UI Black", SF_FW_BLACK);
+   RegisterButtonLocal(id, x, y, w, h);
   }
 
 void PaintHud()
@@ -1521,7 +1535,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v2.07", TTextDim, 7);
+        "  ·  RAW  ·  v2.08", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -1727,8 +1741,8 @@ void PaintHud()
      {
       SunkenWell(pad, y, innerW, SC(26), SC(6), TBg2);
       TextVC(pad + SC(10),  y, SC(26), "FILTER", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-      TextVC(pad + SC(100), y, SC(26), "DRAW",   TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-      TextVC(pad + SC(142), y, SC(26), "BIAS",   TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+      TextVC(pad + SC(106), y, SC(26), "DRAW",   TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+      TextVC(pad + SC(148), y, SC(26), "BIAS",   TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
       TextVC(pad + SC(212), y, SC(26), "VOTE", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
       TextRight(pad + innerW - SC(10), y + SC(9), "AGREEMENT", TAccent, 7,
                 "Segoe UI Black", SF_FW_BLACK);
@@ -1758,9 +1772,9 @@ void PaintHud()
 
          // DRAW toggle: sits BETWEEN the filter name and the bias card and
          // adds/removes that indicator's plot on the price chart.
-         int tSz = SC(15);
-         int tX  = pad + SC(120), tY = y + (cellH - tSz) / 2;
-         DrawMiniToggle(tX, tY, tSz, "DRAW_" + IntegerToString(i),
+         int tW = SC(32), tH = SC(15);
+         int tX = pad + SC(106), tY = y + (cellH - tH) / 2;
+         DrawMiniToggle(tX, tY, tW, tH, "DRAW_" + IntegerToString(i),
                         gDrawFilter[i], FilterHasOverlay(i));
 
          // BIAS card: SOLID RAISED, background carries the state colour and
@@ -1772,7 +1786,7 @@ void PaintHud()
          else if(gBear[i])     { bgC = TBearDeep; edC = TBear;   }
          else                  { bgC = TGreyDeep; edC = TLite;   }  // FLAT = grey
          int bW = SC(62), bH = SC(17);
-         int bX = pad + SC(142), bY = y + (cellH - bH) / 2;
+         int bX = pad + SC(148), bY = y + (cellH - bH) / 2;
          RaisedPlate(bX, bY, bW, bH, SC(3), bgC, edC, true, 1);
          TextCenterVC(bX + bW / 2, bY, bH, bias, A(C'255,255,255',255), 7,
                       "Segoe UI Black", SF_FW_BLACK);
@@ -2117,9 +2131,23 @@ void DrawOrb(bool buy, int shift)
    ObjectSetInteger(0, link, OBJPROP_HIDDEN, true);
   }
 
+// True once this symbol/period actually has usable data. iMA() on a partially
+// downloaded series returns 0.0, which silently produces invisible plots.
+bool SeriesReady()
+  {
+   if(Bars < 50) return false;
+   if(Close[0] <= 0.0 || Close[Bars - 1] <= 0.0) return false;
+   double probe = iMA(NULL, 0, 20, 0, MODE_SMA, PRICE_CLOSE, 1);
+   return (probe > 0.0 && probe != EMPTY_VALUE && MathIsValidNumber(probe));
+  }
+
 void BuildHistoricalOrbs()
   {
    if(!DrawSignalOrbs || gSignalHistoryBuilt != 0) return;
+   // gSignalHistoryBuilt is a ONE-SHOT latch: if it were set while the live
+   // history was still backfilling, the orbs would be computed from 0.0-valued
+   // indicators and never rebuilt. Wait for real data first.
+   if(!SeriesReady()) return;
    int maxBars = MathMax(10, MathMin(SignalHistoryBars, Bars - 5));
    int bull[SF_FILTERS], bear[SF_FILTERS];
    ArrayInitialize(bull, 0); ArrayInitialize(bear, 0);
@@ -2179,7 +2207,15 @@ void DrawTradeLevelLines()
 
 void PlotSegment(int filter, int line, int shift, double v0, double v1, color c, int w)
   {
+   // On a LIVE chart the M5 history is backfilled asynchronously, so iMA()/
+   // iSAR() return 0.0 (NOT EMPTY_VALUE) for bars that are not downloaded yet.
+   // Only EMPTY_VALUE used to be rejected, so trend lines were created at
+   // price 0.0 - far below the visible range, i.e. invisible. In the Strategy
+   // Tester history is complete before the first tick, which is exactly why
+   // the overlay looked perfect there and missing live.
    if(v0 == EMPTY_VALUE || v1 == EMPTY_VALUE) return;
+   if(v0 <= 0.0 || v1 <= 0.0) return;
+   if(!MathIsValidNumber(v0) || !MathIsValidNumber(v1)) return;
    string n = PFX + "OV_" + IntegerToString(filter) + "_" + IntegerToString(line) + "_" + IntegerToString(shift);
    if(ObjectFind(0, n) < 0) ObjectCreate(0, n, OBJ_TREND, 0, Time[shift + 1], v0, Time[shift], v1);
    ObjectMove(0, n, 0, Time[shift + 1], v0);
@@ -2228,8 +2264,13 @@ void BuildSTSeries(int maxShift, double &line[], int &dir[])
 void DrawOverlay()
   {
    ObjectsDeleteAll(0, PFX + "OV_");
+   if(!DrawIndicatorOverlay) { gOverlayDirty = false; return; }
+
+   // Do not clear the dirty flag until the symbol actually has enough history
+   // to plot from, otherwise a single early pass during backfill would latch
+   // "clean" and nothing would retry for a full M5 bar.
+   if(Bars < 50 || !SeriesReady()) { gOverlayDirty = true; return; }
    gOverlayDirty = false;
-   if(!DrawIndicatorOverlay) return;
    int bars = MathMax(10, MathMin(OverlayBars, Bars - 5));
 
    if(gDrawFilter[0])   // SMA cross
@@ -2895,11 +2936,11 @@ void LoadFilterConfig()
    gFilterName[1]  = "RSI";
    gFilterName[2]  = "MACD";
    gFilterName[3]  = "SUPERTREND";
-   gFilterName[4]  = "STOCHASTIC";
-   gFilterName[5]  = "BOLLINGER MID";
+   gFilterName[4]  = "STOCH";
+   gFilterName[5]  = "BOLL MID";
    gFilterName[6]  = "EMA CROSS";
-   gFilterName[7]  = "AWESOME OSC";
-   gFilterName[8]  = "PARABOLIC SAR";
+   gFilterName[7]  = "AWESOME";
+   gFilterName[8]  = "PSAR";
    gFilterName[9]  = "CCI";
    gFilterName[10] = "ADX / DI";
 
@@ -2978,8 +3019,17 @@ int OnInit()
       Print("[SF-PRO] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("SF-PRO v2.07 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("SF-PRO v2.08 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
+
+   // Print exactly which overlays are armed, so a "nothing is drawn" report
+   // can be diagnosed from the Experts log without guesswork.
+   string ov = "";
+   for(int v = 0; v < SF_FILTERS; v++)
+      if(gDrawFilter[v]) ov += (ov == "" ? "" : ",") + gFilterName[v];
+   Print("[SF-PRO] v2.08 build | overlay master=", DrawIndicatorOverlay,
+         " | bars=", Bars, " | seriesReady=", SeriesReady(),
+         " | drawing: ", (ov == "" ? "(none - switch one ON in FILTERS)" : ov));
    gLastBar = 0;
 
    // Paint the chart NOW. DrawOverlay() used to be reachable only from the
@@ -3039,7 +3089,10 @@ void OnTimer()
    TrackClosedTrades();
    // A DRAW toggle (or a fresh OnInit) marks the overlay dirty; repaint it
    // here so the chart reacts instantly instead of waiting for a new bar.
+   // DrawOverlay() re-arms the flag itself while the series is still
+   // backfilling, so this keeps retrying until the data is genuinely there.
    if(gOverlayDirty) DrawOverlay();
+   if(gSignalHistoryBuilt == 0) BuildHistoricalOrbs();
    DrawTradeLevelLines();
    DrawResultPills();
    PaintAll();

@@ -1,4 +1,4 @@
-# Signal Forge PRO — XAUUSD M5 EA (v2.07)
+# Signal Forge PRO — XAUUSD M5 EA (v2.08)
 
 > **v2.05 — the ORIGINAL v1 trading strategy has been restored.**
 > The trading engine is now exactly the v1 engine. The entire v2 risk layer
@@ -687,4 +687,76 @@ a panel, breaches the 40 px separation, or leaves the window.
 
 > **Still unverified:** there is no MQL4 compiler in this environment. The
 > structural audits above are static analysis, not a build.
+
+---
+
+## v2.08 — the REAL reason the overlay was invisible on a live chart
+
+v2.07 fixed a genuine bug (the overlay was only drawn from the new-bar branch
+of `OnTick`), but it was **not the whole story** — the report came back
+unchanged. Digging further found the actual root cause.
+
+### Root cause: `iMA()` returns `0.0`, not `EMPTY_VALUE`, during backfill
+
+On a **live** chart MT4 downloads history **asynchronously**. Until the M5
+series is fully backfilled, `iMA()` / `iSAR()` return **`0.0`** for the bars
+that are not present yet — *not* `EMPTY_VALUE`.
+
+`PlotSegment()` only rejected `EMPTY_VALUE`:
+
+```cpp
+if(v0 == EMPTY_VALUE || v1 == EMPTY_VALUE) return;   // 0.0 slips through
+```
+
+So the EA dutifully created `OBJ_TREND` objects **at price 0.0** — present on
+the chart, correctly named, but drawn far below the visible price range.
+Hence "no indicators on the chart" while `ObjectsTotal()` was non-zero.
+
+In the **Strategy Tester** the history is fully materialised before the first
+tick, so `iMA()` never returns `0.0`, every segment lands at a real price, and
+all indicators appear. That asymmetry is the whole bug.
+
+**Fix (three parts):**
+1. `PlotSegment()` rejects non-positive and non-finite values.
+2. New `SeriesReady()` probe gates both `DrawOverlay()` and
+   `BuildHistoricalOrbs()` — the latter is a **one-shot latch**, so latching it
+   mid-backfill would have frozen the orbs permanently.
+3. `DrawOverlay()` **re-arms** `gOverlayDirty` instead of clearing it when the
+   series is not ready, and `OnTimer` retries — so it self-heals within one
+   refresh once data lands, rather than waiting 5 minutes for a bar close.
+
+### Diagnostics
+
+`OnInit` now prints the build and overlay state to the Experts log:
+
+```
+[SF-PRO] v2.08 build | overlay master=true | bars=5000 | seriesReady=true
+         | drawing: SUPERTREND
+```
+
+If this line is missing or says `v2.07`, MT4 is running a stale `.ex4` —
+recompile. If it says `drawing: (none ...)`, switch a filter ON.
+
+### ON/OFF buttons made explicit
+
+The toggle now reads **`ON` / `OFF`** (green when on) instead of a cryptic
+`O`/`-`, and is wider (32×15) so it is easy to hit. Filters with no chart
+representation read **`N/A`** and are inert.
+
+Making it wider no longer fit, so four labels were shortened —
+`STOCHASTIC→STOCH`, `BOLLINGER MID→BOLL MID`, `AWESOME OSC→AWESOME`,
+`PARABOLIC SAR→PSAR` — and the BIAS card moved 142→148 px. Verified column
+budget at 100 % scale: name→toggle 9 px, toggle→bias 10 px, bias→vote 6 px.
+
+### Verification
+
+```
+brace / paren / bracket ................ 0 / 0 / 0
+duplicate / forward-referenced fns ..... none
+inputs ................................. 92, all read
+presets ................................ 3 x 92 keys, no missing/extra
+all five renderers/verifiers ........... pass
+```
+
+> Still no MQL4 compiler in this environment — static analysis, not a build.
 
