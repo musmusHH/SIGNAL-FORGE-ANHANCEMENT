@@ -1,4 +1,4 @@
-# Signal Forge PRO — XAUUSD M5 EA (v2.10)
+# Signal Forge PRO — XAUUSD M5 EA (v2.11)
 
 > **v2.05 — the ORIGINAL v1 trading strategy has been restored.**
 > The trading engine is now exactly the v1 engine. The entire v2 risk layer
@@ -935,6 +935,72 @@ fall back to.
 
 Header geometry re-checked at 100 %: collapse button `287..315`, ARMED pill
 `322..418` — 7 px clear, both inside the 430 px panel.
+
+> Still no MQL4 compiler in this environment — static analysis, not a build.
+
+---
+
+## v2.11 — the click was being cancelled by our own repaint
+
+v2.10 made the controls real `OBJ_BUTTON` objects, which removed the black
+boxes. They still did nothing when clicked, and the button visibly **flashed** —
+that flash was the decisive clue: MT4 *was* registering the press, so the
+problem was between the press and the event.
+
+### Root cause: a race between the press and the repaint timer
+
+MT4 handles a button in two stages:
+
+| stage | what MT4 does |
+|---|---|
+| mouse **DOWN** | sets `OBJPROP_STATE = true`, draws it pressed |
+| mouse **UP**   | queues `CHARTEVENT_OBJECT_CLICK` |
+
+The click is only generated if the button is **still pressed** at mouse-up.
+
+`ChartButton()` reset `OBJPROP_STATE` to `false` on every repaint — and
+`OnTimer` repaints every **220 ms**, while a human click lasts **80–150 ms**.
+So a timer tick landing inside the press popped the button back up, MT4
+concluded the press had been abandoned, and **discarded the pending click**.
+The button flashed (down, then forced up) and no event ever fired.
+
+This is why v2.09 and v2.10 both appeared dead: the dispatch code was fine, but
+the event was destroyed before it was ever created.
+
+**Fix:**
+1. **`OBJPROP_STATE` is never written by a repaint** — only once on creation,
+   and once in the click handler to release the latch.
+2. **Repaints freeze for 600 ms around pointer activity** (`RepaintLocked()`),
+   so the control is never rebuilt while the user is pressing it. Trading
+   logic is unaffected; only the cosmetic refresh pauses.
+3. **`CHARTEVENT_OBJECT_CHANGE` is accepted too**, since some builds report a
+   button press through it rather than `OBJECT_CLICK`.
+
+### Diagnostics — the log now answers the question directly
+
+`OnInit` proves the controls exist as real objects:
+
+```
+[SF-PRO] v2.11 build | overlay master=true | bars=5000 | seriesReady=true | drawing: SUPERTREND
+[SF-PRO] controls created: 12 real OBJ_BUTTON objects | e.g. SFP_BTN_BTN_COLLAPSE x=299 y=22 w=28 h=22
+[SF-PRO] interactive=true | if clicking prints no 'event id=' line, the click is not reaching the EA
+```
+
+And every chart event is logged, so one click settles it:
+
+```
+[SF-PRO] event id=1 obj=SFP_BTN_DRAW_3 lp=0 dp=0
+[SF-PRO] click -> DRAW_3
+[SF-PRO] DRAW ON  SUPERTREND
+```
+
+* `controls created: 0` → the buttons were never built.
+* No `event id=` line on click → the click is not reaching the EA at all
+  (AutoTrading off, or the chart is not accepting object events).
+* `event id=` but no `click ->` → the name did not match a control.
+
+Each points at a different fault, so the next report can be resolved in one
+step instead of guessing.
 
 > Still no MQL4 compiler in this environment — static analysis, not a build.
 

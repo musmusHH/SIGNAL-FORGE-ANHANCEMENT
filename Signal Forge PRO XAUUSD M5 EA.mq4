@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Signal Forge PRO XAUUSD M5 EA   |
-//|                    QUANTUM HUD  ·  v2.10  ·  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  ·  v2.11  ·  MQL4 / MetaTrader 4 |
 //|------------------------------------------------------------------|
 //| Evolution of "Signal Forge XAUUSD M5 EA".                        |
 //|                                                                  |
@@ -22,6 +22,15 @@
 //| OnChartEvent is never delivered and they used to freeze in place.|
 //| A hard 40 px of daylight is enforced between cards; BUY results  |
 //| sit above price and SELL results below.                          |
+//| v2.11 - THE CLICK WAS BEING CANCELLED BY OUR OWN REPAINT.        |
+//| MT4 sets OBJPROP_STATE=true on mouse DOWN and only queues the    |
+//| click event on mouse UP. The HUD repaints every 220 ms and each  |
+//| repaint reset STATE to false, so a timer tick landing inside a   |
+//| normal 80-150 ms press popped the button back up and MT4 threw   |
+//| the pending click away: it flashed, nothing fired. STATE is no   |
+//| longer written by repaints, and repaints are frozen for 600 ms   |
+//| around pointer activity. OBJECT_CHANGE is also accepted.         |
+//|                                                                  |
 //| v2.10 - REAL BUTTONS. NO BITMAP CONTROLS.                        |
 //| MT4 has no transparent OBJ_BUTTON: clrNONE renders BLACK, and the |
 //| object is drawn ON TOP of the canvas - which is why v2.09 covered |
@@ -79,7 +88,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Signal Forge PRO - CC BY-NC-SA 4.0"
 #property link      "https://creativecommons.org/licenses/by-nc-sa/4.0/"
-#property version   "2.10"
+#property version   "2.11"
 #property strict
 
 #include <Canvas\Canvas.mqh>
@@ -317,6 +326,11 @@ bool     gTrkCollapsed = false; // standalone tracker panel collapsed?
 bool     gShowAllFilters = false;
 bool     gPaused = false;
 int      gMouseX = -1, gMouseY = -1;   // chart-space cursor, for hover + click fallback
+uint     gLastMouseMs = 0;             // when the pointer last moved/clicked
+// A repaint rebuilds button objects. If that happens between mouse-DOWN and
+// mouse-UP, MT4 discards the pending click - the button flashes and nothing
+// fires. Freeze automatic repaints for a moment around any pointer activity.
+bool RepaintLocked() { return (GetTickCount() - gLastMouseMs) < 600; }
 datetime gSignalHistoryBuilt = 0;
 int      gKnownResultHistory = -1;
 bool     gCardsDirty = true;      // force a closed-card rebuild (chart moved)
@@ -1093,12 +1107,7 @@ void ChartButton(string id, int x, int y, int w, int h, string caption,
          (color)ObjectGetInteger(0, n, OBJPROP_BGCOLOR) == bg &&
          (color)ObjectGetInteger(0, n, OBJPROP_COLOR)   == fg &&
          ObjectGetString(0, n, OBJPROP_TEXT)            == caption)
-        {
-         // nothing visual changed; just make sure it is not stuck pressed
-         if((bool)ObjectGetInteger(0, n, OBJPROP_STATE))
-            ObjectSetInteger(0, n, OBJPROP_STATE, false);
-         return;
-        }
+         return;   // nothing changed - see the STATE warning below
      }
    ObjectSetInteger(0, n, OBJPROP_CORNER,       CORNER_LEFT_UPPER);
    ObjectSetInteger(0, n, OBJPROP_XDISTANCE,    x);
@@ -1113,9 +1122,17 @@ void ChartButton(string id, int x, int y, int w, int h, string caption,
    ObjectSetInteger(0, n, OBJPROP_BORDER_COLOR, border);
    ObjectSetInteger(0, n, OBJPROP_BORDER_TYPE,  BORDER_RAISED);
    ObjectSetInteger(0, n, OBJPROP_BACK,         false);
-   ObjectSetInteger(0, n, OBJPROP_STATE,        false);
+   // NEVER write OBJPROP_STATE from a repaint. MT4 sets STATE=true on mouse
+   // DOWN and only queues CHARTEVENT_OBJECT_CLICK on mouse UP. The HUD
+   // repaints every ~220 ms, so a timer tick landing inside a normal
+   // 80-150 ms press popped the button back up and MT4 cancelled the pending
+   // click: the button flashed and no event was ever delivered. STATE is now
+   // reset exactly once, in the click handler itself.
+   if(fresh) ObjectSetInteger(0, n, OBJPROP_STATE, false);
    ObjectSetInteger(0, n, OBJPROP_SELECTABLE,   false);
    ObjectSetInteger(0, n, OBJPROP_SELECTED,     false);
+   // HIDDEN only removes the object from the Object List dialog; it does not
+   // affect clicks. Keep it tidy but explicit.
    ObjectSetInteger(0, n, OBJPROP_HIDDEN,       true);
    ObjectSetInteger(0, n, OBJPROP_ZORDER,       1000);
   }
@@ -1636,7 +1653,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v2.10", TTextDim, 7);
+        "  ·  RAW  ·  v2.11", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -3125,7 +3142,7 @@ int OnInit()
       Print("[SF-PRO] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("SF-PRO v2.10 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("SF-PRO v2.11 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
 
    // Print exactly which overlays are armed, so a "nothing is drawn" report
@@ -3133,9 +3150,10 @@ int OnInit()
    string ov = "";
    for(int v = 0; v < SF_FILTERS; v++)
       if(gDrawFilter[v]) ov += (ov == "" ? "" : ",") + gFilterName[v];
-   Print("[SF-PRO] v2.10 build | overlay master=", DrawIndicatorOverlay,
+   Print("[SF-PRO] v2.11 build | overlay master=", DrawIndicatorOverlay,
          " | bars=", Bars, " | seriesReady=", SeriesReady(),
          " | drawing: ", (ov == "" ? "(none - switch one ON in FILTERS)" : ov));
+
    gLastBar = 0;
 
    // Paint the chart NOW. DrawOverlay() used to be reachable only from the
@@ -3154,6 +3172,30 @@ int OnInit()
       PaintAll();
       ChartRedraw(0);
      }
+
+   // Self-test: prove the controls really exist as OBJ_BUTTON objects and
+   // report where they are, so a dead-button report can be diagnosed from
+   // the log alone rather than by guesswork.
+   int nbtn = 0;
+   string firstName = "", firstPos = "";
+   for(int b = ObjectsTotal(0, -1, OBJ_BUTTON) - 1; b >= 0; b--)
+     {
+      string bn = ObjectName(0, b, -1, OBJ_BUTTON);
+      if(StringFind(bn, PFX + "BTN_") != 0) continue;
+      nbtn++;
+      if(firstName == "")
+        {
+         firstName = bn;
+         firstPos  = "x=" + IntegerToString((int)ObjectGetInteger(0, bn, OBJPROP_XDISTANCE)) +
+                     " y=" + IntegerToString((int)ObjectGetInteger(0, bn, OBJPROP_YDISTANCE)) +
+                     " w=" + IntegerToString((int)ObjectGetInteger(0, bn, OBJPROP_XSIZE)) +
+                     " h=" + IntegerToString((int)ObjectGetInteger(0, bn, OBJPROP_YSIZE));
+        }
+     }
+   Print("[SF-PRO] controls created: ", nbtn, " real OBJ_BUTTON objects",
+         (nbtn > 0 ? " | e.g. " + firstName + " " + firstPos : " <-- NONE! HUD is not interactive"));
+   Print("[SF-PRO] interactive=", HudInteractive,
+         " | if clicking prints no 'event id=' line, the click is not reaching the EA");
    return INIT_SUCCEEDED;
   }
 
@@ -3196,6 +3238,8 @@ void OnTimer()
   {
    RollDailyCounters();
    TrackClosedTrades();
+   // Do not rebuild the controls while the user is interacting with them.
+   if(RepaintLocked()) { ChartRedraw(0); return; }
    // A DRAW toggle (or a fresh OnInit) marks the overlay dirty; repaint it
    // here so the chart reacts instantly instead of waiting for a new bar.
    // DrawOverlay() re-arms the flag itself while the series is still
@@ -3261,6 +3305,15 @@ void HandleHudAction(string hit)
 
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
   {
+   // Diagnostic: prove whether clicks reach the EA at all. Any click on the
+   // panel must print a line here; if nothing prints, the event never
+   // arrived (AutoTrading off, chart not focused, or the object is not a
+   // real button) rather than the handler misbehaving.
+   if(VerboseJournal && id != CHARTEVENT_MOUSE_MOVE)
+      Print("[SF-PRO] event id=", id,
+            (sparam != "" ? " obj=" + sparam : ""),
+            " lp=", lparam, " dp=", dparam);
+
    if(!HudInteractive) return;
 
    //--- track the cursor only; MT4 renders hover on a real button itself, so
@@ -3270,16 +3323,21 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
    if(id == CHARTEVENT_MOUSE_MOVE)
      {
       gMouseX = (int)lparam; gMouseY = (int)dparam;
+      gLastMouseMs = GetTickCount();   // arm the repaint freeze
       return;
      }
 
    // PRIMARY path: a real OBJ_BUTTON hotspot was clicked. MT4 always reports
    // this for a genuine button and hands us the object NAME, so no coordinate
    // guessing is involved - this is what makes the HUD reliably clickable.
-   if(id == CHARTEVENT_OBJECT_CLICK)
+   // Some builds report a button press as OBJECT_CLICK, others fold it into
+   // OBJECT_CHANGE / a plain CLICK. Accept every route that names one of our
+   // controls, so the HUD cannot be dead just because of build differences.
+   if(id == CHARTEVENT_OBJECT_CLICK || id == CHARTEVENT_OBJECT_CHANGE)
      {
       if(StringFind(sparam, PFX + "BTN_") == 0)
         {
+         gLastMouseMs = GetTickCount();
          // a button latches itself down; release it so it can be clicked again
          ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
          HandleHudAction(StringSubstr(sparam, StringLen(PFX + "BTN_")));
@@ -3289,9 +3347,16 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
         { HandleHudAction(HitButton(gMouseX, gMouseY)); return; }
      }
 
-   // FALLBACK: bare chart click, still hit-tested against the registry.
+   // FALLBACK: bare chart click, hit-tested against the registry.
    if(id == CHARTEVENT_CLICK)
-      HandleHudAction(HitButton((int)lparam, (int)dparam));
+     {
+      gLastMouseMs = GetTickCount();
+      string hitId = HitButton((int)lparam, (int)dparam);
+      if(hitId == "" && VerboseJournal)
+         Print("[SF-PRO] click at ", lparam, ",", dparam,
+               " matched no control (", gButtonCount, " registered)");
+      HandleHudAction(hitId);
+     }
 
    if(id == CHARTEVENT_KEYDOWN)
      {
