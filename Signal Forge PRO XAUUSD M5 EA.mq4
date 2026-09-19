@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Signal Forge PRO XAUUSD M5 EA   |
-//|                    QUANTUM HUD  ·  v2.01  ·  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  ·  v2.02  ·  MQL4 / MetaTrader 4 |
 //|------------------------------------------------------------------|
 //| Evolution of "Signal Forge XAUUSD M5 EA".                        |
 //| Original indicator concept: Signal Forge [LuxAlgo]               |
@@ -16,7 +16,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Signal Forge PRO - CC BY-NC-SA 4.0"
 #property link      "https://creativecommons.org/licenses/by-nc-sa/4.0/"
-#property version   "2.01"
+#property version   "2.02"
 #property strict
 
 #include <Canvas\Canvas.mqh>
@@ -264,6 +264,8 @@ input int    MaxResultPills         = 25;       // Max result cards on chart
 input int    ResultCardFontSize     = 9;        // Result card font size
 input int    ResultCardWidth        = 172;      // Result card width (px)
 input int    ResultCardPadding      = 7;        // Result card text padding (px)
+input bool   ShowLiveTradeCard      = true;     // Live card while a trade is open
+input int    ResultCardGapPx        = 18;       // Min gap from candles (px)
 input bool   DrawIndicatorOverlay   = true;     // Plot active filters
 input int    OverlayBars            = 180;      // Bars plotted
 input bool   KeepVisualsAfterTest   = true;     // Keep graphics after a visual test
@@ -356,6 +358,7 @@ int      gMouseX = -1, gMouseY = -1;   // chart-space cursor, for hover + click 
 string   gHoverId = "";
 datetime gSignalHistoryBuilt = 0;
 int      gKnownResultHistory = -1;
+bool     gCardsDirty = true;      // force a closed-card rebuild (chart moved)
 
 //--- stats cache
 int      gStatHistory = -1;
@@ -1875,7 +1878,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v2.01", TTextDim, 7);
+        "  ·  RAW  ·  v2.02", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused && !gHalted, StateColor(), TGridC);
@@ -2510,27 +2513,25 @@ void DrawOverlay()
 // Each closed trade gets a multi-line card anchored at its close, built from
 // stacked OBJ_RECTANGLE_LABEL rows (BORDER_RAISED) so it is legible on any
 // chart background - far more informative than the old one-line price tag.
-void ResultCardRow(string name, datetime anchorTime, double anchorPrice,
-                   int xoff, int yoff, int w, int h, string txt,
-                   color bg, color fg, int fontSize, bool bold)
+// ======================================================================
+//  ON-CHART TRADE CARDS
+//  A card is born the moment a trade OPENS (entry / TP / SL / live P&L),
+//  recolours green or red as the position moves, and on close rewrites
+//  itself into the final result. Cards are pushed into a free lane so they
+//  never sit on top of candles, and are tied back to the entry with a
+//  dotted horizontal leader line.
+// ======================================================================
+
+// --- one stacked row of a card, positioned in raw SCREEN pixels ---------
+void CardRow(string name, int x, int y, int w, int h, string txt,
+             color bg, color fg, int fontSize, bool bold)
   {
    if(ObjectFind(0, name) >= 0 && (int)ObjectGetInteger(0, name, OBJPROP_TYPE) != OBJ_RECTANGLE_LABEL)
       ObjectDelete(0, name);
    if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-   int px = 0, py = 0;
-   if(!ChartTimePriceToXY(0, 0, anchorTime, anchorPrice, px, py)) { ObjectDelete(0, name); return; }
-   // Cull anything outside the visible viewport. ChartTimePriceToXY can
-   // succeed for points that have already scrolled off, which would
-   // otherwise leave cards frozen against the chart edge.
-   long cw = 0, ch = 0;
-   ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0, cw);
-   ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0, ch);
-   int cardX = px + xoff, cardY = py + yoff;
-   if(cardX + w < 0 || cardX > (int)cw || cardY + h < 0 || cardY > (int)ch)
-     { ObjectDelete(0, name); ObjectDelete(0, name + "_T"); return; }
    ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, px + xoff);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, py + yoff);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
    ObjectSetInteger(0, name, OBJPROP_XSIZE, w);
    ObjectSetInteger(0, name, OBJPROP_YSIZE, h);
    ObjectSetInteger(0, name, OBJPROP_BGCOLOR, bg);
@@ -2539,14 +2540,14 @@ void ResultCardRow(string name, datetime anchorTime, double anchorPrice,
    ObjectSetInteger(0, name, OBJPROP_BACK, false);
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-   ObjectSetInteger(0, name, OBJPROP_ZORDER, 20);
+   ObjectSetInteger(0, name, OBJPROP_ZORDER, 30);
 
    string lbl = name + "_T";
    if(ObjectFind(0, lbl) < 0) ObjectCreate(0, lbl, OBJ_LABEL, 0, 0, 0);
    ObjectSetInteger(0, lbl, OBJPROP_CORNER, CORNER_LEFT_UPPER);
    ObjectSetInteger(0, lbl, OBJPROP_ANCHOR, ANCHOR_LEFT);
-   ObjectSetInteger(0, lbl, OBJPROP_XDISTANCE, px + xoff + ResultCardPadding);
-   ObjectSetInteger(0, lbl, OBJPROP_YDISTANCE, py + yoff + h / 2);
+   ObjectSetInteger(0, lbl, OBJPROP_XDISTANCE, x + ResultCardPadding);
+   ObjectSetInteger(0, lbl, OBJPROP_YDISTANCE, y + h / 2);
    ObjectSetInteger(0, lbl, OBJPROP_COLOR, fg);
    ObjectSetInteger(0, lbl, OBJPROP_FONTSIZE, fontSize);
    ObjectSetString(0, lbl, OBJPROP_FONT, bold ? "Arial Black" : "Consolas Bold");
@@ -2554,21 +2555,202 @@ void ResultCardRow(string name, datetime anchorTime, double anchorPrice,
    ObjectSetInteger(0, lbl, OBJPROP_BACK, false);
    ObjectSetInteger(0, lbl, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, lbl, OBJPROP_HIDDEN, true);
-   ObjectSetInteger(0, lbl, OBJPROP_ZORDER, 21);
+   ObjectSetInteger(0, lbl, OBJPROP_ZORDER, 31);
   }
 
-void DrawResultPills()
+// --- dotted leader: horizontal run at the anchor price, then a short
+//     vertical riser to the card if the card had to dodge candles --------
+void CardLeader(string base, datetime t1, double price, int cardX, int cardY,
+                int cardH, color c)
   {
-   if(!DrawTradeResults) { ObjectsDeleteAll(0, PFX + "RES_"); return; }
-   int total = OrdersHistoryTotal();
-   ObjectsDeleteAll(0, PFX + "RES_");
-   gKnownResultHistory = total;
+   // convert the card's left-middle edge back into time/price so the dotted
+   // leader can be drawn with chart objects (which live in time/price space)
+   int sub = 0; datetime t2 = 0; double pRow = 0.0;
+   if(!ChartXYToTimePrice(0, cardX - 2, cardY + cardH / 2, sub, t2, pRow)) return;
+   if(t2 <= t1) return;   // card sits left of its own anchor: skip the leader
 
-   int fs   = MathMax(7, ResultCardFontSize);
-   int fsHd = fs + 1;
-   int rowH = fs + SC(11);
-   int cardW= MathMax(SC(128), ResultCardWidth);
+   string hn = base + "LH";
+   if(ObjectFind(0, hn) < 0) ObjectCreate(0, hn, OBJ_TREND, 0, t1, price, t2, price);
+   ObjectSetInteger(0, hn, OBJPROP_TIME1,  t1);  ObjectSetDouble(0, hn, OBJPROP_PRICE1, price);
+   ObjectSetInteger(0, hn, OBJPROP_TIME2,  t2);  ObjectSetDouble(0, hn, OBJPROP_PRICE2, price);
+   ObjectSetInteger(0, hn, OBJPROP_RAY_RIGHT, false);
+   ObjectSetInteger(0, hn, OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(0, hn, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, hn, OBJPROP_COLOR, c);
+   ObjectSetInteger(0, hn, OBJPROP_BACK, true);
+   ObjectSetInteger(0, hn, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, hn, OBJPROP_HIDDEN, true);
+
+   // vertical riser only when the card is not level with the entry
+   string vn = base + "LV";
+   if(MathAbs(pRow - price) > gPoint)
+     {
+      if(ObjectFind(0, vn) < 0) ObjectCreate(0, vn, OBJ_TREND, 0, t2, price, t2, pRow);
+      ObjectSetInteger(0, vn, OBJPROP_TIME1,  t2); ObjectSetDouble(0, vn, OBJPROP_PRICE1, price);
+      ObjectSetInteger(0, vn, OBJPROP_TIME2,  t2); ObjectSetDouble(0, vn, OBJPROP_PRICE2, pRow);
+      ObjectSetInteger(0, vn, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, vn, OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, vn, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, vn, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, vn, OBJPROP_BACK, true);
+      ObjectSetInteger(0, vn, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, vn, OBJPROP_HIDDEN, true);
+     }
+   else ObjectDelete(0, vn);
+  }
+
+// --- find a vertical slot for a card whose x-span is [cx, cx+cw] so that
+//     it clears every candle in that span, plus any card already placed ---
+int FreeLaneY(int cx, int cw, int ch, int anchorY, bool preferAbove,
+              int &oX1[], int &oY1[], int &oX2[], int &oY2[], int occN)
+  {
+   long chH = 0, chW = 0;
+   ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0, chH);
+   ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0, chW);
+   int gap = MathMax(6, ResultCardGapPx);
+
+   // price extremes of the candles the card would cover horizontally
+   int sub = 0; datetime tA = 0, tB = 0; double pA = 0, pB = 0;
+   double hi = 0, lo = 0; bool haveBars = false;
+   if(ChartXYToTimePrice(0, cx, 10, sub, tA, pA) &&
+      ChartXYToTimePrice(0, cx + cw, 10, sub, tB, pB))
+     {
+      int iA = iBarShift(NULL, 0, tA, false);
+      int iB = iBarShift(NULL, 0, tB, false);
+      int lo_i = MathMin(iA, iB), hi_i = MathMax(iA, iB);
+      if(lo_i < 0) lo_i = 0;
+      if(hi_i >= Bars) hi_i = Bars - 1;
+      int cnt = hi_i - lo_i + 1;
+      if(cnt > 0 && cnt < 5000)
+        {
+         int hh = iHighest(NULL, 0, MODE_HIGH, cnt, lo_i);
+         int ll = iLowest(NULL, 0, MODE_LOW,  cnt, lo_i);
+         if(hh >= 0 && ll >= 0) { hi = High[hh]; lo = Low[ll]; haveBars = true; }
+        }
+     }
+
+   int yUp = anchorY - ch - gap, yDn = anchorY + gap;
+   if(haveBars)
+     {
+      int xh = 0, yh = 0, xl = 0, yl = 0;
+      if(ChartTimePriceToXY(0, 0, Time[0], hi, xh, yh)) yUp = yh - ch - gap;
+      if(ChartTimePriceToXY(0, 0, Time[0], lo, xl, yl)) yDn = yl + gap;
+     }
+
+   int cand[2];
+   if(preferAbove) { cand[0] = yUp; cand[1] = yDn; }
+   else            { cand[0] = yDn; cand[1] = yUp; }
+
+   for(int pass = 0; pass < 2; pass++)
+     {
+      int y = cand[pass];
+      if(y < 4 || y + ch > (int)chH - 4) continue;
+      // nudge downward past any card already on screen
+      for(int tries = 0; tries < 24; tries++)
+        {
+         bool clash = false;
+         for(int k = 0; k < occN; k++)
+           {
+            if(cx < oX2[k] && cx + cw > oX1[k] && y < oY2[k] && y + ch > oY1[k])
+              { clash = true; y = (preferAbove ? oY1[k] - ch - 4 : oY2[k] + 4); break; }
+           }
+         if(!clash) break;
+         if(y < 4 || y + ch > (int)chH - 4) break;
+        }
+      if(y >= 4 && y + ch <= (int)chH - 4) return y;
+     }
+   // last resort: clamp inside the window
+   int fy = anchorY - ch / 2;
+   if(fy < 4) fy = 4;
+   if(fy + ch > (int)chH - 4) fy = (int)chH - ch - 4;
+   return fy;
+  }
+
+// --- the LIVE card for the currently open position ---------------------
+void DrawLiveTradeCard(int &oX1[], int &oY1[], int &oX2[], int &oY2[], int &occN)
+  {
+   int type = -1, ticket = -1;
+   if(CountOwnPositions(type, ticket) == 0 || !OrderSelect(ticket, SELECT_BY_TICKET))
+     { ObjectsDeleteAll(0, PFX + "LIVE_"); return; }
+
+   bool   isBuy = (OrderType() == OP_BUY);
+   double entry = OrderOpenPrice();
+   double cur   = isBuy ? Bid : Ask;
+   double gross = OrderProfit() + OrderSwap();
+   double comm  = MathAbs(OrderCommission());
+   if(comm <= 0) comm = CommissionPer001LotRT * (OrderLots() / 0.01);
+   double net   = gross + OrderCommission();
+   if(OrderCommission() == 0) net = gross - comm;
+   double pts   = isBuy ? (cur - entry) / gPoint : (entry - cur) / gPoint;
+   double bal   = AccountBalance();
+   double gainP = (bal > 0) ? net / bal * 100.0 : 0.0;
+   int    mins  = (int)((TimeCurrent() - OrderOpenTime()) / 60);
+
+   // colour follows the LIVE result, flipping green/red as price moves
+   color bgHead, bgBody, edge, txtBd;
+   if(net > 0)      { bgHead = C'0,138,96';   bgBody = C'8,58,46';   edge = C'0,255,170'; txtBd = C'150,255,215'; }
+   else if(net < 0) { bgHead = C'158,28,56';  bgBody = C'74,18,32';  edge = C'255,80,120'; txtBd = C'255,180,195'; }
+   else             { bgHead = C'30,64,132';  bgBody = C'18,32,62';  edge = C'120,180,255'; txtBd = C'185,210,255'; }
+
+   int fs = MathMax(7, ResultCardFontSize), fsHd = fs + 1;
+   int rowH = fs + SC(11), headH = rowH + SC(3);
+   int w = MathMax(SC(150), ResultCardWidth + SC(14));
+   int h = headH + rowH * 4;
+
+   long chW = 0;
+   ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0, chW);
+   int ex = 0, ey = 0;
+   if(!ChartTimePriceToXY(0, 0, OrderOpenTime(), entry, ex, ey))
+     { ObjectsDeleteAll(0, PFX + "LIVE_"); return; }
+
+   // park the live card in the right margin, clear of the candles
+   int x = (int)chW - w - SC(16);
+   if(x < ex + SC(24)) x = ex + SC(24);
+   if(x + w > (int)chW - SC(6)) x = (int)chW - w - SC(6);
+   int y = FreeLaneY(x, w, h, ey, !isBuy, oX1, oY1, oX2, oY2, occN);
+
+   string b = PFX + "LIVE_";
+   double tp = OrderTakeProfit(), sl = OrderStopLoss();
+   double tpP = (tp > 0) ? (isBuy ? (tp - entry) : (entry - tp)) / gPoint : 0;
+   double slP = (sl > 0) ? (isBuy ? (entry - sl) : (sl - entry)) / gPoint : 0;
+
+   CardRow(b + "R0", x, y, w, headH,
+           "LIVE " + (net >= 0 ? "+" : "") + DoubleToString(net, 2) + " USD",
+           bgHead, C'255,255,255', fsHd, true);
+   CardRow(b + "R1", x, y + headH, w, rowH,
+           (isBuy ? "BUY  " : "SELL ") + DoubleToString(OrderLots(), 2) + " @ " +
+           DoubleToString(entry, gDigits), bgBody, txtBd, fs, false);
+   CardRow(b + "R2", x, y + headH + rowH, w, rowH,
+           "TP " + (tp > 0 ? DoubleToString(tp, gDigits) + "  " +
+                             DoubleToString(MathRound(tpP), 0) + "p" : "none"),
+           bgBody, C'150,255,215', fs, false);
+   CardRow(b + "R3", x, y + headH + rowH * 2, w, rowH,
+           "SL " + (sl > 0 ? DoubleToString(sl, gDigits) + "  " +
+                             DoubleToString(MathRound(slP), 0) + "p" : "none"),
+           bgBody, C'255,180,195', fs, false);
+   CardRow(b + "R4", x, y + headH + rowH * 3, w, rowH,
+           (pts >= 0 ? "+" : "") + DoubleToString(MathRound(pts), 0) + "p  " +
+           (gainP >= 0 ? "+" : "") + DoubleToString(gainP, 2) + "%  " +
+           IntegerToString(mins) + "m", bgBody, txtBd, fs, false);
+
+   CardLeader(b, OrderOpenTime(), entry, x, y, h, edge);
+
+   if(occN < ArraySize(oX1))
+     { oX1[occN] = x; oY1[occN] = y; oX2[occN] = x + w; oY2[occN] = y + h; occN++; }
+  }
+
+// --- cards for CLOSED trades: the final result ------------------------
+void DrawClosedTradeCards(int &oX1[], int &oY1[], int &oX2[], int &oY2[], int &occN)
+  {
+   int total = OrdersHistoryTotal();
+   int fs = MathMax(7, ResultCardFontSize), fsHd = fs + 1;
+   int rowH = fs + SC(11), headH = rowH + SC(3);
+   int w = MathMax(SC(150), ResultCardWidth + SC(14));
+   int h = headH + rowH * 3;
    int drawn = 0;
+   long chW = 0, chH = 0;
+   ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0, chW);
+   ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0, chH);
 
    for(int i = total - 1; i >= 0 && drawn < MaxResultPills; i--)
      {
@@ -2588,40 +2770,38 @@ void DrawResultPills()
       double gainPct = (gTrkStartBal > 0) ? net / gTrkStartBal * 100.0 : 0.0;
       int holdMin = (int)((ct - OrderOpenTime()) / 60);
 
-      color bgHead = won ? C'0,128,92'  : C'150,26,52';
+      int ax = 0, ay = 0;
+      if(!ChartTimePriceToXY(0, 0, ct, OrderClosePrice(), ax, ay)) continue;
+      if(ax < -w || ax > (int)chW + w) continue;   // off screen horizontally
+
+      int x = ax + SC(12);
+      if(x + w > (int)chW - SC(4)) x = ax - w - SC(12);
+      if(x < 2) x = 2;
+      int y = FreeLaneY(x, w, h, ay, isBuy, oX1, oY1, oX2, oY2, occN);
+
+      color bgHead = won ? C'0,138,96'  : C'158,28,56';
       color bgBody = won ? C'8,58,46'   : C'74,18,32';
       color edge   = won ? C'0,255,170' : C'255,80,120';
-      color txtHd  = C'255,255,255';
       color txtBd  = won ? C'150,255,215' : C'255,180,195';
 
-      string base = PFX + "RES_" + IntegerToString(OrderTicket()) + "_";
-      // anchor above the high for BUY wins/losses, below the low for SELL
-      double anchorPrice = isBuy ? OrderClosePrice() : OrderClosePrice();
-      int yBase = isBuy ? -(rowH * 4 + SC(18)) : SC(14);
-      int xo = SC(10);
+      string b = PFX + "RES_" + IntegerToString(OrderTicket()) + "_";
+      CardRow(b + "R0", x, y, w, headH,
+              (won ? "WIN " : "LOSS ") + (net >= 0 ? "+" : "") +
+              DoubleToString(net, 2) + " USD", bgHead, C'255,255,255', fsHd, true);
+      CardRow(b + "R1", x, y + headH, w, rowH,
+              (isBuy ? "BUY  " : "SELL ") + DoubleToString(OrderLots(), 2) + " lot  " +
+              (pts >= 0 ? "+" : "") + DoubleToString(MathRound(pts), 0) + "p",
+              bgBody, txtBd, fs, false);
+      CardRow(b + "R2", x, y + headH + rowH, w, rowH,
+              "GROSS " + (gross >= 0 ? "+" : "") + DoubleToString(gross, 2) +
+              "  FEE -" + DoubleToString(comm, 2), bgBody, txtBd, fs, false);
+      CardRow(b + "R3", x, y + headH + rowH * 2, w, rowH,
+              "GAIN " + (gainPct >= 0 ? "+" : "") + DoubleToString(gainPct, 2) + "%  " +
+              IntegerToString(holdMin) + "m", bgBody, txtBd, fs, false);
 
-      // Row 0 - headline: WIN/LOSS + net
-      ResultCardRow(base + "R0", ct, anchorPrice, xo, yBase, cardW, rowH + SC(3),
-                    (won ? "WIN " : "LOSS ") + (net >= 0 ? "+" : "") + DoubleToString(net, 2) + " USD",
-                    bgHead, txtHd, fsHd, true);
-      // Row 1 - side / lots / points
-      ResultCardRow(base + "R1", ct, anchorPrice, xo, yBase + rowH + SC(3), cardW, rowH,
-                    (isBuy ? "BUY  " : "SELL ") + DoubleToString(OrderLots(), 2) + " lot  " +
-                    (pts >= 0 ? "+" : "") + DoubleToString(MathRound(pts), 0) + "p",
-                    bgBody, txtBd, fs, false);
-      // Row 2 - gross vs commission (the Raw Spread story)
-      ResultCardRow(base + "R2", ct, anchorPrice, xo, yBase + (rowH + SC(3)) + rowH, cardW, rowH,
-                    "GROSS " + (gross >= 0 ? "+" : "") + DoubleToString(gross, 2) +
-                    "  FEE -" + DoubleToString(comm, 2),
-                    bgBody, txtBd, fs, false);
-      // Row 3 - gain % and hold time
-      ResultCardRow(base + "R3", ct, anchorPrice, xo, yBase + (rowH + SC(3)) + rowH * 2, cardW, rowH,
-                    "GAIN " + (gainPct >= 0 ? "+" : "") + DoubleToString(gainPct, 2) + "%  " +
-                    IntegerToString(holdMin) + "m",
-                    bgBody, txtBd, fs, false);
+      CardLeader(b, OrderOpenTime(), OrderOpenPrice(), x, y, h, edge);
 
-      // marker on the exact close
-      string m = base + "MK";
+      string m = b + "MK";
       if(ObjectFind(0, m) < 0) ObjectCreate(0, m, OBJ_ARROW, 0, ct, OrderClosePrice());
       ObjectMove(0, m, 0, ct, OrderClosePrice());
       ObjectSetInteger(0, m, OBJPROP_ARROWCODE, 159);
@@ -2630,7 +2810,37 @@ void DrawResultPills()
       ObjectSetInteger(0, m, OBJPROP_BACK, false);
       ObjectSetInteger(0, m, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, m, OBJPROP_HIDDEN, true);
+
+      if(occN < ArraySize(oX1))
+        { oX1[occN] = x; oY1[occN] = y; oX2[occN] = x + w; oY2[occN] = y + h; occN++; }
       drawn++;
+     }
+  }
+
+// Closed cards are static once drawn, so they are only rebuilt when the
+// history actually changes or the chart moves (gCardsDirty). The LIVE card
+// is cheap and is refreshed on every call so its P&L tracks price.
+// Rebuilding all ~125 objects at the HUD refresh rate would flicker.
+void DrawResultPills()
+  {
+   int total = OrdersHistoryTotal();
+   bool rebuildClosed = (total != gKnownResultHistory) || gCardsDirty;
+
+   int oX1[64], oY1[64], oX2[64], oY2[64];
+   ArrayInitialize(oX1, 0); ArrayInitialize(oY1, 0);
+   ArrayInitialize(oX2, 0); ArrayInitialize(oY2, 0);
+   int occN = 0;
+
+   // the live card is placed first so closed cards dodge it
+   if(ShowLiveTradeCard) DrawLiveTradeCard(oX1, oY1, oX2, oY2, occN);
+   else                  ObjectsDeleteAll(0, PFX + "LIVE_");
+
+   if(rebuildClosed)
+     {
+      ObjectsDeleteAll(0, PFX + "RES_");
+      if(DrawTradeResults) DrawClosedTradeCards(oX1, oY1, oX2, oY2, occN);
+      gKnownResultHistory = total;
+      gCardsDirty = false;
      }
   }
 
@@ -2733,7 +2943,7 @@ int OnInit()
       Print("[SF-PRO] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("SF-PRO v2.01 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("SF-PRO v2.02 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
    gLastBar = 0;
    return INIT_SUCCEEDED;
@@ -2832,7 +3042,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
      {
       // Result cards are pixel-anchored, so they must re-resolve their
       // time/price anchor the moment the chart scrolls or zooms.
-      gKnownResultHistory = -1;
+      gCardsDirty = true;
       DrawResultPills();
       DrawTradeLevelLines();
       PaintHud();
@@ -2870,7 +3080,10 @@ void OnTick()
    //--- bar gate ------------------------------------------------------
    if(Time[0] == gLastBar)
      {
-      if(graphics && IsTesting())
+      // The live card shows running P&L, so it has to follow price on every
+      // tick - not only when a new bar forms. In the tester OnTimer() never
+      // fires, so this is also the tester's only repaint path.
+      if(graphics)
         {
          uint tnow = GetTickCount();
          if(tnow - gLastHudPaint >= (uint)MathMax(100, HudRefreshMs))

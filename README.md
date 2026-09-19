@@ -278,3 +278,56 @@ header look overlapped. Root cause: `RoundRect()` built its rounded corners from
 EA's own corner algorithm. `docs/sfcanvas.py` now re-implements the EA's actual
 primitives (`FillCircle`, `Circle`, `ArcQuarter`, `Line`, `RoundRect`) pixel for
 pixel, and every renderer asserts zero wrong-quadrant corner pixels.
+
+## v2.02 — live trade cards
+
+The on-chart card is now a **live trade monitor**, not just a post-mortem.
+
+**On trade open** a card appears immediately showing entry, TP, SL and running
+P&L, and it **recolours as price moves**:
+
+| state | header | meaning |
+|-------|--------|---------|
+| blue  | `LIVE +0.00 USD` | just opened, flat |
+| green | `LIVE +1.84 USD` | currently in profit (net of commission) |
+| red   | `LIVE -1.12 USD` | currently losing |
+
+```
+LIVE +1.84 USD              running net P&L, colour-coded
+BUY  0.01 lot @ 4271.450    side, size, entry
+TP 4274.050  260p           target and distance
+SL 4269.850  160p           stop and distance
++184p  +0.92%  12m          points, account impact, time open
+```
+
+Live P&L is **net of commission** — if the broker has not yet posted the fee,
+it is estimated from `CommissionPer001LotRT`, so the card never flatters the
+trade. The live card refreshes on **every tick** (previously the repaint was
+gated to `IsTesting()`, so in live trading it only moved when a bar closed).
+
+**On close** the card rewrites itself into the final result:
+
+```
+WIN +2.31 USD            net result
+BUY  0.01 lot  +248p     side, size, points
+GROSS +2.38  FEE -0.07   the Raw Spread cost story
+GAIN +1.14%  35m         account impact, hold time
+```
+
+### Placement — never on the candles
+
+`FreeLaneY()` scans the high/low of every candle the card's x-span would cover
+and parks it entirely above or below that range, `ResultCardGapPx` (18px) clear,
+then nudges it further to dodge any card already placed. Wins prefer to sit
+above the price, losses below; the live card is parked in the right margin. Each
+card is tied back to its entry by a **dotted leader line** (horizontal run at
+the entry price, plus a vertical riser when the card had to dodge), with a small
+ring marking the exact entry.
+
+`docs/render_chart_cards.py` simulates all of this over synthetic M5 candles and
+asserts zero card/candle and card/card overlaps
+(`docs/chart_cards_preview.png`, `docs/live_card_states.png`).
+
+**Performance note:** closed cards are only rebuilt when history changes or the
+chart moves (`gCardsDirty`); only the cheap live card redraws every tick.
+Rebuilding ~125 chart objects at the HUD refresh rate would flicker badly.
