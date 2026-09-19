@@ -1,8 +1,8 @@
-; Signal Forge PRO v2.05 - XAUUSD M5
-; ORIGINAL v1 STRATEGY. There is no risk layer in this build: no sessions,
-; no daily loss cap, no equity kill-switch, no cooldown. The only hard gate
-; before a fill is MaximumSpreadPoints. Size the account accordingly.
-; PROFILE: Micro account ($200-$500). Stock Supertrend-only configuration,
+; Signal Forge PRO v2.06 - XAUUSD M5
+; ORIGINAL v1 STRATEGY. No risk layer: no sessions, no daily loss cap,
+; no equity kill-switch, no cooldown. The only hard gate before a fill
+; is MaximumSpreadPoints. Size the account accordingly.
+; PROFILE: Micro account ($200-$500). Stock Supertrend-only setup,
 ; 0.01 lot fixed, spread cap tightened to 60 pts.
 MagicNumber=260914
 FixedLots=0.01
@@ -84,6 +84,8 @@ ResultCardWidth=172
 ResultCardPadding=7
 ShowLiveTradeCard=true
 ResultCardGapPx=18
+ResultCardSeparationPx=40
+BuyCardsAbove=true
 DrawIndicatorOverlay=true
 OverlayBars=180
 KeepVisualsAfterTest=true

@@ -1,4 +1,4 @@
-# Signal Forge PRO — XAUUSD M5 EA (v2.05)
+# Signal Forge PRO — XAUUSD M5 EA (v2.06)
 
 > **v2.05 — the ORIGINAL v1 trading strategy has been restored.**
 > The trading engine is now exactly the v1 engine. The entire v2 risk layer
@@ -496,3 +496,79 @@ rebuilt — **86 keys each, validator clean** (no invalid, missing or duplicate 
 * All three renderers pass: HUD text overlaps **NONE**, corner-arc stray pixels
   **0**, tracker fits **692/700 px**, chart cards **no card/candle or card/card
   overlap**.
+
+---
+
+## v2.06 — on-chart result cards: layering, anchoring, separation, sides
+
+Four reported faults, four distinct root causes.
+
+### 1. Cards painted on top of the dashboard
+
+`OBJPROP_ZORDER` was already set to 500 for the HUD and 30 for cards, which
+looked correct — but **in MT4 `OBJPROP_ZORDER` only decides which object
+receives a mouse click. It does not control draw order.** No z-value would ever
+have fixed this.
+
+The fix is geometric: `HudScreenRect()` exposes the panel's pixel rect and the
+card allocator treats it as occupied space, exactly like another card. Cards in
+the panel's x-band are first moved **sideways** (to the free side of the panel);
+only if that fails do they move vertically.
+
+### 2. Cards did not follow the chart, and froze in the tester
+
+The only thing that invalidated card positions was `CHARTEVENT_CHART_CHANGE` —
+and **`OnChartEvent` is never delivered inside the Strategy Tester**, which is
+precisely where the user saw cards "still in his place".
+
+Replaced with `ViewportMoved()`, which polls a cheap signature of the visible
+window — first visible bar, bar count, pixel width/height, and
+`CHART_PRICE_MIN`/`CHART_PRICE_MAX` — and marks the cards dirty when it changes.
+This covers scroll, zoom, resize **and** vertical price-scale drag, and works
+identically live and in the tester.
+
+### 3. Cards overlapped each other
+
+The old nudge step was **4 px**, so cards ended up merely touching. Now a new
+input **`ResultCardSeparationPx` (default 40)** is enforced as a hard minimum on
+*all four sides*: every occupied rect is inflated by `sep` before the overlap
+test, and each displacement clears the obstacle by at least `sep`.
+
+When a column genuinely cannot hold another card with 40 px of daylight,
+`FreeLaneY()` returns `SF_NO_LANE` and the card is **skipped rather than
+stacked**. Cards are drawn newest-first, so what drops off is always the oldest
+result. The LIVE card uses `ForcedLaneY()` and is never skipped.
+
+### 4. BUY/SELL sides were inconsistent
+
+The live card asked for `!isBuy` and closed cards for `isBuy` — contradictory,
+and BUY ended up *below* price. Both now use
+`above = BuyCardsAbove ? isBuy : !isBuy`, so **BUY sits above price and SELL
+below**, switchable with the new `BuyCardsAbove` input.
+
+Side is a **soft** constraint: if the preferred side is blocked by the panel or
+another card, the card flips rather than disappearing. Separation, panel
+avoidance and staying inside the window are **hard** constraints.
+
+### Verification
+
+`docs/verify_card_layout.py` is a faithful port of `FreeLaneY()` plus the
+caller's horizontal dodge, with constants scraped from the `.mq4` so it cannot
+drift. It asserts the invariants:
+
+```
+CASE 1  five trades closing on the SAME pixel   -> placed=5  separation >= 40px
+CASE 2  card anchored on top of the panel       -> onPanel=False
+CASE 3  BUY above / SELL below                  -> BUY ABOVE, SELL BELOW
+CASE 4  25 cards (MaxResultPills)               -> 0 tight pairs, 0 on panel,
+                                                   0 off-window, 10 skipped
+RESULT: ALL PLACEMENT INVARIANTS HOLD
+```
+
+![card placement](docs/card_placement_proof.png)
+
+The rendered proof (`docs/card_placement_proof.png`) draws the panel, synthetic
+candles and 15 anchors, then reports the three hard invariants on the image
+itself. Note the 3 "wrong side" cards: with a 656 px panel on an 800 px chart
+only 8 px remain above it, so a card in that column is *forced* below — the soft
+constraint yielding to the hard ones, as designed.

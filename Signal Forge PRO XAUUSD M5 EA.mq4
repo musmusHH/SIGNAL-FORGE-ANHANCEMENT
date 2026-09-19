@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Signal Forge PRO XAUUSD M5 EA   |
-//|                    QUANTUM HUD  ·  v2.05  ·  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  ·  v2.06  ·  MQL4 / MetaTrader 4 |
 //|------------------------------------------------------------------|
 //| Evolution of "Signal Forge XAUUSD M5 EA".                        |
 //|                                                                  |
@@ -13,6 +13,15 @@
 //| time stops, risk/ladder sizing - has been REMOVED. Only the      |
 //| QUANTUM HUD, the chart visuals and the performance tracker are   |
 //| kept from v2, re-pointed at the v1 concepts.                     |
+//|                                                                  |
+//| v2.06 - ON-CHART RESULT CARD PLACEMENT.                          |
+//| Cards no longer paint over the dashboard (MT4's OBJPROP_ZORDER   |
+//| only sets CLICK priority, never draw order, so the panel is now  |
+//| avoided geometrically). Cards re-anchor when the chart scrolls,  |
+//| zooms or rescales - including in the Strategy Tester, where      |
+//| OnChartEvent is never delivered and they used to freeze in place.|
+//| A hard 40 px of daylight is enforced between cards; BUY results  |
+//| sit above price and SELL results below.                          |
 //| Original indicator concept: Signal Forge [LuxAlgo]               |
 //| (c) LuxAlgo, CC BY-NC-SA 4.0 - non commercial ShareAlike port.    |
 //| https://creativecommons.org/licenses/by-nc-sa/4.0/               |
@@ -27,7 +36,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Signal Forge PRO - CC BY-NC-SA 4.0"
 #property link      "https://creativecommons.org/licenses/by-nc-sa/4.0/"
-#property version   "2.05"
+#property version   "2.06"
 #property strict
 
 #include <Canvas\Canvas.mqh>
@@ -151,6 +160,8 @@ input int    ResultCardWidth        = 172;      // Result card width (px)
 input int    ResultCardPadding      = 7;        // Result card text padding (px)
 input bool   ShowLiveTradeCard      = true;     // Live card while a trade is open
 input int    ResultCardGapPx        = 18;       // Min gap from candles (px)
+input int    ResultCardSeparationPx = 40;       // Min gap BETWEEN result cards (px)
+input bool   BuyCardsAbove          = true;     // BUY cards above price, SELL below
 input bool   DrawIndicatorOverlay   = true;     // Plot active filters
 input int    OverlayBars            = 180;      // Bars plotted
 input bool   KeepVisualsAfterTest   = true;     // Keep graphics after a visual test
@@ -234,6 +245,11 @@ string   gHoverId = "";
 datetime gSignalHistoryBuilt = 0;
 int      gKnownResultHistory = -1;
 bool     gCardsDirty = true;      // force a closed-card rebuild (chart moved)
+// Cards are positioned in SCREEN pixels, so they must be re-laid-out whenever
+// the viewport moves. CHARTEVENT_CHART_CHANGE is useless for this in the
+// Strategy Tester (OnChartEvent is never called there), so instead we poll a
+// cheap signature of the visible window and rebuild when it changes.
+string   gViewSig = "";
 
 //--- stats cache
 int      gStatHistory = -1;
@@ -247,6 +263,7 @@ int      gEquityPoints = 0;
 
 //--- PERFORMANCE TRACKER: last N trading days, newest first
 #define SF_TRACK_DAYS 6
+#define SF_NO_LANE   (-1000000)   // FreeLaneY: no slot honours the separation
 datetime gTrkDate[SF_TRACK_DAYS];
 double   gTrkLots[SF_TRACK_DAYS];
 double   gTrkProfit[SF_TRACK_DAYS];    // net, commission included
@@ -1388,7 +1405,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v2.05", TTextDim, 7);
+        "  ·  RAW  ·  v2.06", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -2143,6 +2160,46 @@ void CardLeader(string base, datetime t1, double price, int cardX, int cardY,
    else ObjectDelete(0, vn);
   }
 
+// --- has the visible chart window moved since the last card layout? -----
+// Cards live in screen pixels, so ANY of these changing invalidates them:
+// the first visible bar (scroll), the bar count (zoom), the pixel size
+// (resize) and the price scale (vertical drag / autoscale).
+// This is polled rather than event-driven because CHARTEVENT_CHART_CHANGE is
+// never delivered inside the Strategy Tester - which is exactly the case the
+// user reported as "in tester he still in his place".
+bool ViewportMoved()
+  {
+   long fvb = 0, vb = 0, w = 0, h = 0;
+   ChartGetInteger(0, CHART_FIRST_VISIBLE_BAR, 0, fvb);
+   ChartGetInteger(0, CHART_VISIBLE_BARS,      0, vb);
+   ChartGetInteger(0, CHART_WIDTH_IN_PIXELS,   0, w);
+   ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS,  0, h);
+   double pmin = ChartGetDouble(0, CHART_PRICE_MIN, 0);
+   double pmax = ChartGetDouble(0, CHART_PRICE_MAX, 0);
+
+   string sig = IntegerToString((int)fvb) + "|" + IntegerToString((int)vb) + "|" +
+                IntegerToString((int)w)   + "|" + IntegerToString((int)h)  + "|" +
+                DoubleToString(pmin, 5)   + "|" + DoubleToString(pmax, 5);
+   if(sig == gViewSig) return false;
+   gViewSig = sig;
+   return true;
+  }
+
+// --- screen rect occupied by the HUD panel, so cards can dodge it -------
+// MT4's OBJPROP_ZORDER only decides which object receives a CLICK; it does
+// NOT control draw order for OBJ_RECTANGLE_LABEL vs a bitmap label. Giving
+// the HUD zorder 500 therefore never stopped cards painting on top of it.
+// The only reliable fix is geometric: treat the panel as occupied space.
+void HudScreenRect(int &x1, int &y1, int &x2, int &y2)
+  {
+   x1 = 0; y1 = 0; x2 = 0; y2 = 0;
+   if(!ShowHUD || !gHudReady) return;
+   x1 = HudMargin;
+   y1 = HudMargin;
+   x2 = HudMargin + gHudW;
+   y2 = HudMargin + gHudH;
+  }
+
 // --- find a vertical slot for a card whose x-span is [cx, cx+cw] so that
 //     it clears every candle in that span, plus any card already placed ---
 int FreeLaneY(int cx, int cw, int ch, int anchorY, bool preferAbove,
@@ -2152,6 +2209,7 @@ int FreeLaneY(int cx, int cw, int ch, int anchorY, bool preferAbove,
    ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0, chH);
    ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0, chW);
    int gap = MathMax(6, ResultCardGapPx);
+   int sep = MathMax(0, ResultCardSeparationPx);   // required gap BETWEEN cards
 
    // price extremes of the candles the card would cover horizontally
    int sub = 0; datetime tA = 0, tB = 0; double pA = 0, pB = 0;
@@ -2181,6 +2239,15 @@ int FreeLaneY(int cx, int cw, int ch, int anchorY, bool preferAbove,
       if(ChartTimePriceToXY(0, 0, Time[0], lo, xl, yl)) yDn = yl + gap;
      }
 
+   // the HUD is an obstacle like any other card - see HudScreenRect()
+   int hx1 = 0, hy1 = 0, hx2 = 0, hy2 = 0;
+   HudScreenRect(hx1, hy1, hx2, hy2);
+   bool hudOverlapsX = (hx2 > hx1) && (cx < hx2 + sep) && (cx + cw > hx1 - sep);
+
+   // Side preference (BUY above / SELL below) is a SOFT constraint: if the
+   // preferred side is blocked by the panel, a card or the window edge we
+   // fall back to the other side rather than hide the result. Separation and
+   // panel-avoidance are HARD - they are never traded away.
    int cand[2];
    if(preferAbove) { cand[0] = yUp; cand[1] = yDn; }
    else            { cand[0] = yDn; cand[1] = yUp; }
@@ -2188,23 +2255,95 @@ int FreeLaneY(int cx, int cw, int ch, int anchorY, bool preferAbove,
    for(int pass = 0; pass < 2; pass++)
      {
       int y = cand[pass];
+      bool up = (cand[pass] == yUp);
       if(y < 4 || y + ch > (int)chH - 4) continue;
-      // nudge downward past any card already on screen
-      for(int tries = 0; tries < 24; tries++)
+
+      // Walk the card clear of every obstacle. Each displacement is at least
+      // `sep` px so two cards can never end up merely touching - the user
+      // asked for a hard 40 px of daylight between them.
+      bool placed = false;
+      for(int tries = 0; tries < 40; tries++)
         {
          bool clash = false;
-         for(int k = 0; k < occN; k++)
+
+         if(hudOverlapsX && y < hy2 + sep && y + ch > hy1 - sep)
            {
-            if(cx < oX2[k] && cx + cw > oX1[k] && y < oY2[k] && y + ch > oY1[k])
-              { clash = true; y = (preferAbove ? oY1[k] - ch - 4 : oY2[k] + 4); break; }
+            // push the card out of the panel band, away from the panel
+            y = up ? (hy1 - sep - ch) : (hy2 + sep);
+            clash = true;
            }
-         if(!clash) break;
+
+         if(!clash)
+            for(int k = 0; k < occN; k++)
+              {
+               // inflate the occupied rect by `sep` on every side
+               if(cx < oX2[k] + sep && cx + cw > oX1[k] - sep &&
+                  y  < oY2[k] + sep && y + ch  > oY1[k] - sep)
+                 {
+                  y = up ? (oY1[k] - sep - ch) : (oY2[k] + sep);
+                  clash = true;
+                  break;
+                 }
+              }
+
+         if(!clash) { placed = true; break; }
          if(y < 4 || y + ch > (int)chH - 4) break;
         }
-      if(y >= 4 && y + ch <= (int)chH - 4) return y;
+      if(placed && y >= 4 && y + ch <= (int)chH - 4) return y;
      }
-   // last resort: clamp inside the window
+
+   // Last resort A: scan the whole column for the first free slot, still
+   // honouring the separation. Better a displaced card than a stacked one.
+   for(int y2 = 4; y2 + ch <= (int)chH - 4; y2 += 6)
+     {
+      bool clash = false;
+      if(hudOverlapsX && y2 < hy2 + sep && y2 + ch > hy1 - sep) clash = true;
+      if(!clash)
+         for(int k = 0; k < occN; k++)
+            if(cx < oX2[k] + sep && cx + cw > oX1[k] - sep &&
+               y2 < oY2[k] + sep && y2 + ch > oY1[k] - sep)
+              { clash = true; break; }
+      if(!clash) return y2;
+     }
+
+   // Nowhere honours the separation. Rather than stack this card on top of
+   // another - the exact complaint being fixed - REFUSE to place it and let
+   // the caller skip it. Cards are drawn newest-first, so what gets dropped
+   // is always the oldest, least interesting result.
+   return SF_NO_LANE;
+  }
+
+// Same allocator, but guaranteed to return a position. Used by the LIVE card,
+// which must always be visible even on a crowded chart.
+int ForcedLaneY(int cx, int cw, int ch, int anchorY, bool preferAbove,
+                int &oX1[], int &oY1[], int &oX2[], int &oY2[], int occN)
+  {
+   int y = FreeLaneY(cx, cw, ch, anchorY, preferAbove, oX1, oY1, oX2, oY2, occN);
+   if(y != SF_NO_LANE) return y;
+
+   long chH = 0;
+   ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0, chH);
+   int hx1 = 0, hy1 = 0, hx2 = 0, hy2 = 0;
+   HudScreenRect(hx1, hy1, hx2, hy2);
+   bool hudX = (hx2 > hx1) && (cx < hx2) && (cx + cw > hx1);
+
+   // first slot that at least clears the panel and hard-overlaps nothing
+   for(int y3 = 4; y3 + ch <= (int)chH - 4; y3 += 6)
+     {
+      if(hudX && y3 < hy2 + 2 && y3 + ch > hy1 - 2) continue;
+      bool hard = false;
+      for(int k = 0; k < occN; k++)
+         if(cx < oX2[k] && cx + cw > oX1[k] && y3 < oY2[k] && y3 + ch > oY1[k])
+           { hard = true; break; }
+      if(!hard) return y3;
+     }
+
    int fy = anchorY - ch / 2;
+   if(hudX)
+     {
+      if(hy2 + 2 + ch <= (int)chH - 4) fy = hy2 + 2;
+      else if(hy1 - 2 - ch >= 4)       fy = hy1 - 2 - ch;
+     }
    if(fy < 4) fy = 4;
    if(fy + ch > (int)chH - 4) fy = (int)chH - ch - 4;
    return fy;
@@ -2250,7 +2389,10 @@ void DrawLiveTradeCard(int &oX1[], int &oY1[], int &oX2[], int &oY2[], int &occN
    int x = (int)chW - w - SC(16);
    if(x < ex + SC(24)) x = ex + SC(24);
    if(x + w > (int)chW - SC(6)) x = (int)chW - w - SC(6);
-   int y = FreeLaneY(x, w, h, ey, !isBuy, oX1, oY1, oX2, oY2, occN);
+   if(x < 2) x = 2;
+   // BUY above price, SELL below (user-configurable)
+   bool above = BuyCardsAbove ? isBuy : !isBuy;
+   int y = ForcedLaneY(x, w, h, ey, above, oX1, oY1, oX2, oY2, occN);
 
    string b = PFX + "LIVE_";
    double tp = OrderTakeProfit(), sl = OrderStopLoss();
@@ -2291,6 +2433,8 @@ void DrawClosedTradeCards(int &oX1[], int &oY1[], int &oX2[], int &oY2[], int &o
    int w = MathMax(SC(150), ResultCardWidth + SC(14));
    int h = headH + rowH * 3;
    int drawn = 0;
+   int sep  = MathMax(0, ResultCardSeparationPx);
+   int sepX = MathMax(4, sep / 2);      // horizontal breathing room
    long chW = 0, chH = 0;
    ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0, chW);
    ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0, chH);
@@ -2326,7 +2470,47 @@ void DrawClosedTradeCards(int &oX1[], int &oY1[], int &oX2[], int &oY2[], int &o
       int x = ax + SC(12);
       if(x + w > (int)chW - SC(4)) x = ax - w - SC(12);
       if(x < 2) x = 2;
-      int y = FreeLaneY(x, w, h, ay, isBuy, oX1, oY1, oX2, oY2, occN);
+
+      // If the card would land in the panel's x-band, move it clear
+      // HORIZONTALLY. Sliding it vertically instead would force it into the
+      // thin strip above/below a tall panel, where only one card fits - which
+      // is what used to make cards pile up on each other next to the HUD.
+      int hx1 = 0, hy1 = 0, hx2 = 0, hy2 = 0;
+      HudScreenRect(hx1, hy1, hx2, hy2);
+      if(hx2 > hx1 && x < hx2 + sepX && x + w > hx1 - sepX)
+        {
+         int altR = hx2 + sepX;                 // just right of the panel
+         int altL = hx1 - sepX - w;             // just left of the panel
+         if(altR + w <= (int)chW - SC(4))      x = altR;
+         else if(altL >= 2)                    x = altL;
+        }
+
+      // Cards that still share a column get staggered sideways so the
+      // vertical allocator has somewhere to put them.
+      for(int nudge = 0; nudge < 8; nudge++)
+        {
+         bool tight = false;
+         for(int k = 0; k < occN; k++)
+            if(x < oX2[k] + sepX && x + w > oX1[k] - sepX)
+              {
+               // only step aside if this column is already near capacity
+               int stack = 0;
+               for(int q = 0; q < occN; q++)
+                  if(x < oX2[q] + sepX && x + w > oX1[q] - sepX) stack++;
+               if(stack * (h + sep) > (int)chH - 8) { tight = true; }
+               break;
+              }
+         if(!tight) break;
+         int step = w + sepX;
+         if(x + step + w <= (int)chW - SC(4)) x += step;
+         else if(x - step >= 2)               x -= step;
+         else break;
+        }
+
+      // BUY above price, SELL below (user-configurable)
+      bool above = BuyCardsAbove ? isBuy : !isBuy;
+      int y = FreeLaneY(x, w, h, ay, above, oX1, oY1, oX2, oY2, occN);
+      if(y == SF_NO_LANE) continue;   // too crowded: drop the oldest result
 
       color bgHead = won ? C'0,138,96'  : C'158,28,56';
       color bgBody = won ? C'8,58,46'   : C'74,18,32';
@@ -2379,6 +2563,13 @@ void DrawResultPills()
    // latched by gKnownResultHistory and never redrawn. It is cheap (it early-
    // outs unless the history count changed), so drive it from here too.
    RebuildStats();
+
+   // Poll the viewport. Closed cards are pixel-anchored, so a scroll, zoom,
+   // resize or price-scale change invalidates every one of them. Polling here
+   // (rather than relying on CHARTEVENT_CHART_CHANGE) is what makes the cards
+   // track the chart INSIDE THE STRATEGY TESTER, where OnChartEvent is never
+   // delivered and the cards previously stayed frozen where they were born.
+   if(ViewportMoved()) gCardsDirty = true;
 
    int total = OrdersHistoryTotal();
    bool rebuildClosed = (total != gKnownResultHistory) || gCardsDirty;
@@ -2512,7 +2703,7 @@ int OnInit()
       Print("[SF-PRO] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("SF-PRO v2.05 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("SF-PRO v2.06 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
    gLastBar = 0;
    return INIT_SUCCEEDED;
