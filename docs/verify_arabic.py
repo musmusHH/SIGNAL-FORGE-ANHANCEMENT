@@ -207,15 +207,61 @@ for label, pat in [
      SRC.index("string ArFix") < SRC.index("void Text(int x")),
     ("Text() shapes its argument",       r'gCv\.TextOut\(x, y, ArFix\(s\)'),
     ("TextVC measures the SHAPED string", r'gCv\.TextSize\(d, tw, th\)'),
-    ("button captions are shaped",        r'caption = ArFix\(caption\);'),
-    ("caption shaped BEFORE the idempotency test",
-     SRC.index("caption = ArFix(caption);") < SRC.index("OBJPROP_TEXT)            == caption")),
     ("font swaps with the language",      r'font\s*=\s*UIFont\(font\);'),
     ("FONT is part of the change test",   r'OBJPROP_FONT\)\s*==\s*font\)'),
     ("language input exists",             r'input ENUM_SF_LANG\s+HudLanguage'),
     ("Arabic font input exists",          r'input string HudArabicFont'),
 ]:
     check(label, pat if isinstance(pat, bool) else re.search(pat, SRC) is not None)
+
+# ---------------------------------------------------------------- 6. ArObj
+# A chart OBJECT (OBJ_BUTTON / OBJ_LABEL) is drawn by a real Windows control,
+# which runs its OWN bidi. Handing it visual-order text reverses it a second
+# time. Objects therefore get SHAPING ONLY and keep logical order, while the
+# canvas - a raw pixel buffer with no bidi at all - gets the full transform.
+say("\n6. chart objects get shaping only (no double bidi)")
+
+check("ArObj() exists", re.search(r"string\s+ArObj\s*\(", SRC) is not None)
+
+aobj = re.search(r'string ArObj\(const string s\).*?\n  \}', SRC, re.S)
+check("ArObj shapes but does NOT reorder",
+      aobj is not None and "ArShape(s)" in aobj.group(0) and "ArBidi" not in aobj.group(0))
+
+check("button captions use ArObj, not ArFix",
+      re.search(r'caption = ArObj\(caption\);', SRC) is not None
+      and re.search(r'caption = ArFix\(caption\);', SRC) is None)
+
+check("result-card labels use ArObj",
+      re.search(r'OBJPROP_TEXT, ArObj\(txt\)\)', SRC) is not None)
+
+check("caption shaped BEFORE the idempotency test",
+      SRC.index("caption = ArObj(caption);") < SRC.index("OBJPROP_TEXT)            == caption"))
+
+check("canvas still uses the full ArFix transform",
+      re.search(r'gCv\.TextOut\(x, y, ArFix\(s\)', SRC) is not None)
+
+# the live language/theme switches
+say("\n7. live language + theme switching")
+check("runtime language global exists",  re.search(r'^int\s+gLang\s*=', SRC, re.M) is not None)
+check("runtime theme global exists",     re.search(r'^int\s+gTheme\s*=', SRC, re.M) is not None)
+check("T() reads the live language",     re.search(r'if\(gLang == SF_LANG_EN\) return k;', SRC) is not None)
+check("LoadTheme reads the live theme",  re.search(r'void LoadTheme\(\)\s*\n\s*\{\s*\n\s*switch\(gTheme\)', SRC) is not None)
+check("ApplySkin reads the live theme",  re.search(r'switch\(gTheme\)', SRC) is not None
+                                         and re.search(r'switch\(HudTheme\)', SRC) is None)
+check("globals seeded from inputs in OnInit",
+      re.search(r'gLang\s*=\s*\(int\)HudLanguage', SRC) is not None
+      and re.search(r'gTheme\s*=\s*\(int\)HudTheme', SRC) is not None)
+check("language button drawn",           re.search(r'"BTN_LANG"', SRC) is not None)
+check("theme button drawn",              re.search(r'"BTN_SKIN"', SRC) is not None)
+check("language button handled",         re.search(r'hit == "BTN_LANG"', SRC) is not None)
+check("theme button handled",            re.search(r'hit == "BTN_SKIN"', SRC) is not None)
+check("language switch rebuilds buttons",
+      re.search(r'gLang = \(gLang == SF_LANG_AR\).*?ObjectsDeleteAll\(0, PFX \+ "BTN_"\)', SRC, re.S) is not None)
+
+# T() must be declared before its first use (MQL4 resolves top-down)
+first_use = SRC.index('gBlockReason = T("SPREAD")')
+decl      = SRC.index("string T(const string k);")
+check("T() forward-declared before first use", decl < first_use)
 
 say()
 if fails:

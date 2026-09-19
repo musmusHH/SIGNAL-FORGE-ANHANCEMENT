@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Signal Forge PRO XAUUSD M5 EA   |
-//|                    QUANTUM HUD  ·  v2.13  ·  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  ·  v2.14  ·  MQL4 / MetaTrader 4 |
 //|------------------------------------------------------------------|
 //| Evolution of "Signal Forge XAUUSD M5 EA".                        |
 //|                                                                  |
@@ -22,6 +22,28 @@
 //| OnChartEvent is never delivered and they used to freeze in place.|
 //| A hard 40 px of daylight is enforced between cards; BUY results  |
 //| sit above price and SELL results below.                          |
+//| v2.14 - ARABIC ON BUTTONS WAS REVERSED TWICE + FULL TRANSLATION  |
+//|         v2.13 shaped and reordered EVERY string the same way.    |
+//|         That is right for the canvas and WRONG for objects:      |
+//|         an OBJ_BUTTON / OBJ_LABEL is a real Windows control and  |
+//|         runs its OWN bidi, so a visual-order caption was         |
+//|         reversed a SECOND time. Panel text read correctly while  |
+//|         every button read backwards - exactly what the           |
+//|         screenshots showed.                                      |
+//|           canvas  -> ArFix() : shape + reorder (no bidi in MT4)  |
+//|           objects -> ArObj() : shape ONLY, keep logical order    |
+//|         Also in this build:                                      |
+//|           - result cards on the chart are translated and shaped  |
+//|           - BULLISH/BEARISH/FLAT, LONG/SHORT/NEUTRAL, MODE,      |
+//|             ARMED/PAUSED, block reasons, tracker KPIs, TODAY/    |
+//|             WK/MO and the cost panel are all translated;         |
+//|             indicator names stay English on purpose              |
+//|           - live language button and theme button in the tab     |
+//|             row (inputs are read-only at runtime, so both now    |
+//|             drive gLang/gTheme globals seeded from the inputs)   |
+//|           - FILTERS page sizes itself to the number of visible   |
+//|             rows instead of a fixed 500 px, removing the large   |
+//|             empty well under a short filter list                 |
 //| v2.13 - BILINGUAL INTERFACE: ENGLISH + ARABIC WITH REAL RTL      |
 //|         MetaTrader's text layer has no OpenType shaping engine   |
 //|         and no bidirectional algorithm. It paints UTF-16 code    |
@@ -140,7 +162,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Signal Forge PRO - CC BY-NC-SA 4.0"
 #property link      "https://creativecommons.org/licenses/by-nc-sa/4.0/"
-#property version   "2.13"
+#property version   "2.14"
 #property strict
 
 #include <Canvas\Canvas.mqh>
@@ -355,7 +377,18 @@ int      gDayTrades = 0;
 double   gDayNet = 0.0;
 int      gConsecLosses = 0;
 string   gLastAction = "EA INITIALISED";
+// Forward declaration: the trade gate translates its block reasons, and that
+// code sits well above the UI string table where T() is defined. MQL4
+// resolves identifiers strictly top-down, so it must be declared here.
+string T(const string k);
+
 string   gBlockReason = "";
+
+// LIVE look-and-feel state. MQL4 `input` variables cannot be written at
+// runtime, so the language and theme buttons drive these copies instead.
+// Seeded from the inputs in OnInit, then owned by the HUD buttons.
+int      gLang  = 0;    // 0 = English, 1 = Arabic  (see ENUM_SF_LANG)
+int      gTheme = 0;    // see ENUM_SF_THEME
 int      gLastHistoryCount = -1;
 
 //--- supertrend incremental cache
@@ -458,7 +491,7 @@ uint A(color c, uchar alpha) { return ColorToARGB(c, alpha); }
 
 void LoadTheme()
   {
-   switch(HudTheme)
+   switch(gTheme)
      {
       case SF_THEME_CARBON:
          TBg      = A(C'18,21,24',255); TBg2    = A(C'28,33,38',255);
@@ -854,7 +887,7 @@ bool OpenPosition(int type)
    if(MaximumSpreadPoints > 0 && spread > MaximumSpreadPoints)
      {
       gLastAction = "BLOCKED: SPREAD " + DoubleToString(spread, 0) + " PTS";
-      gBlockReason = "SPREAD " + DoubleToString(spread, 0) + "p";
+      gBlockReason = T("SPREAD") + " " + DoubleToString(spread, 0) + T("p");
       return false;
      }
 
@@ -1457,7 +1490,9 @@ string ArBidi(const string src)
    return res;
   }
 
-// Public entry point: make any string safe to hand to MT4's renderer.
+// Public entry point for CANVAS text (CCanvas::TextOut).
+// The canvas is a raw pixel buffer drawn by MT4 itself: no shaping, no bidi.
+// It needs the fully processed string - shaped AND reordered to visual order.
 // Latin-only text is returned untouched (zero cost for the English UI).
 string ArFix(const string s)
   {
@@ -1465,6 +1500,31 @@ string ArFix(const string s)
    for(int i = 0; i < n; i++)
       if(ArIsArabic((ushort)StringGetChar(s, i)))
          return ArBidi(ArShape(s));
+   return s;
+  }
+
+// Public entry point for CHART OBJECTS (OBJ_BUTTON, OBJ_LABEL, ...).
+//
+// This is NOT the same problem as the canvas, and using ArFix() here is a bug.
+// Chart objects are drawn by real Windows GDI controls, and Windows applies
+// its OWN bidi reordering to the text it is given. If we hand it a string that
+// is already in visual order, Windows reverses it a SECOND time and the label
+// comes out backwards again:
+//
+//   logical "AL-RAISIYA" -> ArFix -> visual order -> Windows reverses it
+//   a SECOND time -> the caption is displayed backwards again.
+//
+// The shaping, however, is still ours to do: MT4 passes the code points
+// straight through without running the OpenType joining rules, so unshaped
+// text renders as disconnected letters even though the ORDER is right.
+//
+// So chart objects need SHAPING ONLY, and must keep logical order.
+string ArObj(const string s)
+  {
+   int n = StringLen(s);
+   for(int i = 0; i < n; i++)
+      if(ArIsArabic((ushort)StringGetChar(s, i)))
+         return ArShape(s);       // shape, but DO NOT reorder
    return s;
   }
 
@@ -1478,7 +1538,7 @@ string ArFix(const string s)
 // been translated yet still renders - it simply stays English.
 string T(const string k)
   {
-   if(HudLanguage == SF_LANG_EN) return k;
+   if(gLang == SF_LANG_EN) return k;
    //--- header / chrome
    if(k == "PRO")                 return "\x0628\x0631\x0648";
    if(k == "CORE")                return "\x0627\x0644\x0631\x0626\x064A\x0633\x064A\x0629";
@@ -1544,13 +1604,40 @@ string T(const string k)
    if(k == "FEES")                return "\x0627\x0644\x0631\x0633\x0648\x0645";
    if(k == "GROSS")               return "\x0627\x0644\x0625\x062C\x0645\x0627\x0644\x064A";
    if(k == "NET")                 return "\x0627\x0644\x0635\x0627\x0641\x064A";
+   if(k == "TRADE NOT ALLOWED")         return "\x0627\x0644\x062A\x062F\x0627\x0648\x0644\x0020\x063A\x064A\x0631\x0020\x0645\x0633\x0645\x0648\x062D";
+   if(k == "POSITION OPEN")             return "\x0635\x0641\x0642\x0629\x0020\x0645\x0641\x062A\x0648\x062D\x0629";
+   if(k == "pts")                       return "\x0646\x0642\x0637\x0629";
+   if(k == "SHOWING ALL")               return "\x0639\x0631\x0636\x0020\x0627\x0644\x0643\x0644";
    if(k == "TODAY")               return "\x0627\x0644\x064A\x0648\x0645";
-   if(k == "LOTS")                return "\x0627\x0644\x0644\x0648\x062A";
+   if(k == "WIN")                       return "\x0631\x0628\x062D";
+   if(k == "LOSS")                      return "\x062E\x0633\x0627\x0631\x0629";
+   if(k == "USD")                       return "\x062F\x0648\x0644\x0627\x0631";
+   if(k == "lot")                       return "\x0644\x0648\x062A";
+   if(k == "p")                         return "\x0646";
+   if(k == "m")                         return "\x062F";
+   if(k == "FEE")                       return "\x0631\x0633\x0648\x0645";
+   if(k == "BUY")                       return "\x0634\x0631\x0627\x0621";
+   if(k == "SELL")                      return "\x0628\x064A\x0639";
+   if(k == "WIN RATE")                  return "\x0646\x0633\x0628\x0629\x0020\x0627\x0644\x0641\x0648\x0632";
+   if(k == "P/FACTOR")                  return "\x0645\x0639\x0627\x0645\x0644\x0020\x0627\x0644\x0631\x0628\x062D";
+   if(k == "MODE: ALL")                 return "\x0627\x0644\x0648\x0636\x0639\x003A\x0020\x0627\x0644\x0643\x0644";
+   if(k == "MODE: ANY")                 return "\x0627\x0644\x0648\x0636\x0639\x003A\x0020\x0623\x064A";
+   if(k == "ALL-ALIGN")                 return "\x062A\x0648\x0627\x0641\x0642\x0020\x0643\x0644\x064A";
+   if(k == "ANY-ALIGN")                 return "\x062A\x0648\x0627\x0641\x0642\x0020\x062C\x0632\x0626\x064A";
+   if(k == "SCANNING")                  return "\x062C\x0627\x0631\x064A\x0020\x0627\x0644\x0645\x0633\x062D";
+   if(k == "COST INTELLIGENCE")         return "\x062A\x062D\x0644\x064A\x0644\x0020\x0627\x0644\x062A\x0643\x0644\x0641\x0629";
+   if(k == "RAW SPREAD")                return "\x0627\x0644\x0641\x0627\x0631\x0642\x0020\x0627\x0644\x062E\x0627\x0645";
+   if(k == "LAST")                      return "\x0622\x062E\x0631";
+   if(k == "DAYS")                      return "\x0623\x064A\x0627\x0645";
+   if(k == "WK")                        return "\x0627\x0644\x0623\x0633\x0628\x0648\x0639";
+   if(k == "MO")                        return "\x0627\x0644\x0634\x0647\x0631";
+   if(k == "TRADES TODAY")              return "\x0635\x0641\x0642\x0627\x062A\x0020\x0627\x0644\x064A\x0648\x0645";
+   if(k == "REGIME")                    return "\x0627\x0644\x0646\x0645\x0637";
+   if(k == "BAL")                       return "\x0627\x0644\x0631\x0635\x064A\x062F";
    if(k == "WIN%")                return "\x0627\x0644\x0641\x0648\x0632\x066A";
    if(k == "COMM")                return "\x0627\x0644\x0639\x0645\x0648\x0644\x0629";
    if(k == "RESUME TRADING")      return "\x0627\x0633\x062A\x0626\x0646\x0627\x0641\x0020\x0627\x0644\x062A\x062F\x0627\x0648\x0644";
    if(k == "PAUSE TRADING")       return "\x0625\x064A\x0642\x0627\x0641\x0020\x0627\x0644\x062A\x062F\x0627\x0648\x0644";
-   if(k == "SHOWING ALL")         return "\x0639\x0631\x0636\x0020\x0627\x0644\x0643\x0644";
    if(k == "ACTIVE ONLY")         return "\x0627\x0644\x0646\x0634\x0637\x0629\x0020\x0641\x0642\x0637";
    return k;                       // untranslated keys stay English
   }
@@ -1563,7 +1650,7 @@ string TR(const string k) { return ArFix(T(k)); }
 // language. Everything else (sizes, weights, layout) is unchanged.
 string UIFont(const string latin)
   {
-   if(HudLanguage == SF_LANG_EN) return latin;
+   if(gLang == SF_LANG_EN) return latin;
    // preserve the weight the caller asked for where the Arabic font has one
    if(StringFind(latin, "Black") >= 0 || StringFind(latin, "Bold") >= 0)
       return HudArabicFont + " Bold";
@@ -1610,7 +1697,9 @@ void ChartButton(string id, int x, int y, int w, int h, string caption,
    // before the idempotency comparison below, so the stored caption and the
    // comparison string are the same thing and the button is not rewritten on
    // every repaint (which would cancel clicks - see the STATE note).
-   caption = ArFix(caption);
+   // SHAPING ONLY - a button is a Windows control and does its own bidi.
+   // Passing ArFix() here reverses the caption twice. See ArObj().
+   caption = ArObj(caption);
    font    = UIFont(font);
    bool fresh = (ObjectFind(0, n) < 0);
    if(fresh) ObjectCreate(0, n, OBJ_BUTTON, 0, 0, 0);
@@ -1963,9 +2052,9 @@ void StatusDot(int x, int y, int r, bool on, uint onC, uint offC)
 //==================================================================//
 string StateText()
   {
-   if(gPaused) return "PAUSED";
-   if(gBlockReason != "") return gBlockReason;
-   return "ARMED";
+   if(gPaused) return T("PAUSED");
+   if(gBlockReason != "") return gBlockReason;   // already translated at source
+   return T("ARMED");
   }
 
 uint StateColor()
@@ -2130,7 +2219,19 @@ void PaintHud()
    if(ShowPerformancePanel) pageH += SC(40)*2 + SC(6) + SC(8); // balance/equity chips
    if(ShowRiskPanel)        pageH += SC(112) + SC(8); // execution console
    if(ShowTradePanel)       pageH += SC(74)  + SC(8); // live trade ticket
-   if(gHudPage == 1) pageH = SC(500);         // FILTERS
+   if(gHudPage == 1)
+     {
+      // FILTERS page: size to the rows we will actually draw. This used to be
+      // a fixed SC(500), which left a large empty well under the list whenever
+      // only a few filters were enabled (the stock setup runs SUPERTREND
+      // alone, so one row sat above ~400px of nothing).
+      int visRows = 0;
+      for(int r = 0; r < SF_FILTERS; r++)
+         if(gShowAllFilters || gEnabled[r]) visRows++;
+      if(visRows <= 0) visRows = 1;
+      //   header + tabs + column head + rows + footer buttons + padding
+      pageH = headerH + SC(6) + SC(32) + SC(30) + visRows * SC(27) + SC(46) + SC(8);
+     }
    int H = gHudCollapsed ? headerH + SC(8) : pageH;
    if(H > (int)chartH - HudMargin * 2) H = (int)chartH - HudMargin * 2;
    if(H < headerH + SC(8)) return;
@@ -2181,7 +2282,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v2.13", TTextDim, 7);
+        "  ·  RAW  ·  v2.14", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -2198,10 +2299,22 @@ void PaintHud()
    int innerW = W - pad * 2;
 
    //================= navigation tabs =================
-   int tabW2 = (innerW - SC(8)) / 2;
+   // Row layout: [ CORE ][ FILTERS ][ lang ][ theme ]
+   // The two square buttons on the right switch the interface language and
+   // the colour theme live, with no need to reopen the EA properties dialog.
+   int sqW   = SC(30);
+   int tabW2 = (innerW - SC(8) * 3 - sqW * 2) / 2;
+   int lx    = pad + (tabW2 + SC(8)) * 2;
+   int tx    = lx + sqW + SC(8);
    // TRACKER is no longer a tab - it lives in its own top-right panel.
-   DrawButton(pad,                y, tabW2, SC(24), "TAB_CORE",    T("CORE"),    gHudPage == 0, TAccent);
+   DrawButton(pad,                 y, tabW2, SC(24), "TAB_CORE",    T("CORE"),    gHudPage == 0, TAccent);
    DrawButton(pad + tabW2 + SC(8), y, tabW2, SC(24), "TAB_FILTERS", T("FILTERS"), gHudPage == 1, TAccent);
+   // Language: shows the language you will switch TO, so the button always
+   // reads in the script the user is about to get.
+   DrawButton(lx, y, sqW, SC(24), "BTN_LANG",
+              (gLang == SF_LANG_AR ? "EN" : "\x0639\x0631"), gLang == SF_LANG_AR, TAccent2);
+   DrawButton(tx, y, sqW, SC(24), "BTN_SKIN",
+              IntegerToString(gTheme + 1), false, TAccent2);
    y += SC(32);
 
    //================================================================
@@ -2224,14 +2337,14 @@ void PaintHud()
 
         double arm = ArmThreshold();
         uint sc = (gScore >= arm) ? TBull : (gScore <= -arm) ? TBear : TFlat;
-        string dir = gLongSignal ? "LONG" : (gShortSignal ? "SHORT" : "NEUTRAL");
+        string dir = gLongSignal ? T("LONG") : (gShortSignal ? T("SHORT") : T("NEUTRAL"));
         TextCenter(cx, cy - SC(48), Signed(gScore, 0), sc, 19, "Segoe UI Black", SF_FW_BLACK);
         TextCenter(cx, cy - SC(19), dir, sc, 8, "Segoe UI Semibold", SF_FW_SEMI);
         Text(pad + SC(14), cy - SC(6), "-100", TTextDim, 7);
         TextRight(pad + innerW - SC(14), cy - SC(6), "+100", TTextDim, 7);
 
         Text(pad + SC(12), y + SC(22),
-             RequireAllEnabledIndicatorsToAlign ? "MODE: ALL" : "MODE: ANY", TAccent, 7);
+             RequireAllEnabledIndicatorsToAlign ? T("MODE: ALL") : T("MODE: ANY"), TAccent, 7);
         TextRight(pad + innerW - SC(12), y + SC(22),
                   IntegerToString(gAgreeBull) + "▲ / " + IntegerToString(gAgreeBear) + "▼  of " +
                   IntegerToString(gAgreeOn), TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
@@ -2244,7 +2357,8 @@ void PaintHud()
         int costH = SC(92);
         RaisedPlate(pad, y, innerW, costH, SC(10), TPanel, TBorder);
         AccentSpine(pad + SC(4), y + SC(7), SC(13), TAccent2);
-        Text(pad + SC(13), y + SC(6), "COST INTELLIGENCE  ·  RAW SPREAD", TText, 8, "Segoe UI Black", SF_FW_BLACK);
+        Text(pad + SC(13), y + SC(6), T("COST INTELLIGENCE") + "  ·  " + T("RAW SPREAD"),
+             TText, 8, "Segoe UI Black", SF_FW_BLACK);
 
         double spPts  = SpreadPoints();
         double cost   = TotalCostPoints();
@@ -2318,9 +2432,9 @@ void PaintHud()
                                      : "OFF",
                   EnableTrailingStop ? TBull : TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
 
-        Text(pad + SC(12), y + SC(76), "LOTS  " + Fmt(FixedLots, 2), TTextDim, 7);
+        Text(pad + SC(12), y + SC(76), T("LOTS") + "  " + Fmt(FixedLots, 2), TTextDim, 7);
         TextRight(pad + innerW - SC(12), y + SC(76),
-                  "TRADES TODAY " + IntegerToString(gDayTrades), TTextDim, 7,
+                  T("TRADES TODAY") + " " + IntegerToString(gDayTrades), TTextDim, 7,
                   "Segoe UI Semibold", SF_FW_SEMI);
 
         // spread headroom against the only hard gate v1 enforces
@@ -2362,10 +2476,11 @@ void PaintHud()
         {
          TextCenter(pad + innerW / 2, y + SC(16), T("NO OPEN POSITION"), TTextDim, 9, "Segoe UI Semibold", SF_FW_SEMI);
          TextCenter(pad + innerW / 2, y + SC(34),
-                    (RequireAllEnabledIndicatorsToAlign ? "ALL-ALIGN" : "ANY-ALIGN") +
-                    "   ·   " + (gBlockReason == "" ? "SCANNING" : gBlockReason), TTextDim, 7);
+                    (RequireAllEnabledIndicatorsToAlign ? T("ALL-ALIGN") : T("ANY-ALIGN")) +
+                    "   ·   " + (gBlockReason == "" ? T("SCANNING") : gBlockReason), TTextDim, 7);
          double atrNow = ATRPoints(1);
-         TextCenter(pad + innerW / 2, y + SC(50), "ATR " + Fmt(atrNow, 0) + " pts   ·   REGIME " +
+         TextCenter(pad + innerW / 2, y + SC(50),
+                    "ATR " + Fmt(atrNow, 0) + " " + T("pts") + "   ·   " + T("REGIME") + " " +
                     Fmt(ATRRatio(1), 2) + "x", TTextDim, 7);
         }
       y += tkH + SC(8);
@@ -2425,7 +2540,7 @@ void PaintHud()
 
          // BIAS card: SOLID RAISED, background carries the state colour and
          // the text is always white so it reads at a glance.
-         string bias = gBull[i] ? "BULLISH" : (gBear[i] ? "BEARISH" : "FLAT");
+         string bias = gBull[i] ? T("BULLISH") : (gBear[i] ? T("BEARISH") : T("FLAT"));
          uint bgC, edC;
          if(!gEnabled[i])      { bgC = TGridC;    edC = TBorder; }
          else if(gBull[i])     { bgC = TBullDeep; edC = TBull;   }
@@ -2538,7 +2653,8 @@ void PaintTracker()
    double pf = (gStatGL > 0) ? gStatGP / gStatGL : (gStatGP > 0 ? 99.9 : 0);
    int kpiH = SC(52);
    int kw = (innerW - SC(12)) / 4;
-   string klbl[4]; klbl[0]="TRADES"; klbl[1]="WIN RATE"; klbl[2]="P/FACTOR"; klbl[3]="MAX DD";
+   string klbl[4];
+   klbl[0]=T("TRADES"); klbl[1]=T("WIN RATE"); klbl[2]=T("P/FACTOR"); klbl[3]=T("MAX DD");
    string kval[4];
    kval[0] = IntegerToString(gStatTrades);
    kval[1] = Fmt(wr, 1) + "%";
@@ -2564,8 +2680,9 @@ void PaintTracker()
    int tblH = SC(26) + hdrH + SF_TRACK_DAYS * rowH + SC(24);
    RaisedPlate(pad, y, innerW, tblH, SC(8), TPanel, TBorder);
    AccentSpine(pad + SC(4), y + SC(7), SC(13), TAccent);
-   Text(pad + SC(13), y + SC(6), "PERFORMANCE TRACKER", TText, 8, "Segoe UI Black", SF_FW_BLACK);
-   TextRight(pad + innerW - SC(10), y + SC(7), "LAST " + IntegerToString(SF_TRACK_DAYS) + " DAYS",
+   Text(pad + SC(13), y + SC(6), T("PERFORMANCE TRACKER"), TText, 8, "Segoe UI Black", SF_FW_BLACK);
+   TextRight(pad + innerW - SC(10), y + SC(7),
+             T("LAST") + " " + IntegerToString(SF_TRACK_DAYS) + " " + T("DAYS"),
              TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
 
    // column layout: DATE | LOTS | PROFIT | GAIN% | WIN% | COMM
@@ -2664,11 +2781,11 @@ void PaintTracker()
         "Segoe UI Semibold", SF_FW_SEMI);
    Text(pad + SC(13), y + SC(20), Signed(gStatNet, 2) + "  USD",
         gStatNet >= 0 ? TBull : TBear, 15, "Segoe UI Black", SF_FW_BLACK);
-   TextRight(pad + innerW - SC(12), y + SC(8), "GROSS " + Signed(gross, 2), TTextDim, 7,
+   TextRight(pad + innerW - SC(12), y + SC(8), T("GROSS") + " " + Signed(gross, 2), TTextDim, 7,
              "Segoe UI Semibold", SF_FW_SEMI);
-   TextRight(pad + innerW - SC(12), y + SC(20), "FEES -" + Fmt(gStatCommission, 2), TWarn, 8,
+   TextRight(pad + innerW - SC(12), y + SC(20), T("FEES") + " -" + Fmt(gStatCommission, 2), TWarn, 8,
              "Segoe UI Black", SF_FW_BLACK);
-   TextRight(pad + innerW - SC(12), y + SC(32), "BAL " + Fmt(AccountBalance(), 2), TText, 7,
+   TextRight(pad + innerW - SC(12), y + SC(32), T("BAL") + " " + Fmt(AccountBalance(), 2), TText, 7,
              "Segoe UI Semibold", SF_FW_SEMI);
    y += flH + SC(8);
 
@@ -2680,8 +2797,8 @@ void PaintTracker()
       AccentSpine(pad + SC(4), y + SC(7), SC(12), TAccent2);
       Text(pad + SC(13), y + SC(6), T("EQUITY CURVE"), TText, 7, "Segoe UI Black", SF_FW_BLACK);
       TextRight(pad + innerW - SC(10), y + SC(6),
-                "TODAY " + Signed(gStatToday, 2) + "   WK " + Signed(gStatWeek, 2) +
-                "   MO " + Signed(gStatMonth, 2), TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
+                T("TODAY") + " " + Signed(gStatToday, 2) + "   " + T("WK") + " " + Signed(gStatWeek, 2) +
+                "   " + T("MO") + " " + Signed(gStatMonth, 2), TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
       SunkenWell(pad + SC(8), y + SC(21), innerW - SC(16), sparkH - SC(29), SC(4), TBg);
       Sparkline(pad + SC(12), y + SC(25), innerW - SC(24), sparkH - SC(37),
                 gStatNet >= 0 ? TBull : TBear, TGridC);
@@ -3005,8 +3122,13 @@ void CardRow(string name, int x, int y, int w, int h, string txt,
    ObjectSetInteger(0, lbl, OBJPROP_YDISTANCE, y + h / 2);
    ObjectSetInteger(0, lbl, OBJPROP_COLOR, fg);
    ObjectSetInteger(0, lbl, OBJPROP_FONTSIZE, fontSize);
-   ObjectSetString(0, lbl, OBJPROP_FONT, bold ? "Arial Black" : "Consolas Bold");
-   ObjectSetString(0, lbl, OBJPROP_TEXT, txt);
+   // An OBJ_LABEL is a Windows-drawn control, so it applies its own bidi:
+   // shape the glyphs but keep LOGICAL order (see ArObj), and switch to an
+   // Arabic-capable font, because Consolas/Arial Black have no Arabic glyphs.
+   ObjectSetString(0, lbl, OBJPROP_FONT,
+                   gLang == SF_LANG_AR ? (HudArabicFont + " Bold")
+                                       : (bold ? "Arial Black" : "Consolas Bold"));
+   ObjectSetString(0, lbl, OBJPROP_TEXT, ArObj(txt));
    ObjectSetInteger(0, lbl, OBJPROP_BACK, false);
    ObjectSetInteger(0, lbl, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, lbl, OBJPROP_HIDDEN, true);
@@ -3454,19 +3576,20 @@ void DrawClosedTradeCards(int &oX1[], int &oY1[], int &oX2[], int &oY2[], int &o
 
       string b = PFX + "RES_" + IntegerToString(OrderTicket()) + "_";
       CardRow(b + "R0", x, y, w, headH,
-              (won ? "WIN " : "LOSS ") + (net >= 0 ? "+" : "") +
-              DoubleToString(net, 2) + " USD", bgHead, C'255,255,255', fsHd, true);
+              (won ? T("WIN") : T("LOSS")) + " " + (net >= 0 ? "+" : "") +
+              DoubleToString(net, 2) + " " + T("USD"), bgHead, C'255,255,255', fsHd, true);
       CardRow(b + "R1", x, y + headH, w, rowH,
-              (isBuy ? "BUY  " : "SELL ") + DoubleToString(OrderLots(), 2) + " lot  " +
-              (pts >= 0 ? "+" : "") + DoubleToString(MathRound(pts), 0) + "p",
+              (isBuy ? T("BUY") : T("SELL")) + " " + DoubleToString(OrderLots(), 2) +
+              " " + T("lot") + "  " +
+              (pts >= 0 ? "+" : "") + DoubleToString(MathRound(pts), 0) + T("p"),
               bgBody, txtBd, fs, false);
       CardRow(b + "R2", x, y + headH + rowH, w, rowH,
-              "GROSS " + (gross >= 0 ? "+" : "") + DoubleToString(gross, 2) +
-              "  FEE " + (commEst ? "~-" : "-") + DoubleToString(comm, 2),
+              T("GROSS") + " " + (gross >= 0 ? "+" : "") + DoubleToString(gross, 2) +
+              "  " + T("FEE") + " " + (commEst ? "~-" : "-") + DoubleToString(comm, 2),
               bgBody, txtBd, fs, false);
       CardRow(b + "R3", x, y + headH + rowH * 2, w, rowH,
-              "GAIN " + (gainPct >= 0 ? "+" : "") + DoubleToString(gainPct, 2) + "%  " +
-              IntegerToString(holdMin) + "m", bgBody, txtBd, fs, false);
+              T("GAIN") + " " + (gainPct >= 0 ? "+" : "") + DoubleToString(gainPct, 2) + "%  " +
+              IntegerToString(holdMin) + T("m"), bgBody, txtBd, fs, false);
 
       CardLeader(b, OrderOpenTime(), OrderOpenPrice(), x, y, h, edge);
 
@@ -3531,7 +3654,7 @@ void ApplySkin()
   {
    if(!ApplyChartSkin) return;
    color bg, fg, grid, up, dn;
-   switch(HudTheme)
+   switch(gTheme)
      {
       case SF_THEME_CARBON:
          bg = C'14,16,18'; fg = C'190,200,212'; grid = C'34,38,44';
@@ -3570,9 +3693,9 @@ void ApplySkin()
 bool MayOpenNewTrade(string &why)
   {
    why = "";
-   if(gPaused)                { why = "PAUSED";            return false; }
-   if(!IsTradeAllowed())      { why = "TRADE NOT ALLOWED"; return false; }
-   if(IsTradeContextBusy())   { why = "CONTEXT BUSY";      return false; }
+   if(gPaused)                { why = T("PAUSED");         return false; }
+   if(!IsTradeAllowed())      { why = T("TRADE NOT ALLOWED"); return false; }
+   if(IsTradeContextBusy())   { why = T("CONTEXT BUSY");      return false; }
    return true;
   }
 
@@ -3648,6 +3771,8 @@ void LoadFilterConfig()
 //==================================================================//
 int OnInit()
   {
+   gLang  = (int)HudLanguage;   // seed the live copies from the inputs
+   gTheme = (int)HudTheme;
    LoadTheme();
    CacheSymbolSpec();
    RecalcCostPoints();
@@ -3672,7 +3797,7 @@ int OnInit()
       Print("[SF-PRO] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("SF-PRO v2.13 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("SF-PRO v2.14 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
 
    // Print exactly which overlays are armed, so a "nothing is drawn" report
@@ -3680,7 +3805,7 @@ int OnInit()
    string ov = "";
    for(int v = 0; v < SF_FILTERS; v++)
       if(gDrawFilter[v]) ov += (ov == "" ? "" : ",") + gFilterName[v];
-   Print("[SF-PRO] v2.13 build | overlay master=", DrawIndicatorOverlay,
+   Print("[SF-PRO] v2.14 build | overlay master=", DrawIndicatorOverlay,
          " | bars=", Bars, " | seriesReady=", SeriesReady(),
          " | drawing: ", (ov == "" ? "(none - switch one ON in FILTERS)" : ov));
 
@@ -3807,6 +3932,26 @@ void HandleHudAction(string hit)
    else if(hit == "TAB_FILTERS") gHudPage = 1;
    else if(hit == "TRK_COLLAPSE") gTrkCollapsed = !gTrkCollapsed;
    else if(hit == "BTN_VIEW")    gShowAllFilters = !gShowAllFilters;
+   else if(hit == "BTN_LANG")
+     {
+      // Live language switch. Every button caption changes script, so the
+      // existing objects must be destroyed: MT4 caches the caption, and a
+      // stale Latin caption in an Arabic font renders as boxes.
+      gLang = (gLang == SF_LANG_AR) ? SF_LANG_EN : SF_LANG_AR;
+      ObjectsDeleteAll(0, PFX + "BTN_");
+      gButtonCount = 0;
+      gCardsDirty  = true;         // chart result cards are translated too
+      Journal(gLang == SF_LANG_AR ? "LANGUAGE: ARABIC" : "LANGUAGE: ENGLISH");
+     }
+   else if(hit == "BTN_SKIN")
+     {
+      // Cycle the colour theme and re-skin both the panels and the chart.
+      gTheme = (gTheme + 1) % 3;
+      LoadTheme();
+      ApplySkin();
+      gCardsDirty = true;
+      Journal("THEME " + IntegerToString(gTheme + 1));
+     }
    else if(hit == "BTN_PAUSE" || hit == "TRK_PAUSE")
      {
       gPaused = !gPaused;
@@ -4006,7 +4151,7 @@ void OnTick()
          if(enterLong)       OpenPosition(OP_BUY);
          else if(enterShort) OpenPosition(OP_SELL);
         }
-      else if((enterLong || enterShort) && openCount > 0) gBlockReason = "POSITION OPEN";
+      else if((enterLong || enterShort) && openCount > 0) gBlockReason = T("POSITION OPEN");
      }
    else gBlockReason = why;
 

@@ -1,4 +1,4 @@
-# Signal Forge PRO — XAUUSD M5 EA (v2.13)
+# Signal Forge PRO — XAUUSD M5 EA (v2.14)
 
 > **v2.05 — the ORIGINAL v1 trading strategy has been restored.**
 > The trading engine is now exactly the v1 engine. The entire v2 risk layer
@@ -1165,6 +1165,83 @@ The one intentional deviation is U+0649 (alef maksura): the reference maps its
 initial/medial forms into Presentation Forms-**A** (U+FBE8/9), which many
 Windows fonts lack. The EA uses the font-safe 2-form mapping, which is correct
 for standard Arabic where that letter is always word-final.
+
+> Still no MQL4 compiler in this environment — static analysis, not a build.
+
+---
+
+## v2.14 — Arabic on buttons was reversed twice, and the rest of the UI is now translated
+
+v2.13 applied the **same** transform to every string. That is correct for the
+canvas and **wrong for chart objects**, and the screenshots showed it clearly:
+panel headings like `توافق الفلاتر` read perfectly while every *button* read
+backwards.
+
+### Why: two renderers, two different problems
+
+| surface | drawn by | does its own bidi? | needs |
+|---|---|---|---|
+| `CCanvas` bitmap | MT4 pixel buffer | **no** | shape **+** reorder → `ArFix()` |
+| `OBJ_BUTTON`, `OBJ_LABEL` | **real Windows control** | **yes** | shape **only** → `ArObj()` |
+
+A Windows control applies the bidi algorithm to whatever text it is handed. So
+sending it visual-order text reverses it a **second** time:
+
+```
+logical  الرئيسية  →  ArFix → visual  →  Windows reverses again  →  ةيسيئرلا
+```
+
+That is exactly the `ديسيئلرا` seen on the CORE tab. The shaping is still ours
+to do — MT4 passes code points through without applying the joining rules — so
+objects need **shaping without reordering**.
+
+![button fix](docs/arabic_button_fix.png)
+
+*Both columns are run through the Windows control, so this is what MT4
+actually displays; only the string the EA sends differs.*
+
+### Everything else that is now Arabic
+
+`BULLISH/BEARISH/FLAT` → `صاعد/هابط/بدون صفقة`, `LONG/SHORT/NEUTRAL` →
+`شراء/بيع/محايد`, plus `ARMED/PAUSED`, `MODE: ALL/ANY`, the block reasons
+(`SPREAD`, `POSITION OPEN`, `CONTEXT BUSY`…), the tracker KPI chips
+(`TRADES`, `WIN RATE`, `P/FACTOR`, `MAX DD`), `TODAY/WK/MO`, `LAST 6 DAYS`,
+the cost-intelligence panel, and the **result cards on the chart**
+(`WIN/LOSS`, `BUY/SELL`, `GROSS`, `FEE`, `GAIN`).
+
+**Indicator names stay in English** as requested — `SUPERTREND`, `RSI`,
+`MACD`, `ATR` are read as proper nouns by traders.
+
+Block reasons are translated **at the point they are built**, not at display
+time, because `gBlockReason` is assembled from parts and a finished string
+would never match a dictionary key.
+
+### Live language and theme buttons
+
+The tab row is now `[ CORE ][ FILTERS ][ ع ][ 1 ]`. MQL4 `input` variables are
+**read-only at runtime**, so both buttons drive new `gLang` / `gTheme` globals
+that are seeded from the inputs in `OnInit`. Switching language deletes and
+rebuilds the button objects — MT4 caches captions, and a stale Latin caption
+in an Arabic font renders as boxes.
+
+### FILTERS page no longer has a huge empty well
+
+It was hardcoded to `SC(500)`. With the stock SUPERTREND-only setup that left
+one row above ~400 px of nothing. It now sizes to the visible rows:
+
+| visible rows | height |
+|---|---|
+| 1 | 203 px (was 500) |
+| 3 | 257 px |
+| 11 | 473 px |
+
+### Verification
+
+`docs/verify_arabic.py` gained **26 checks** covering the object/canvas split
+(`ArObj` shapes but never reorders, buttons and card labels use it, the canvas
+still uses `ArFix`) and the live switches. It also caught a real compile error:
+`T()` was called by the trade gate at line ~863 but defined at ~1517, and MQL4
+resolves top-down — now forward-declared.
 
 > Still no MQL4 compiler in this environment — static analysis, not a build.
 
