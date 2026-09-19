@@ -13,7 +13,9 @@ def grab(pat, d):
 
 W       = grab(r'int W = SC\((\d+)\);', 430)
 headerH = grab(r'int headerH = SC\((\d+)\);', 54)
-Hc      = grab(r'int pageH = SC\((\d+)\);\s*// CORE', 652)
+# CORE height is now the SUM of the enabled panels; mirror that computation
+# so the preview tracks the EA instead of silently using a stale constant.
+_chrome = grab(r'int pageH = headerH \+ SC\(6\) \+ SC\(32\) \+ SC\((\d+)\);', 34)
 Hf      = grab(r'if\(gHudPage == 1\) pageH = SC\((\d+)\);', 500)
 gaugeH  = grab(r'int gaugeH = SC\((\d+)\);', 126)
 frowH   = grab(r'int rowH = SC\((\d+)\);\s*\n\s*for\(int i = 0; i < SF_FILTERS', 27)
@@ -23,6 +25,9 @@ biasX   = grab(r'int bX = pad \+ SC\((\d+)\)', 142)
 costH   = grab(r'int costH = SC\((\d+)\);', 92)
 riskH   = grab(r'int riskH = SC\((\d+)\);', 112)
 tkH     = grab(r'int tkH = SC\((\d+)\);', 74)
+chipH   = grab(r'int chipH = SC\((\d+)\), chipW', 40)
+Hc      = (headerH + 6 + 32 + _chrome
+           + gaugeH + 8 + costH + 8 + chipH*2 + 6 + 8 + riskH + 8 + tkH + 8)
 print(f"from source: W={W} core={Hc} filters={Hf} frowH={frowH} bias={biasW}x{biasH}@{biasX}")
 
 TBg=(12,18,34);TBg2=(20,30,54);TPanel=(28,40,72);TPanelHi=(40,56,98)
@@ -114,7 +119,7 @@ def draw_header_text(p):
     if badgeX+badgeW < colX-SC(6):
         p.rr(badgeX,hy+SC(2),badgeW,badgeH,SC(3),TAccent,TAccent)
         p.TC(badgeX+badgeW//2,hy+SC(2),"PRO",(6,10,18),7,1,"pro")
-    p.T(txtX,hy+SC(18),"XAUUSDr  ·  M5  ·  RAW  ·  v2.01",TTextDim,7,0,"la","sub")
+    p.T(txtX,hy+SC(18),"XAUUSDr  ·  M5  ·  RAW  ·  v2.05",TTextDim,7,0,"la","sub")
     p.dot(pillX+SC(12),hy+SC(14),SC(4),True,TBull,TGridC)
     p.TC(pillX+SC(13)+(pillW-SC(13))//2,hy+SC(6),"ARMED",TBull,7,1,"state")
     p.TC(colX+colW//2,hy+SC(6),"-",TAccent,8,1,"col")
@@ -165,9 +170,9 @@ p.finish(); draw_header_text(p); chip_text()
 for i,l in enumerate(["CORE","FILTERS","TRACKER"]):
     bx=pad+(tabW+SC(8))*i
     p.TC(bx+tabW//2,headerH+SC(6)+SC(5),l,(6,10,18) if i==0 else TText,8,1,f"tab{i}")
-p.T(pad+SC(13),gy+SC(6),"CONFLUENCE CONVICTION",TText,8,1,"la","g1")
-p.TR(pad+innerW-SC(12),gy+SC(7),"HTF FLAT",TTextDim,7,1,"g2")
-p.T(pad+SC(13),gy+SC(20),"ARM ±62",TAccent,7,0,"la","g3")
+p.T(pad+SC(13),gy+SC(6),"FILTER AGREEMENT",TText,8,1,"la","g1")
+p.TR(pad+innerW-SC(12),gy+SC(7),"1▲ / 0▼  of 1",TTextDim,7,1,"g2")
+p.T(pad+SC(13),gy+SC(20),"MODE: ALL",TAccent,7,0,"la","g3")
 p.TC(pad+innerW//2,gy+SC(52),"+0",TFlat,19,1,"g4")
 p.TC(pad+innerW//2,gy+SC(84),"NEUTRAL",TFlat,8,1,"g5")
 p.T(pad+SC(14),gy+SC(104),"-100",TTextDim,7,0,"la","g6")
@@ -179,12 +184,13 @@ for i,(l,v,c) in enumerate([("SPREAD","90 pts",TText),("COMMISSION","70 pts",TTe
     p.T(pad+SC(12)+i*col,cy_+SC(37),v,c,10,1,"la",f"k{i}b")
 p.T(pad+SC(12),cy_+SC(57),"COST / ATR(14)",TTextDim,7,0,"la","k9")
 p.TR(pad+innerW-SC(12),cy_+SC(57),"20.0% of ATR",TFlat,7,1,"k10")
-p.T(pad+SC(13),ry+SC(6),"RISK CONSOLE",TText,8,1,"la","r1")
-for i,(l,v) in enumerate([("DAILY LOSS BUDGET","0%"),("DAILY TARGET","0%")]):
-    p.T(pad+SC(12),ry+SC(26)+i*SC(28),l,TTextDim,7,0,"la",f"r{i}a")
-    p.TR(pad+innerW-SC(12),ry+SC(26)+i*SC(28),v,TTextDim,7,1,f"r{i}b")
-p.T(pad+SC(12),ry+SC(82),"TRADES TODAY  2 / 6",TTextDim,7,0,"la","r5")
-p.TR(pad+innerW-SC(12),ry+SC(82),"STREAK 0L",TTextDim,7,1,"r6")
+p.T(pad+SC(13),ry+SC(6),"EXECUTION CONSOLE",TText,8,1,"la","r1")
+for i,(l,v) in enumerate([("STOP LOSS","ATR x 1.80"),("TAKE PROFIT","5000 pts"),
+                          ("TRAILING","700 / 100 pts")]):
+    p.T(pad+SC(12),ry+SC(26)+i*SC(16),l,TTextDim,7,0,"la",f"r{i}a")
+    p.TR(pad+innerW-SC(12),ry+SC(26)+i*SC(16),v,TTextDim,7,1,f"r{i}b")
+p.T(pad+SC(12),ry+SC(76),"LOTS  0.01",TTextDim,7,0,"la","r5")
+p.TR(pad+innerW-SC(12),ry+SC(76),"TRADES TODAY 2",TTextDim,7,1,"r6")
 p.TC(pad+SC(10)+SC(27),ty+SC(11),"FLAT",(6,10,18),7,1,"t1")
 p.T(pad+SC(72),ty+SC(10),"no position",TTextDim,8,0,"la","t2")
 for i,l in enumerate(["PAUSE","CLOSE ALL","OVERLAY"]):
@@ -197,8 +203,8 @@ q=Page(Hf); header(q,3,1)
 pad,innerW,tabW=tabs_row(q,headerH+SC(6),1)
 y=headerH+SC(6)+SC(32)
 q.sunk(pad,y,innerW,SC(26),SC(6),TBg2); hdry=y; y+=SC(30)
-NAMES=["RSI","MACD","SUPERTREND","EMA CROSS","ADX / DI","HTF BIAS","STRUCTURE","VWAP"]
-WTS=[1.5,1.5,3.0,2.0,2.0,2.5,2.0,1.5]
+NAMES=["SMA CROSS","RSI","MACD","SUPERTREND","STOCHASTIC","BOLLINGER MID","EMA CROSS","AWESOME OSC"]
+WTS=[1,1,1,1,1,1,1,1]   # v1: every enabled filter is one equal vote
 BIAS=["BULLISH","FLAT","BULLISH","BEARISH","FLAT","BULLISH","BEARISH","FLAT"]
 rowH=SC(frowH); rows=[]
 for i,n in enumerate(NAMES):
@@ -213,7 +219,9 @@ for i,n in enumerate(NAMES):
     bg={"FLAT":TGreyDeep,"BULLISH":TBullDeep,"BEARISH":TBearDeep}[st]
     ed={"FLAT":TLite,"BULLISH":TBull,"BEARISH":TBear}[st]
     q.raised(pad+SC(biasX),bY,SC(biasW),bH,SC(3),bg,ed,True,1)
-    share=WTS[i]/sum(WTS); norm=min(1.0,share*2.5)
+    # EA: 1.0 when the filter sides with the live signal, 0.55 when it has a
+    # bias that disagrees, 0.12 when flat. Preview signal here is BEARISH.
+    norm={"BEARISH":1.0,"BULLISH":0.55,"FLAT":0.12}[BIAS[i]]
     strong={"FLAT":TFlat,"BULLISH":TBull,"BEARISH":TBear}[st]
     q.meter_graded(pad+SC(248),y+(cellH-SC(7))//2,innerW-SC(260),SC(7),norm,strong)
     rows.append((y,n,WTS[i],st,bY,bH)); y+=rowH
@@ -226,13 +234,13 @@ for i,l in enumerate(["CORE","FILTERS","TRACKER"]):
     q.TC(bx+tabW//2,headerH+SC(6)+SC(5),l,(6,10,18) if i==1 else TText,8,1,f"tab{i}")
 q.T(pad+SC(10),hdry+SC(8),"FILTER",TAccent,7,1,"la","h0")
 q.T(pad+SC(biasX),hdry+SC(8),"BIAS",TAccent,7,1,"la","h1")
-q.T(pad+SC(212),hdry+SC(8),"WGT",TAccent,7,1,"la","h2")
-q.TR(pad+innerW-SC(10),hdry+SC(9),"CONTRIBUTION",TAccent,7,1,"h3")
+q.T(pad+SC(212),hdry+SC(8),"VOTE",TAccent,7,1,"la","h2")
+q.TR(pad+innerW-SC(10),hdry+SC(9),"AGREEMENT",TAccent,7,1,"h3")
 for i,(ry2,n,w,st,bY,bH) in enumerate(rows):
     cellH=rowH-SC(3)
     q.TVC(pad+SC(22),ry2,cellH,n,TText,7,1,f"n{i}")
     q.TCVC(pad+SC(biasX)+SC(biasW)//2,bY,bH,st,(255,255,255),7,1,f"bi{i}")
-    q.TVC(pad+SC(216),ry2,cellH,f"{w:.1f}",TText,7,1,f"w{i}")
+    q.TVC(pad+SC(216),ry2,cellH,f"{100.0/len(rows):.0f}%",TText,7,1,f"w{i}")
 q.TC(pad+bw2//2,fy+SC(6),"ACTIVE ONLY",TText,8,1,"f1")
 q.TC(pad+bw2+SC(8)+bw2//2,fy+SC(6),"PAUSE",TText,8,1,"f2")
 q.check("FILTERS")

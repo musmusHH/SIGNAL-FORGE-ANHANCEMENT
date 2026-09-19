@@ -1,19 +1,29 @@
-# Signal Forge PRO — XAUUSD M5 EA (v2.00)
+# Signal Forge PRO — XAUUSD M5 EA (v2.05)
 
-A ground-up enhancement of *Signal Forge XAUUSD M5 EA*, rebuilt around one specific
-reality: **a $200 Exness Raw Spread gold account where every 0.01 lot costs $0.07
-round turn.**
+> **v2.05 — the ORIGINAL v1 trading strategy has been restored.**
+> The trading engine is now exactly the v1 engine. The entire v2 risk layer
+> (sessions, daily loss cap, equity kill-switch, cooldown, adaptive spread,
+> cost-aware TP floor, partials, break-even stop, chandelier trail, time stop,
+> risk/ladder sizing, weighted confluence scoring) has been **deleted**.
+> What is kept from v2 is the **interface only**: the Quantum HUD, the chart
+> visuals and the performance tracker, re-pointed at v1 concepts.
+> Sections 2–5 below describe the v2 engine and are retained for history —
+> **they no longer reflect what the EA does.** See the v2.05 section at the
+> bottom for the current behaviour.
 
-| | v1 (original) | v2.00 PRO |
+A visual rebuild of *Signal Forge XAUUSD M5 EA* for a **$200 Exness Raw Spread
+gold account where every 0.01 lot costs $0.07 round turn.**
+
+| | v1 (original) | v2.05 (current) |
 |---|---|---|
+| **Trading logic** | 11 equal-vote filters, AND/OR | **identical — v1 restored** |
 | Interface | ~20 static rectangle/label objects | Single **antialiased Canvas HUD**, 3 pages, gauge, meters, hover, hotkeys |
-| Filters | 11, all equal, all-or-nothing | **14, individually weighted**, −100…+100 conviction score |
-| Sizing | Fixed 0.01 lots | Risk %, ladder, or fixed — **commission folded into the risk budget** |
-| Cost model | none | Spread + commission modelled **in price points**, enforced on SL/TP/BE |
-| Sessions | none | London / Overlap / NY / Asia + rollover + weekend guard (GMT-aware) |
-| Risk control | none | Daily loss cap, profit target, trade cap, loss-streak cooldown, DD kill-switch |
-| Exits | Fixed TP + point trail | ATR / structure / cost-multiple TP, **true break-even**, partials, chandelier trail, time stop |
-| Lines of code | 1,710 | 2,593 |
+| Result cards | one-line price tag | **solid raised multi-row cards**, live + closed, overlap-free placement |
+| Tracker | none | **DATE · LOT · PROFIT · GAIN% · WINRATE · COMMISSION · FINAL P/L** |
+| Sizing | Fixed 0.01 lots | **identical — fixed lots** |
+| Risk layer | none | **none (removed in v2.05)** |
+| Cost model | none | **reporting only** — never gates a trade |
+| Lines of code | 1,710 | 2,714 |
 
 ![HUD](docs/hud_core_preview.png)
 
@@ -393,3 +403,96 @@ helper.
 
 Verified across five cases (broker-reported, tester-zero, tracker-never-opened,
 0.10 lot, and a losing trade where the fee must deepen the loss).
+
+---
+
+## v2.05 — ORIGINAL STRATEGY RESTORED
+
+Requested verbatim: *"RESTORE THE LOGIC TRADING THE ORIGINAL STRATEGY KEEP ONLY
+THE VISUAL CHANGES."* Scope confirmed as **pure v1 logic** with an **adapted panel**.
+
+### What the EA trades now
+
+The engine is a line-for-line restoration of v1. Verified mechanically: the
+functions `GetConditions`, `AdvanceSupertrend`, `SupertrendDirection` and
+`RiskStopDistance` are **token-identical** to v1 after normalising whitespace and
+three renamed globals; `ManageTrailing` differs only by an
+`if(select){...}` → `if(!select) continue;` inversion.
+
+* **11 filters, one equal vote each** — SMA, RSI, MACD, **Supertrend**,
+  Stochastic, Bollinger midline, EMA, Awesome Oscillator, Parabolic SAR, CCI,
+  ADX/DI. Only **Supertrend is enabled by default** (factor 2.5, length 10),
+  which is the original shipped strategy.
+* **Combination** — `RequireAllEnabledIndicatorsToAlign` selects AND (default) or OR.
+* **Entry** — fires on the bar the combined signal *first* turns true
+  (`signal && !previousSignal`), evaluated on the closed bar by default.
+* **Stop** — `SL_By_ATR` (1.8 × ATR14, default) or `SL_By_Risk_Percent`.
+* **Target** — `TP_By_Points` (5000 pts, default) or `TP_By_ATR` (2.4 ×).
+* **Trailing** — points-based, start 700 / distance 100 / step 100.
+* **Flip** — `CloseOnOppositeSignal` closes and reverses.
+* **Only hard gate** — `MaximumSpreadPoints` (91), plus `IsTradeAllowed()` and
+  the manual PAUSE button.
+
+### What was deleted
+
+Sessions and the GMT session map · daily loss cap · daily profit target ·
+max trades per day · loss-streak cooldown · equity drawdown kill-switch ·
+adaptive spread · cost-aware TP floor · partial take-profit · break-even stop ·
+chandelier trail · time stop · risk-percent and ladder sizing · weighted
+confluence scoring · HTF bias · structure channel · VWAP · news blackouts.
+
+Input count went **185 → 95**. `SF_FILTERS` went **14 → 11**.
+
+### What the panel shows instead
+
+The dashboard keeps its v2 look and is re-pointed at v1 concepts:
+
+| v2 widget | v2.05 meaning |
+|---|---|
+| Conviction gauge | **FILTER AGREEMENT** — `(bullVotes − bearVotes) / enabled × 100` |
+| `ARM ±62` marker | **MODE: ALL / ANY**, plus a live `n▲ / n▼ of n` vote tally |
+| Weight column | **VOTE** — equal share, `100 / enabled %` |
+| Contribution bar | **AGREEMENT** — full when the filter sides with the live signal |
+| Risk console | **EXECUTION CONSOLE** — SL mode, TP mode, trailing, lots, spread headroom |
+| Daily-budget meters | replaced by a spread-headroom meter against `MaximumSpreadPoints` |
+
+The gauge's arm line is now derived, not an input: **100 %** in ALL mode (every
+enabled filter must agree), or **`100 / enabled` %** in ANY mode (a single vote
+fires). With the default Supertrend-only setup the gauge therefore reads
+exactly ±100 whenever a trade can trigger.
+
+### Fixes carried in the same release
+
+* **Commission is now estimated consistently everywhere.** v2.04 taught the
+  *cards* to fall back to `CommissionPer001LotRT` when `OrderCommission()`
+  reports 0 (common in the tester), but the tracker and equity curve still used
+  the raw value — so FEE could read `~-0.70` on a card while the tracker showed
+  `0.00`. A single `SelectedNetUSD()` helper now backs the cards, the KPI strip,
+  the daily buckets, the GAIN% baseline and the equity curve.
+* **`AlertOnEntry` / `PushOnEntry` were dead** after the OnTick rewrite —
+  restored inside `OpenPosition`.
+* **The five `Show*Panel` inputs never did anything** (dead since v2.00).
+  They now genuinely add/remove their block, and the CORE page height is the
+  **sum of the enabled panels** rather than a hardcoded 652 px, so switching a
+  panel off closes the gap instead of leaving a hole.
+
+### Presets regenerated
+
+The three `.set` files were invalid against the new input list and have been
+rebuilt — **86 keys each, validator clean** (no invalid, missing or duplicate keys):
+
+| Preset | Configuration |
+|---|---|
+| `..._200USD.set` | Stock Supertrend-only, 0.01 lot, spread cap tightened to 60 pts |
+| `..._1000USD.set` | 0.05 lot, risk-% stop (0.5 %), ATR target |
+| `..._Sniper-Overlap.set` | Supertrend **+ EMA + ADX must all align**, spread cap 45 pts |
+
+### Verification
+
+* Brace / paren / bracket balance: **0 delta**.
+* Undefined calls and undefined globals: **none**.
+* Duplicate function definitions: **none**. Duplicate inputs: **none**.
+* Inputs never read: **none** (was 7 before this release).
+* All three renderers pass: HUD text overlaps **NONE**, corner-arc stray pixels
+  **0**, tracker fits **692/700 px**, chart cards **no card/candle or card/card
+  overlap**.

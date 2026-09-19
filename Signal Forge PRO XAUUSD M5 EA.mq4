@@ -1,22 +1,33 @@
 //+------------------------------------------------------------------+
 //|                                  Signal Forge PRO XAUUSD M5 EA   |
-//|                    QUANTUM HUD  ·  v2.04  ·  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  ·  v2.05  ·  MQL4 / MetaTrader 4 |
 //|------------------------------------------------------------------|
 //| Evolution of "Signal Forge XAUUSD M5 EA".                        |
+//|                                                                  |
+//| v2.05 - ORIGINAL STRATEGY RESTORED. The trading logic is exactly |
+//| the v1 engine: 11 equal-vote filters (Supertrend on by default), |
+//| AND/OR combination, ATR or risk-% stop, points or ATR target,    |
+//| points trailing stop, flip on the opposite signal. The entire v2 |
+//| risk layer - sessions, daily loss cap, equity kill-switch,       |
+//| cooldown, adaptive spread, partials, break-even, chandelier and  |
+//| time stops, risk/ladder sizing - has been REMOVED. Only the      |
+//| QUANTUM HUD, the chart visuals and the performance tracker are   |
+//| kept from v2, re-pointed at the v1 concepts.                     |
 //| Original indicator concept: Signal Forge [LuxAlgo]               |
 //| (c) LuxAlgo, CC BY-NC-SA 4.0 - non commercial ShareAlike port.    |
 //| https://creativecommons.org/licenses/by-nc-sa/4.0/               |
 //|------------------------------------------------------------------|
 //| TUNED FOR : XAUUSD  M5  ·  Exness Raw Spread  ·  3-digit gold     |
-//| ACCOUNT   : from 200 USD  (micro-account guardian built in)       |
+//| ACCOUNT   : from 200 USD  ·  0.01 lot fixed by default            |
 //| COST MODEL: 3.50 USD / lot / side  ==  0.07 USD round turn / 0.01 |
 //|             lot  ==  a constant 70 price points on a 3-digit feed |
+//|             (REPORTING ONLY - cost never gates a trade in v1)     |
 //|------------------------------------------------------------------|
 //| THIS IS NOT FINANCIAL ADVICE. FORWARD TEST ON DEMO FIRST.         |
 //+------------------------------------------------------------------+
 #property copyright "Signal Forge PRO - CC BY-NC-SA 4.0"
 #property link      "https://creativecommons.org/licenses/by-nc-sa/4.0/"
-#property version   "2.04"
+#property version   "2.05"
 #property strict
 
 #include <Canvas\Canvas.mqh>
@@ -24,42 +35,9 @@
 //==================================================================//
 //                          E N U M S                               //
 //==================================================================//
-enum ENUM_SF_CONFLUENCE
-  {
-   SF_CONF_SCORE   = 0, // Weighted score (recommended)
-   SF_CONF_ALL     = 1, // All enabled filters must align
-   SF_CONF_ANY     = 2  // Any enabled filter may fire
-  };
-
-enum ENUM_SF_SL
-  {
-   SF_SL_ATR       = 0, // ATR multiple
-   SF_SL_STRUCTURE = 1, // Swing structure + ATR buffer
-   SF_SL_FIXED     = 2, // Fixed points
-   SF_SL_RISK      = 3  // Distance derived from risk money
-  };
-
-enum ENUM_SF_TP
-  {
-   SF_TP_ATR       = 0, // ATR multiple
-   SF_TP_FIXED     = 1, // Fixed points
-   SF_TP_COST      = 2  // Multiple of full round-turn cost
-  };
-
-enum ENUM_SF_TRAIL
-  {
-   SF_TRAIL_OFF        = 0, // Off
-   SF_TRAIL_POINTS     = 1, // Classic step trailing (points)
-   SF_TRAIL_ATR        = 2, // ATR distance trailing
-   SF_TRAIL_CHANDELIER = 3  // Chandelier (highest high - k*ATR)
-  };
-
-enum ENUM_SF_SIZING
-  {
-   SF_SIZE_FIXED   = 0, // Fixed lots
-   SF_SIZE_RISK    = 1, // Risk % of equity per trade (recommended)
-   SF_SIZE_LADDER  = 2  // Balance ladder (one step per X USD)
-  };
+// ---- ORIGINAL v1 STRATEGY ENUMS -------------------------------------
+enum EA_SL_MODE { SL_By_ATR = 0, SL_By_Risk_Percent = 1 };
+enum EA_TP_MODE { TP_By_Points = 0, TP_By_ATR = 1 };
 
 enum ENUM_SF_THEME
   {
@@ -79,172 +57,79 @@ enum ENUM_SF_FILTERVIEW
 //==================================================================//
 input string __01 = "======== IDENTITY / EXECUTION ========"; // .
 input int    MagicNumber            = 260914;   // Magic number
-input string TradeComment           = "SignalForgePRO";
-input int    SlippagePoints         = 60;       // Max slippage (points)
-input int    OrderRetries           = 3;        // Send/modify retries
-input bool   TradeOnClosedBar       = true;     // Evaluate on closed bar only
+input double FixedLots              = 0.01;     // Fixed lot size
+input int    SlippagePoints         = 50;       // Slippage (points)
+input int    MaximumSpreadPoints    = 91;       // Max spread (points, 0=off)
 input bool   OnePositionOnly        = true;     // Only one position at a time
-input bool   CloseOnOppositeSignal  = true;     // Flip out on opposite signal
-input int    MinBarsBetweenTrades   = 3;        // Cooldown bars between entries
+input bool   CloseOnOppositeSignal  = true;     // Close when the signal flips
+input bool   TradeOnClosedBar       = true;     // Evaluate on the closed bar
+input string TradeComment           = "Signal Forge"; // Order comment
 
-input string __02 = "======== BROKER COST MODEL (EXNESS RAW) ========"; // .
-input double CommissionPer001LotRT  = 0.07;     // USD round-turn commission per 0.01 lot
-input int    MaxSpreadPoints        = 130;      // Hard spread cap (points, 3-digit gold)
-input bool   UseAdaptiveSpreadCap   = true;     // Also cap at k x median spread
-input double AdaptiveSpreadFactor   = 2.2;      // k for adaptive spread cap
-input double MinTPtoCostRatio       = 3.0;      // TP must be >= this x round-turn cost
-input bool   BreakEvenIncludesCost  = true;     // True break-even = entry + spread + commission
+input string __02 = "======== STOP LOSS / TAKE PROFIT ========"; // .
+input EA_SL_MODE StopLossMode       = SL_By_ATR;    // Stop loss mode
+input EA_TP_MODE TakeProfitMode     = TP_By_Points; // Take profit mode
+input int    ATRLength              = 14;       // ATR length
+input double StopLossATR            = 1.8;      // Stop loss = ATR x
+input double TakeProfitATR          = 2.4;      // Take profit = ATR x
+input double TakeProfitPoints       = 5000.0;   // Take profit (points)
+input double RiskPercent            = 0.5;      // Risk % (risk-based SL mode)
+input double RiskReferenceBalance   = 0.0;      // 0 = current account balance
 
-input string __03 = "======== MICRO ACCOUNT / POSITION SIZING ========"; // .
-input ENUM_SF_SIZING SizingMode     = SF_SIZE_RISK; // Lot sizing mode
-input double FixedLots              = 0.01;     // Fixed lots (SF_SIZE_FIXED)
-input double RiskPercent            = 1.0;      // Risk % per trade
-input double MaxRiskPercentHardCap  = 2.0;      // Never risk more than this %
-input bool   AllowMinLotOverride    = false;    // Take min-lot trade even if it breaks the cap
-input double LadderStepUSD          = 200.0;    // +0.01 lot per this much balance (LADDER)
-input double MaxLots                = 1.00;     // Absolute lot ceiling
-input double MinAccountBalanceUSD   = 150.0;    // Hard stop below this balance
-input bool   UseEquityForRisk       = true;     // Size from equity instead of balance
-input double RiskReferenceBalance   = 0.0;      // 0 = live balance/equity
+input string __03 = "======== TRAILING STOP ========"; // .
+input bool   EnableTrailingStop     = true;     // Enable trailing stop
+input double TrailingStartPoints    = 700.0;    // Start trailing after (points)
+input double TrailingDistancePoints = 100.0;    // Trailing distance (points)
+input double TrailingStepPoints     = 100.0;    // Trailing step (points)
 
-input string __04 = "======== RISK GUARDIANS ========"; // .
-input double DailyLossLimitPercent  = 6.0;      // Stop trading after -x% day (0=off)
-input double DailyProfitTargetPct   = 6.0;      // Stop trading after +x% day (0=off)
-input int    MaxTradesPerDay        = 6;        // Max new trades per day (0=off)
-input int    MaxConsecutiveLosses   = 3;        // Losses before cooldown (0=off)
-input int    CooldownMinutes        = 60;       // Cooldown length after loss streak
-input double MaxDailyDrawdownPct    = 10.0;     // Equity drawdown kill-switch (0=off)
-input bool   ReduceRiskAfterLoss    = true;     // Step risk down after a losing trade
-input double LossRiskFactor         = 0.6;      // Risk multiplier while recovering
+input string __04 = "======== SIGNAL COMBINATION ========"; // .
+input bool RequireAllEnabledIndicatorsToAlign = true; // ALL enabled must align (else ANY)
 
-input string __05 = "======== SESSION / TIME FILTER (SERVER = GMT) ========"; // .
-input bool   UseSessionFilter       = true;     // Trade only inside the windows below
-input int    ServerGMTOffsetHours   = 0;        // Exness MT4 server is GMT+0
-input bool   TradeLondon            = true;     // London window
-input int    LondonStartHour        = 7;        // London start (server hour)
-input int    LondonEndHour          = 12;       // London end
-input bool   TradeOverlap           = true;     // London/NY overlap - best gold liquidity
-input int    OverlapStartHour       = 12;       // Overlap start
-input int    OverlapEndHour         = 17;       // Overlap end
-input bool   TradeNewYork           = true;     // New York afternoon
-input int    NewYorkStartHour       = 17;       // NY start
-input int    NewYorkEndHour         = 20;       // NY end
-input bool   TradeAsia              = false;    // Asia (low liquidity, wide spread)
-input int    AsiaStartHour          = 0;        // Asia start
-input int    AsiaEndHour            = 6;        // Asia end
-input bool   AvoidRollover          = true;     // Skip the swap/rollover window
-input int    RolloverStartHour      = 20;       // Rollover blackout start
-input int    RolloverEndHour        = 22;       // Rollover blackout end
-input bool   CloseBeforeWeekend     = true;     // Flatten before the weekend
-input int    FridayCloseHour        = 19;       // Friday flatten hour
-input bool   FlattenAtSessionEnd    = false;    // Flatten when the last window closes
-input string ManualBlackout         = "";       // e.g. "12:25-12:45,18:00-18:15"
-
-input string __06 = "======== VOLATILITY REGIME ========"; // .
-input bool   UseVolatilityFilter    = true;     // Require a healthy ATR regime
-input int    ATRLength              = 14;       // Fast ATR
-input int    ATRRegimeLength        = 50;       // Slow ATR baseline
-input double MinATRRatio            = 0.70;     // Skip dead markets below this ratio
-input double MaxATRRatio            = 2.60;     // Skip news explosions above this ratio
-input double MinATRPoints           = 350.0;    // Absolute ATR floor (points)
-
-input string __07 = "======== CONFLUENCE ENGINE ========"; // .
-input ENUM_SF_CONFLUENCE ConfluenceMode = SF_CONF_SCORE; // Aggregation mode
-input double EntryScoreThreshold    = 62.0;     // |score| needed to arm (0..100)
-input bool   RequireFreshCross      = true;     // Only trade the bar the score crosses
-input bool   RequireHTFAlignment    = true;     // HTF bias must agree with the trade
-input int    HTFTimeframeMinutes    = 60;       // Higher timeframe (60 = H1)
-input int    HTFFastEMA             = 21;       // HTF fast EMA
-input int    HTFSlowEMA             = 55;       // HTF slow EMA
-
-input string __08 = "======== FILTERS : ENABLE + WEIGHT ========"; // .
-input bool   EnableSMA              = false;
-input double WeightSMA        = 1.0;
-input int    SMAFastLength          = 9;
-input int    SMASlowLength    = 30;
-input bool   EnableRSI              = true;
-input double WeightRSI        = 1.5;
-input int    RSILength              = 14;
+input string __05 = "======== FILTERS ========"; // .
+input bool EnableSMA          = false;    // SMA cross
+input int  SMAFastLength      = 9;
+input int  SMASlowLength      = 30;
+input bool EnableRSI          = false;    // RSI
+input int  RSILength          = 14;
 input double RSILongAbove     = 52.0;
-input double RSIShortBelow          = 48.0;
-input bool   EnableMACD             = true;
-input double WeightMACD       = 1.5;
-input int    MACDFastLength         = 8;
-input int    MACDSlowLength   = 21;
-input int    MACDSignalLength       = 5;
-input bool   EnableSupertrend       = true;
-input double WeightSupertrend = 3.0;
-input double SupertrendFactor       = 2.5;
-input int    SupertrendLength = 10;
-input bool   EnableStochastic       = false;
-input double WeightStochastic = 1.0;
-input int    StochasticKLength      = 14;
-input int    StochasticDLength= 3;
-input int    StochasticSmooth       = 3;
-input bool   EnableBollinger        = false;
-input double WeightBollinger  = 1.0;
-input int    BollingerLength        = 20;
-input bool   EnableEMA              = true;
-input double WeightEMA        = 2.0;
-input int    EMAFastLength          = 9;
-input int    EMASlowLength    = 21;
-input bool   EnableAO               = false;
-input double WeightAO         = 1.0;
-input bool   EnableSAR              = false;
-input double WeightSAR        = 1.0;
-input double SARStep                = 0.02;
+input double RSIShortBelow    = 48.0;
+input bool EnableMACD         = false;    // MACD
+input int  MACDFastLength     = 8;
+input int  MACDSlowLength     = 21;
+input int  MACDSignalLength   = 5;
+input bool EnableSupertrend   = true;     // Supertrend (default strategy)
+input double SupertrendFactor = 2.5;
+input int  SupertrendLength   = 10;
+input bool EnableStochastic   = false;    // Stochastic
+input int  StochasticKLength  = 14;
+input int  StochasticDLength  = 3;
+input int  StochasticSmooth   = 3;
+input bool EnableBollinger    = false;    // Bollinger midline
+input int  BollingerLength    = 20;
+input bool EnableEMA          = false;    // EMA cross
+input int  EMAFastLength      = 9;
+input int  EMASlowLength      = 21;
+input bool EnableAO           = false;    // Awesome Oscillator
+input bool EnableSAR          = false;    // Parabolic SAR
+input double SARStep          = 0.02;
 input double SARMaximum       = 0.2;
-input bool   EnableCCI              = false;
-input double WeightCCI        = 1.0;
-input int    CCILength              = 20;
+input bool EnableCCI          = false;    // CCI
+input int  CCILength          = 20;
 input double CCILongAbove     = 50.0;
-input double CCIShortBelow          = -50.0;
-input bool   EnableADX              = true;
-input double WeightADX        = 2.0;
-input int    ADXPeriod              = 14;
+input double CCIShortBelow    = -50.0;
+input bool EnableADX          = false;    // ADX / DI
+input int  ADXPeriod          = 14;
 input double ADXThreshold     = 22.0;
-input bool   EnableHTFBias          = true;
-input double WeightHTFBias    = 2.5;
-input bool   EnableStructure        = true;
-input double WeightStructure  = 2.0;
-input int    StructureLookback      = 20;     // Donchian break lookback
-input bool   EnableVWAP             = true;
-input double WeightVWAP       = 1.5;
-
-input string __09 = "======== STOP LOSS / TAKE PROFIT ========"; // .
-input ENUM_SF_SL StopLossMode       = SF_SL_ATR;   // Stop loss engine
-input double StopLossATR            = 1.6;      // ATR multiple for SL
-input double StructureBufferATR     = 0.35;     // Extra ATR buffer beyond the swing
-input int    StructureSwingBars     = 12;       // Swing lookback for structure SL
-input double StopLossPoints         = 1500.0;   // Fixed SL (points)
-input ENUM_SF_TP TakeProfitMode     = SF_TP_ATR;   // Take profit engine
-input double TakeProfitATR          = 2.6;      // ATR multiple for TP
-input double TakeProfitPoints       = 4000.0;   // Fixed TP (points)
-input double TakeProfitCostMultiple = 12.0;     // TP = x * round-turn cost (SF_TP_COST)
-
-input string __10 = "======== TRADE MANAGEMENT ========"; // .
-input bool   UseBreakEven           = true;     // Move stop to true break-even
-input double BreakEvenTriggerATR    = 1.0;      // Trigger at x ATR in profit
-input double BreakEvenLockPoints    = 30.0;     // Extra points locked beyond cost
-input bool   UsePartialClose        = true;     // Bank part of the trade at TP1
-input double PartialTriggerATR      = 1.4;      // TP1 distance in ATR
-input double PartialClosePercent    = 50.0;     // % of volume closed at TP1
-input ENUM_SF_TRAIL TrailingMode    = SF_TRAIL_CHANDELIER; // Trailing engine
-input double TrailingStartPoints    = 700.0;    // Start trailing after x points
-input double TrailingDistancePoints = 450.0;    // Distance (SF_TRAIL_POINTS)
-input double TrailingStepPoints     = 80.0;     // Min improvement per update
-input double TrailingATRMultiple    = 2.0;      // ATR distance / chandelier k
-input int    ChandelierLookback     = 14;       // Bars for chandelier extreme
-input bool   UseTimeStop            = true;     // Close stagnant trades
-input int    TimeStopBars           = 36;       // Bars before the time stop
-input double TimeStopMinProgressR   = 0.30;     // Needs this R to survive
+input string __10 = "======== BROKER COST (DISPLAY ONLY) ========"; // .
+// Commission never gates a trade in the original strategy - it is used only
+// so the result cards and the tracker can report the true cost of a fill.
+input double CommissionPer001LotRT  = 0.07;     // Commission per 0.01 lot, round turn
 
 input string __11 = "======== QUANTUM HUD (INTERFACE) ========"; // .
 input bool   ShowHUD                = true;     // Master HUD switch
 input ENUM_SF_THEME HudTheme        = SF_THEME_QUANTUM; // Colour theme
 input bool   ApplyChartSkin         = true;     // Re-skin the chart
 input bool   ShowHeaderPanel        = true;     // Top command bar
-input bool   ShowSignalPanel        = true;     // Confluence core
+input bool   ShowSignalPanel        = true;     // Signal / agreement panel
 input bool   ShowRiskPanel          = true;     // Risk console
 input bool   ShowPerformancePanel   = true;     // Performance + equity curve
 input bool   ShowTradePanel         = true;     // Live trade ticket
@@ -278,7 +163,7 @@ input bool   VerboseJournal         = true;     // Detailed journal logging
 //==================================================================//
 //                    G L O B A L   S T A T E                       //
 //==================================================================//
-#define SF_FILTERS 14
+#define SF_FILTERS 11
 
 // Win32 GDI text-alignment and font-weight values, spelled out so the EA
 // compiles on every MT4 build regardless of which TA_/FW_ enums it exposes.
@@ -294,12 +179,13 @@ string   PFX = "SFP_";
 string   gFilterName[SF_FILTERS];
 
 //--- signal state
+// gScore is the FILTER AGREEMENT meter (-100..+100), not a weighted conviction
+// score: the original strategy treats every enabled filter as an equal vote.
 int      gBull[SF_FILTERS], gBear[SF_FILTERS];
-double   gWeight[SF_FILTERS];
 bool     gEnabled[SF_FILTERS];
-double   gScore = 0.0, gPrevScore = 0.0;  // gPrevScore = last bar conviction
+double   gScore = 0.0, gPrevScore = 0.0;
+int      gAgreeBull = 0, gAgreeBear = 0, gAgreeOn = 0;
 bool     gLongSignal = false, gShortSignal = false;
-int      gHTFBias = 0;
 
 //--- symbol / cost cache
 double   gPoint = 0.001;
@@ -312,32 +198,21 @@ double   gSpreadSamples[64];
 int      gSpreadIdx = 0, gSpreadCount = 0;
 double   gMedianSpread = 0.0;
 
-//--- runtime / guardians
+//--- runtime state
+// The v2 risk layer (sessions, daily loss cap, equity kill-switch, cooldown,
+// partial/BE bookkeeping, news blackouts) has been removed: the original
+// strategy trades every valid signal. What remains is bookkeeping the
+// dashboard reports on.
 datetime gLastBar = 0;
 datetime gLastTradeBar = 0;
-datetime gCooldownUntil = 0;
 datetime gDayStamp = 0;
 double   gDayStartEquity = 0.0;
-double   gDayPeakEquity = 0.0;
 int      gDayTrades = 0;
 double   gDayNet = 0.0;
 int      gConsecLosses = 0;
-bool     gHalted = false;
-string   gHaltReason = "";
 string   gLastAction = "EA INITIALISED";
 string   gBlockReason = "";
 int      gLastHistoryCount = -1;
-
-//--- partial / management bookkeeping.
-//    Keyed on OrderOpenTime(), NOT the ticket: MT4 issues a brand new ticket
-//    for the remainder after a partial close, while the open time survives.
-datetime gPartialDone[64];
-int      gPartialCount = 0;
-datetime gBEDone[64];
-int      gBECount = 0;
-
-//--- blackout windows
-int      gBlackStart[16], gBlackEnd[16], gBlackCount = 0;
 
 //--- supertrend incremental cache
 bool     gSTReady = false;
@@ -514,6 +389,33 @@ void PushSpreadSample()
    gMedianSpread = tmp[gSpreadCount / 2];
   }
 
+// Commission actually charged for a trade. Brokers (and the Strategy Tester
+// when no commission is configured in the symbol settings) frequently report
+// OrderCommission() == 0. Falling back to the configured Raw Spread rate keeps
+// the cost story honest instead of printing a flattering "FEE -0.00".
+// `estimated` tells the caller the number was derived, not reported, so the
+// card can mark it with a ~ rather than pass an estimate off as fact.
+double TradeCommissionUSD(double lots, double reported, bool &estimated)
+  {
+   estimated = false;
+   double c = MathAbs(reported);
+   if(c > 0.0) return c;
+   if(lots <= 0.0) return 0.0;
+   estimated = true;
+   return CommissionPer001LotRT * (lots / 0.01);
+  }
+
+// Net result of the CURRENTLY SELECTED order, using the same commission
+// estimate as the cards so the tracker, the equity curve and the cards can
+// never disagree with each other.
+double SelectedNetUSD()
+  {
+   bool   est = false;
+   double cm  = TradeCommissionUSD(OrderLots(), OrderCommission(), est);
+   double gr  = OrderProfit() + OrderSwap();
+   return est ? (gr - cm) : (gr + OrderCommission());
+  }
+
 // Full cost of a round turn, expressed in points: spread + commission.
 double TotalCostPoints()
   {
@@ -535,22 +437,24 @@ void Journal(string msg)
 string Fmt(double v, int d) { return DoubleToString(v, d); }
 string Signed(double v, int d) { return (v >= 0 ? "+" : "") + DoubleToString(v, d); }
 
-double NormalizeLots(double lots)
-  {
-   lots = MathMax(gMinLot, MathMin(MathMin(gMaxLot, MaxLots), lots));
-   lots = MathFloor(lots / gLotStep + 1e-8) * gLotStep;
-   return NormalizeDouble(lots, 2);
-  }
-
 double MinStopDistance()
   {
    return (gStopLevel + 2) * gPoint;
   }
 
+// v1 sized risk off the balance, with an optional fixed reference balance so
+// a small live account can be tuned as if it were larger (or smaller).
 double RiskCapital()
   {
    if(RiskReferenceBalance > 0) return RiskReferenceBalance;
-   return UseEquityForRisk ? AccountEquity() : AccountBalance();
+   return AccountBalance();
+  }
+
+// Money value of one point per 1.00 lot - used by the cost readouts.
+double PointValuePerLot()
+  {
+   double pv = PointValue(1.0);
+   return (pv > 0) ? pv : 100.0 * gPoint;
   }
 
 datetime DayStart(datetime t)
@@ -568,851 +472,377 @@ datetime MonthStart(datetime t)
   }
 
 //==================================================================//
-//                 S E S S I O N   /   T I M E                      //
+//              O R I G I N A L   v1   S T R A T E G Y              //
 //==================================================================//
-void ParseBlackout()
+// This block is the trading engine of "Signal Forge XAUUSD M5 EA"
+// restored verbatim in behaviour: the same 11 filters, the same
+// AND/OR combination, the same ATR/points stop and target, the same
+// point-based trailing stop and the same one-position flip logic.
+// The v2 risk layer (sessions, daily loss caps, equity kill-switch,
+// cooldowns, cost-aware targets, adaptive spread) has been removed
+// at the user's request.
+//==================================================================//
+
+//---- Supertrend: recursive band, advanced one closed bar at a time
+void AdvanceSupertrend(int shift)
   {
-   gBlackCount = 0;
-   string s = ManualBlackout;
-   StringTrimLeft(s); StringTrimRight(s);
-   if(StringLen(s) < 5) return;
-   string parts[];
-   int n = StringSplit(s, ',', parts);
-   for(int i = 0; i < n && gBlackCount < 16; i++)
+   double atr = iATR(NULL, 0, MathMax(1, SupertrendLength), shift);
+   double upper = (High[shift] + Low[shift]) * 0.5 + SupertrendFactor * atr;
+   double lower = (High[shift] + Low[shift]) * 0.5 - SupertrendFactor * atr;
+   double finalUpper = upper, finalLower = lower, st = upper;
+   int direction = 1;
+   if(!gSTReady || atr <= 0)
      {
-      string p = parts[i];
-      StringTrimLeft(p); StringTrimRight(p);
-      int dash = StringFind(p, "-");
-      if(dash < 0) continue;
-      string a = StringSubstr(p, 0, dash);
-      string b = StringSubstr(p, dash + 1);
-      int ca = StringFind(a, ":"), cb = StringFind(b, ":");
-      if(ca < 0 || cb < 0) continue;
-      int m1 = (int)StringToInteger(StringSubstr(a, 0, ca)) * 60 + (int)StringToInteger(StringSubstr(a, ca + 1));
-      int m2 = (int)StringToInteger(StringSubstr(b, 0, cb)) * 60 + (int)StringToInteger(StringSubstr(b, cb + 1));
-      gBlackStart[gBlackCount] = m1;
-      gBlackEnd[gBlackCount]   = m2;
-      gBlackCount++;
+      if(atr > 0) gSTReady = true;
      }
-  }
-
-bool InHourWindow(int hour, int start, int end)
-  {
-   if(start == end) return false;
-   if(start < end)  return (hour >= start && hour < end);
-   return (hour >= start || hour < end);   // window wraps midnight
-  }
-
-// Session windows are expressed in GMT. Exness MT4 servers run at GMT+0, so
-// the default offset is zero; other brokers just set their own offset once.
-int GmtHourNow()
-  {
-   MqlDateTime d; TimeToStruct(TimeCurrent(), d);
-   int h = d.hour - ServerGMTOffsetHours;
-   while(h < 0)   h += 24;
-   while(h >= 24) h -= 24;
-   return h;
-  }
-
-string ActiveSessionName()
-  {
-   int h = GmtHourNow();
-   if(TradeOverlap && InHourWindow(h, OverlapStartHour, OverlapEndHour)) return "OVERLAP";
-   if(TradeLondon  && InHourWindow(h, LondonStartHour,  LondonEndHour))  return "LONDON";
-   if(TradeNewYork && InHourWindow(h, NewYorkStartHour, NewYorkEndHour)) return "NEW YORK";
-   if(TradeAsia    && InHourWindow(h, AsiaStartHour,    AsiaEndHour))    return "ASIA";
-   return "CLOSED";
-  }
-
-bool SessionAllows(string &why)
-  {
-   MqlDateTime d; TimeToStruct(TimeCurrent(), d);
-   int h = GmtHourNow(), minutes = h * 60 + d.min;
-
-   for(int i = 0; i < gBlackCount; i++)
-      if(minutes >= gBlackStart[i] && minutes < gBlackEnd[i])
-        { why = "MANUAL BLACKOUT"; return false; }
-
-   if(AvoidRollover && InHourWindow(h, RolloverStartHour, RolloverEndHour))
-     { why = "ROLLOVER WINDOW"; return false; }
-
-   if(CloseBeforeWeekend && d.day_of_week == 5 && h >= FridayCloseHour)
-     { why = "WEEKEND GUARD"; return false; }
-
-   if(d.day_of_week == 0 || d.day_of_week == 6)
-     { why = "MARKET CLOSED"; return false; }
-
-   if(!UseSessionFilter) return true;
-
-   bool ok = false;
-   if(TradeLondon  && InHourWindow(h, LondonStartHour,  LondonEndHour))  ok = true;
-   if(TradeOverlap && InHourWindow(h, OverlapStartHour, OverlapEndHour)) ok = true;
-   if(TradeNewYork && InHourWindow(h, NewYorkStartHour, NewYorkEndHour)) ok = true;
-   if(TradeAsia    && InHourWindow(h, AsiaStartHour,    AsiaEndHour))    ok = true;
-   if(!ok) { why = "OUT OF SESSION"; return false; }
-   return true;
-  }
-
-//==================================================================//
-//              V O L A T I L I T Y   R E G I M E                   //
-//==================================================================//
-double ATRPoints(int shift)
-  {
-   return iATR(NULL, 0, MathMax(1, ATRLength), shift) / gPoint;
-  }
-
-double ATRRatio(int shift)
-  {
-   double fast = iATR(NULL, 0, MathMax(1, ATRLength), shift);
-   double slow = iATR(NULL, 0, MathMax(2, ATRRegimeLength), shift);
-   if(slow <= 0) return 1.0;
-   return fast / slow;
-  }
-
-bool VolatilityAllows(int shift, string &why)
-  {
-   if(!UseVolatilityFilter) return true;
-   double pts = ATRPoints(shift);
-   if(pts < MinATRPoints) { why = "ATR TOO LOW"; return false; }
-   double r = ATRRatio(shift);
-   if(r < MinATRRatio)    { why = "DEAD REGIME";  return false; }
-   if(r > MaxATRRatio)    { why = "NEWS SPIKE";   return false; }
-   return true;
-  }
-
-//==================================================================//
-//                    S U P E R T R E N D                           //
-//==================================================================//
-void AdvanceST(int shift)
-  {
-   double atr   = iATR(NULL, 0, MathMax(1, SupertrendLength), shift);
-   double mid   = (High[shift] + Low[shift]) * 0.5;
-   double up    = mid + SupertrendFactor * atr;
-   double dn    = mid - SupertrendFactor * atr;
-   double fu = up, fl = dn, line = up;
-   int dir = 1;
-   if(!gSTReady || atr <= 0) { if(atr > 0) gSTReady = true; }
    else
      {
-      fu = (up < gSTUpper || gSTClose > gSTUpper) ? up : gSTUpper;
-      fl = (dn > gSTLower || gSTClose < gSTLower) ? dn : gSTLower;
-      if(gSTLine == gSTUpper) line = (Close[shift] > fu) ? fl : fu;
-      else                    line = (Close[shift] < fl) ? fu : fl;
-      dir = (line == fl) ? -1 : 1;
+      finalUpper = (upper < gSTUpper || gSTClose > gSTUpper) ? upper : gSTUpper;
+      finalLower = (lower > gSTLower || gSTClose < gSTLower) ? lower : gSTLower;
+      if(gSTLine == gSTUpper) st = (Close[shift] > finalUpper) ? finalLower : finalUpper;
+      else                    st = (Close[shift] < finalLower) ? finalUpper : finalLower;
+      direction = (st == finalLower) ? -1 : 1;
      }
-   gSTPrevTime = gSTTime; gSTPrevDir = gSTDir;
-   gSTUpper = fu; gSTLower = fl; gSTLine = line; gSTClose = Close[shift];
-   gSTDir = gSTReady ? dir : 0;
+   gSTPrevTime = gSTTime;
+   gSTPrevDir  = gSTDir;
+   gSTUpper = finalUpper; gSTLower = finalLower; gSTLine = st; gSTClose = Close[shift];
+   gSTDir  = gSTReady ? direction : 0;
    gSTTime = Time[shift];
   }
 
-int SupertrendDir(int shift)
+int SupertrendDirection(int shift)
   {
    if(Time[shift] == gSTTime)     return gSTDir;
    if(Time[shift] == gSTPrevTime) return gSTPrevDir;
+   // Normal sequential tester/live path: advance only the newly closed bar.
    if(gSTTime != 0 && shift + 1 < Bars && Time[shift + 1] == gSTTime)
-     { AdvanceST(shift); return gSTDir; }
+     {
+      AdvanceSupertrend(shift);
+      return gSTDir;
+     }
+   // First call or a history/timeframe jump: seed once from older history.
    gSTReady = false; gSTUpper = 0; gSTLower = 0; gSTLine = 0; gSTClose = 0;
    gSTDir = 0; gSTPrevDir = 0; gSTTime = 0; gSTPrevTime = 0;
    int oldest = MathMin(Bars - 2, shift + 600);
-   for(int i = oldest; i >= shift; i--) AdvanceST(i);
+   for(int i = oldest; i >= shift; i--) AdvanceSupertrend(i);
    return gSTDir;
   }
 
-//==================================================================//
-//                 S U P P O R T   S T U D I E S                    //
-//==================================================================//
-// Session-anchored VWAP: resets each trading day, the reference
-// institutional traders actually defend on gold intraday.
-double SessionVWAP(int shift)
+//---- the 11 original filters -------------------------------------
+void GetConditions(int shift, int &bull[], int &bear[])
   {
-   datetime day = DayStart(Time[shift]);
-   double pv = 0, vol = 0;
-   for(int i = shift; i < Bars && i < shift + 400; i++)
-     {
-      if(Time[i] < day) break;
-      double typical = (High[i] + Low[i] + Close[i]) / 3.0;
-      double v = (double)MathMax(1, Volume[i]);
-      pv  += typical * v;
-      vol += v;
-     }
-   if(vol <= 0) return Close[shift];
-   return pv / vol;
+   double a = iMA(NULL, 0, MathMax(1, SMAFastLength), 0, MODE_SMA, PRICE_CLOSE, shift);
+   double b = iMA(NULL, 0, MathMax(1, SMASlowLength), 0, MODE_SMA, PRICE_CLOSE, shift);
+   bull[0] = (a > b); bear[0] = (a < b);
+
+   double r = iRSI(NULL, 0, MathMax(1, RSILength), PRICE_CLOSE, shift);
+   bull[1] = (r > RSILongAbove); bear[1] = (r < RSIShortBelow);
+
+   double m = iMACD(NULL, 0, MACDFastLength, MACDSlowLength, MACDSignalLength, PRICE_CLOSE, MODE_MAIN, shift);
+   double s = iMACD(NULL, 0, MACDFastLength, MACDSlowLength, MACDSignalLength, PRICE_CLOSE, MODE_SIGNAL, shift);
+   bull[2] = (m > s); bear[2] = (m < s);
+
+   int sd = SupertrendDirection(shift);
+   bull[3] = (sd == -1); bear[3] = (sd == 1);
+
+   double k = iStochastic(NULL, 0, StochasticKLength, StochasticDLength, StochasticSmooth, MODE_SMA, 0, MODE_MAIN, shift);
+   bull[4] = (k > 50); bear[4] = (k < 50);
+
+   double mid = iMA(NULL, 0, BollingerLength, 0, MODE_SMA, PRICE_CLOSE, shift);
+   bull[5] = (Close[shift] > mid); bear[5] = (Close[shift] < mid);
+
+   double ef = iMA(NULL, 0, EMAFastLength, 0, MODE_EMA, PRICE_CLOSE, shift);
+   double es = iMA(NULL, 0, EMASlowLength, 0, MODE_EMA, PRICE_CLOSE, shift);
+   bull[6] = (ef > es); bear[6] = (ef < es);
+
+   double ao = iAO(NULL, 0, shift);
+   bull[7] = (ao > 0); bear[7] = (ao < 0);
+
+   double sar = iSAR(NULL, 0, SARStep, SARMaximum, shift);
+   bull[8] = (Close[shift] > sar); bear[8] = (Close[shift] < sar);
+
+   double cci = iCCI(NULL, 0, CCILength, PRICE_CLOSE, shift);
+   bull[9] = (cci > CCILongAbove); bear[9] = (cci < CCIShortBelow);
+
+   double adx = iADX(NULL, 0, ADXPeriod, PRICE_CLOSE, MODE_MAIN,    shift);
+   double dp  = iADX(NULL, 0, ADXPeriod, PRICE_CLOSE, MODE_PLUSDI,  shift);
+   double dm  = iADX(NULL, 0, ADXPeriod, PRICE_CLOSE, MODE_MINUSDI, shift);
+   bull[10] = (adx > ADXThreshold && dp > dm);
+   bear[10] = (adx > ADXThreshold && dm > dp);
   }
 
-int HTFBias(int shift)
+//---- AND / OR combination ----------------------------------------
+void CombinedSignal(int &bull[], int &bear[], bool &lng, bool &sht)
   {
-   int tf = MathMax(Period(), HTFTimeframeMinutes);
-   int hs = iBarShift(Symbol(), tf, Time[shift], false);
-   if(hs < 0) hs = 0;
-   double f = iMA(NULL, tf, MathMax(1, HTFFastEMA), 0, MODE_EMA, PRICE_CLOSE, hs);
-   double s = iMA(NULL, tf, MathMax(2, HTFSlowEMA), 0, MODE_EMA, PRICE_CLOSE, hs);
-   if(f > s) return  1;
-   if(f < s) return -1;
-   return 0;
-  }
-
-double DonchianHigh(int shift, int look)
-  {
-   int idx = iHighest(NULL, 0, MODE_HIGH, look, shift + 1);
-   if(idx < 0) return High[shift];
-   return High[idx];
-  }
-
-double DonchianLow(int shift, int look)
-  {
-   int idx = iLowest(NULL, 0, MODE_LOW, look, shift + 1);
-   if(idx < 0) return Low[shift];
-   return Low[idx];
-  }
-
-//==================================================================//
-//              C O N F L U E N C E   E N G I N E                   //
-//==================================================================//
-void LoadFilterConfig()
-  {
-   gFilterName[0]="SMA CROSS";   gEnabled[0]=EnableSMA;        gWeight[0]=WeightSMA;
-   gFilterName[1]="RSI";         gEnabled[1]=EnableRSI;        gWeight[1]=WeightRSI;
-   gFilterName[2]="MACD";        gEnabled[2]=EnableMACD;       gWeight[2]=WeightMACD;
-   gFilterName[3]="SUPERTREND";  gEnabled[3]=EnableSupertrend; gWeight[3]=WeightSupertrend;
-   gFilterName[4]="STOCHASTIC";  gEnabled[4]=EnableStochastic; gWeight[4]=WeightStochastic;
-   gFilterName[5]="BOLLINGER";   gEnabled[5]=EnableBollinger;  gWeight[5]=WeightBollinger;
-   gFilterName[6]="EMA CROSS";   gEnabled[6]=EnableEMA;        gWeight[6]=WeightEMA;
-   gFilterName[7]="AWESOME OSC"; gEnabled[7]=EnableAO;         gWeight[7]=WeightAO;
-   gFilterName[8]="PARABOLIC SAR";gEnabled[8]=EnableSAR;       gWeight[8]=WeightSAR;
-   gFilterName[9]="CCI";         gEnabled[9]=EnableCCI;        gWeight[9]=WeightCCI;
-   gFilterName[10]="ADX / DI";   gEnabled[10]=EnableADX;       gWeight[10]=WeightADX;
-   gFilterName[11]="HTF BIAS";   gEnabled[11]=EnableHTFBias;   gWeight[11]=WeightHTFBias;
-   gFilterName[12]="STRUCTURE";  gEnabled[12]=EnableStructure; gWeight[12]=WeightStructure;
-   gFilterName[13]="VWAP";       gEnabled[13]=EnableVWAP;      gWeight[13]=WeightVWAP;
-   for(int i = 0; i < SF_FILTERS; i++)
-      if(gWeight[i] < 0) gWeight[i] = 0;
-  }
-
-void EvaluateFilters(int shift, int &bull[], int &bear[])
-  {
-   for(int i = 0; i < SF_FILTERS; i++) { bull[i] = 0; bear[i] = 0; }
-
-   // 0 SMA
-   double a = iMA(NULL,0,MathMax(1,SMAFastLength),0,MODE_SMA,PRICE_CLOSE,shift);
-   double b = iMA(NULL,0,MathMax(2,SMASlowLength),0,MODE_SMA,PRICE_CLOSE,shift);
-   bull[0] = (a > b) ? 1 : 0; bear[0] = (a < b) ? 1 : 0;
-
-   // 1 RSI
-   double r = iRSI(NULL,0,MathMax(1,RSILength),PRICE_CLOSE,shift);
-   bull[1] = (r > RSILongAbove) ? 1 : 0; bear[1] = (r < RSIShortBelow) ? 1 : 0;
-
-   // 2 MACD
-   double m  = iMACD(NULL,0,MACDFastLength,MACDSlowLength,MACDSignalLength,PRICE_CLOSE,MODE_MAIN,shift);
-   double ms = iMACD(NULL,0,MACDFastLength,MACDSlowLength,MACDSignalLength,PRICE_CLOSE,MODE_SIGNAL,shift);
-   bull[2] = (m > ms && m > 0) ? 1 : 0; bear[2] = (m < ms && m < 0) ? 1 : 0;
-
-   // 3 Supertrend
-   int sd = SupertrendDir(shift);
-   bull[3] = (sd == -1) ? 1 : 0; bear[3] = (sd == 1) ? 1 : 0;
-
-   // 4 Stochastic
-   double k = iStochastic(NULL,0,StochasticKLength,StochasticDLength,StochasticSmooth,MODE_SMA,0,MODE_MAIN,shift);
-   double dd= iStochastic(NULL,0,StochasticKLength,StochasticDLength,StochasticSmooth,MODE_SMA,0,MODE_SIGNAL,shift);
-   bull[4] = (k > dd && k > 45) ? 1 : 0; bear[4] = (k < dd && k < 55) ? 1 : 0;
-
-   // 5 Bollinger (mid-band bias)
-   double mid = iBands(NULL,0,MathMax(2,BollingerLength),2.0,0,PRICE_CLOSE,MODE_MAIN,shift);
-   bull[5] = (Close[shift] > mid) ? 1 : 0; bear[5] = (Close[shift] < mid) ? 1 : 0;
-
-   // 6 EMA
-   double ef = iMA(NULL,0,MathMax(1,EMAFastLength),0,MODE_EMA,PRICE_CLOSE,shift);
-   double es = iMA(NULL,0,MathMax(2,EMASlowLength),0,MODE_EMA,PRICE_CLOSE,shift);
-   bull[6] = (ef > es) ? 1 : 0; bear[6] = (ef < es) ? 1 : 0;
-
-   // 7 Awesome Oscillator
-   double ao = iAO(NULL,0,shift), ao1 = iAO(NULL,0,shift+1);
-   bull[7] = (ao > 0 && ao >= ao1) ? 1 : 0; bear[7] = (ao < 0 && ao <= ao1) ? 1 : 0;
-
-   // 8 Parabolic SAR
-   double sar = iSAR(NULL,0,SARStep,SARMaximum,shift);
-   bull[8] = (Close[shift] > sar) ? 1 : 0; bear[8] = (Close[shift] < sar) ? 1 : 0;
-
-   // 9 CCI
-   double cci = iCCI(NULL,0,MathMax(2,CCILength),PRICE_CLOSE,shift);
-   bull[9] = (cci > CCILongAbove) ? 1 : 0; bear[9] = (cci < CCIShortBelow) ? 1 : 0;
-
-   // 10 ADX / DI - trend strength gate
-   double adx = iADX(NULL,0,MathMax(2,ADXPeriod),PRICE_CLOSE,MODE_MAIN,shift);
-   double dp  = iADX(NULL,0,MathMax(2,ADXPeriod),PRICE_CLOSE,MODE_PLUSDI,shift);
-   double dm  = iADX(NULL,0,MathMax(2,ADXPeriod),PRICE_CLOSE,MODE_MINUSDI,shift);
-   bull[10] = (adx > ADXThreshold && dp > dm) ? 1 : 0;
-   bear[10] = (adx > ADXThreshold && dm > dp) ? 1 : 0;
-
-   // 11 Higher timeframe bias
-   int hb = HTFBias(shift);
-   gHTFBias = hb;
-   bull[11] = (hb ==  1) ? 1 : 0; bear[11] = (hb == -1) ? 1 : 0;
-
-   // 12 Market structure (Donchian break / position)
-   double dh = DonchianHigh(shift, MathMax(3, StructureLookback));
-   double dl = DonchianLow(shift,  MathMax(3, StructureLookback));
-   double mid2 = (dh + dl) * 0.5;
-   bull[12] = (Close[shift] > mid2 && Close[shift] >= dh - (dh - dl) * 0.25) ? 1 : 0;
-   bear[12] = (Close[shift] < mid2 && Close[shift] <= dl + (dh - dl) * 0.25) ? 1 : 0;
-
-   // 13 Session VWAP
-   double vw = SessionVWAP(shift);
-   bull[13] = (Close[shift] > vw) ? 1 : 0; bear[13] = (Close[shift] < vw) ? 1 : 0;
-  }
-
-// Returns a normalised -100..+100 conviction score.
-double ConfluenceScore(int &bull[], int &bear[])
-  {
-   double total = 0, net = 0;
+   lng = RequireAllEnabledIndicatorsToAlign;
+   sht = RequireAllEnabledIndicatorsToAlign;
+   bool any = false;
    for(int i = 0; i < SF_FILTERS; i++)
      {
-      if(!gEnabled[i] || gWeight[i] <= 0) continue;
-      total += gWeight[i];
-      if(bull[i]) net += gWeight[i];
-      if(bear[i]) net -= gWeight[i];
+      if(!gEnabled[i]) continue;
+      if(RequireAllEnabledIndicatorsToAlign)
+        { lng = (lng && bull[i] != 0); sht = (sht && bear[i] != 0); }
+      else
+        { lng = (lng || bull[i] != 0); sht = (sht || bear[i] != 0); }
+      any = true;
      }
-   if(total <= 0) return 0.0;
-   return (net / total) * 100.0;
+   if(!any) { lng = false; sht = false; }
   }
 
-void ResolveSignal(int &bull[], int &bear[], double score, bool &lng, bool &sht)
+// Agreement of the ENABLED filters, as a signed -100..+100 figure.
+// v1 has no weighted score, so the HUD gauge shows how many enabled
+// filters currently agree rather than inventing a conviction number.
+double AgreementScore(int &bull[], int &bear[], int &nBull, int &nBear, int &nOn)
   {
-   lng = false; sht = false;
-   if(ConfluenceMode == SF_CONF_SCORE)
+   nBull = 0; nBear = 0; nOn = 0;
+   for(int i = 0; i < SF_FILTERS; i++)
      {
-      lng = (score >=  EntryScoreThreshold);
-      sht = (score <= -EntryScoreThreshold);
+      if(!gEnabled[i]) continue;
+      nOn++;
+      if(bull[i]) nBull++;
+      if(bear[i]) nBear++;
      }
-   else if(ConfluenceMode == SF_CONF_ALL)
-     {
-      bool any = false; lng = true; sht = true;
-      for(int i = 0; i < SF_FILTERS; i++)
-        {
-         if(!gEnabled[i]) continue;
-         any = true;
-         lng = (lng && bull[i] == 1);
-         sht = (sht && bear[i] == 1);
-        }
-      if(!any) { lng = false; sht = false; }
-     }
-   else
-     {
-      for(int i = 0; i < SF_FILTERS; i++)
-        {
-         if(!gEnabled[i]) continue;
-         if(bull[i]) lng = true;
-         if(bear[i]) sht = true;
-        }
-     }
-   if(lng && sht) { lng = false; sht = false; }
-
-   if(RequireHTFAlignment && EnableHTFBias)
-     {
-      if(lng && gHTFBias < 0) lng = false;
-      if(sht && gHTFBias > 0) sht = false;
-     }
+   if(nOn <= 0) return 0.0;
+   return (double)(nBull - nBear) / (double)nOn * 100.0;
   }
 
 //==================================================================//
-//              R I S K   G U A R D I A N S                         //
+//              P O S I T I O N   /   O R D E R S                   //
 //==================================================================//
-void RollDailyCounters()
+double NormalizeLots(double lots)
   {
-   datetime today = DayStart(TimeCurrent());
-   if(today == gDayStamp) return;
-   gDayStamp        = today;
-   gDayStartEquity  = AccountEquity();
-   gDayPeakEquity   = AccountEquity();
-   gDayTrades       = 0;
-   gDayNet          = 0.0;
-   if(gHalted && (gHaltReason == "DAILY LOSS LIMIT" ||
-                  gHaltReason == "DAILY TARGET HIT" ||
-                  gHaltReason == "MAX TRADES/DAY"   ||
-                  gHaltReason == "EQUITY DRAWDOWN"))
-     { gHalted = false; gHaltReason = ""; Journal("NEW DAY - GUARDIANS RESET"); }
+   double minLot = MarketInfo(Symbol(), MODE_MINLOT);
+   double maxLot = MarketInfo(Symbol(), MODE_MAXLOT);
+   double step   = MarketInfo(Symbol(), MODE_LOTSTEP);
+   if(step <= 0) step = 0.01;
+   lots = MathMax(minLot, MathMin(maxLot, lots));
+   return NormalizeDouble(MathFloor(lots / step + 0.0000001) * step, 2);
   }
 
-double DayPnLPercent()
+double RiskStopDistance(double lots)
   {
-   if(gDayStartEquity <= 0) return 0;
-   return (AccountEquity() - gDayStartEquity) / gDayStartEquity * 100.0;
+   double balance   = (RiskReferenceBalance > 0) ? RiskReferenceBalance : AccountBalance();
+   double money     = balance * MathMax(0.0, RiskPercent) / 100.0;
+   double tickSize  = MarketInfo(Symbol(), MODE_TICKSIZE);
+   double tickValue = MarketInfo(Symbol(), MODE_TICKVALUE);
+   if(tickSize <= 0) tickSize = Point;
+   if(money <= 0 || tickValue <= 0 || lots <= 0) return 0;
+   return MathMax(Point, money * tickSize / (lots * tickValue));
   }
 
-double DayDrawdownPercent()
-  {
-   if(gDayPeakEquity <= 0) return 0;
-   return (gDayPeakEquity - AccountEquity()) / gDayPeakEquity * 100.0;
-  }
-
-void UpdateGuardians()
-  {
-   RollDailyCounters();
-   gDayPeakEquity = MathMax(gDayPeakEquity, AccountEquity());
-
-   if(AccountBalance() < MinAccountBalanceUSD)
-     { gHalted = true; gHaltReason = "BALANCE FLOOR"; return; }
-
-   if(MaxDailyDrawdownPct > 0 && DayDrawdownPercent() >= MaxDailyDrawdownPct)
-     { if(!gHalted) Journal("KILL SWITCH: DAILY EQUITY DD");
-       gHalted = true; gHaltReason = "EQUITY DRAWDOWN"; return; }
-
-   if(DailyLossLimitPercent > 0 && DayPnLPercent() <= -DailyLossLimitPercent)
-     { if(!gHalted) Journal("GUARDIAN: DAILY LOSS LIMIT");
-       gHalted = true; gHaltReason = "DAILY LOSS LIMIT"; return; }
-
-   if(DailyProfitTargetPct > 0 && DayPnLPercent() >= DailyProfitTargetPct)
-     { if(!gHalted) Journal("GUARDIAN: DAILY TARGET REACHED");
-       gHalted = true; gHaltReason = "DAILY TARGET HIT"; return; }
-
-   if(MaxTradesPerDay > 0 && gDayTrades >= MaxTradesPerDay)
-     { gHalted = true; gHaltReason = "MAX TRADES/DAY"; return; }
-  }
-
-bool InCooldown()
-  {
-   return (gCooldownUntil > 0 && TimeCurrent() < gCooldownUntil);
-  }
-
-//==================================================================//
-//              P O S I T I O N   S I Z I N G                       //
-//==================================================================//
-// Risk-based sizing that *includes* the Exness commission in the loss
-// budget. A 0.01-lot gold trade already costs 0.07 USD before it moves,
-// which is 0.035% of a 200 USD account - small, but on a 30-trade month
-// it is a full 1% of the account. Ignoring it overstates position size.
-double CalculateLots(double slDistancePrice, double &riskUsed, string &note)
-  {
-   note = "";
-   double capital = RiskCapital();
-   if(capital <= 0) { riskUsed = 0; note = "NO CAPITAL"; return 0; }
-
-   if(SizingMode == SF_SIZE_FIXED)
-     {
-      double lf = NormalizeLots(FixedLots);
-      riskUsed = (PointValue(lf) * (slDistancePrice / gPoint) + CommissionRT(lf)) / capital * 100.0;
-      note = "FIXED";
-      return lf;
-     }
-
-   if(SizingMode == SF_SIZE_LADDER)
-     {
-      double steps = MathFloor(capital / MathMax(1.0, LadderStepUSD));
-      double ll = NormalizeLots(MathMax(gMinLot, steps * gLotStep));
-      riskUsed = (PointValue(ll) * (slDistancePrice / gPoint) + CommissionRT(ll)) / capital * 100.0;
-      note = "LADDER";
-      return ll;
-     }
-
-   // ---- risk percent ----
-   double pct = MathMin(RiskPercent, MaxRiskPercentHardCap);
-   if(ReduceRiskAfterLoss && gConsecLosses > 0)
-      pct *= MathMax(0.1, MathPow(LossRiskFactor, MathMin(3, gConsecLosses)));
-   double riskMoney = capital * pct / 100.0;
-   if(riskMoney <= 0) { riskUsed = 0; note = "ZERO RISK"; return 0; }
-
-   double slPoints = slDistancePrice / gPoint;
-   if(slPoints <= 0) { riskUsed = 0; note = "BAD SL"; return 0; }
-
-   // Solve: lots * (pointValue001/0.01) * slPoints + lots/0.01 * commRT = riskMoney
-   double perLotPointValue = PointValue(1.0);
-   double lossPerLot = perLotPointValue * slPoints + CommissionRT(1.0);
-   if(lossPerLot <= 0) { riskUsed = 0; note = "BAD MODEL"; return 0; }
-
-   double raw = riskMoney / lossPerLot;
-   double lots = NormalizeLots(raw);
-
-   // Micro-account reality check: if even the minimum lot breaks the cap,
-   // refuse the trade rather than silently over-leveraging a 200 USD account.
-   if(raw < gMinLot - 1e-8)
-     {
-      double minLoss = PointValue(gMinLot) * slPoints + CommissionRT(gMinLot);
-      double minPct  = minLoss / capital * 100.0;
-      if(minPct > MaxRiskPercentHardCap && !AllowMinLotOverride)
-        {
-         riskUsed = minPct;
-         note = "MIN LOT RISK " + Fmt(minPct, 2) + "% > CAP";
-         return 0;
-        }
-      lots = gMinLot;
-      note = "MIN LOT";
-     }
-
-   // Margin sanity: never commit more than 25% of free margin.
-   double marginPerLot = MarketInfo(Symbol(), MODE_MARGINREQUIRED);
-   if(marginPerLot > 0)
-     {
-      double affordable = (AccountFreeMargin() * 0.25) / marginPerLot;
-      if(affordable < lots)
-        {
-         lots = NormalizeLots(affordable);
-         note = (note == "" ? "MARGIN CAP" : note + "+MARGIN");
-        }
-     }
-   if(lots < gMinLot - 1e-8) { riskUsed = 0; if(note=="") note="TOO SMALL"; return 0; }
-
-   riskUsed = (PointValue(lots) * slPoints + CommissionRT(lots)) / capital * 100.0;
-   if(note == "") note = "RISK " + Fmt(pct, 2) + "%";
-   return lots;
-  }
-
-//==================================================================//
-//              S L   /   T P   C O N S T R U C T I O N             //
-//==================================================================//
-double ComputeStopDistance(int type, int shift)
-  {
-   double atr = iATR(NULL, 0, MathMax(1, ATRLength), shift);
-   double dist = atr * MathMax(0.1, StopLossATR);
-
-   if(StopLossMode == SF_SL_FIXED)
-      dist = MathMax(1.0, StopLossPoints) * gPoint;
-
-   else if(StopLossMode == SF_SL_STRUCTURE)
-     {
-      int look = MathMax(3, StructureSwingBars);
-      double ref = (type == OP_BUY) ? DonchianLow(shift, look) : DonchianHigh(shift, look);
-      double px  = (type == OP_BUY) ? Bid : Ask;
-      double raw = MathAbs(px - ref) + atr * MathMax(0.0, StructureBufferATR);
-      dist = MathMax(raw, atr * 0.6);   // never hug price too tightly
-     }
-
-   else if(StopLossMode == SF_SL_RISK)
-     {
-      double capital = RiskCapital();
-      double money   = capital * MathMin(RiskPercent, MaxRiskPercentHardCap) / 100.0;
-      double pv      = PointValue(gMinLot);
-      if(pv > 0 && money > 0)
-         dist = MathMax(atr * 0.8, ((money - CommissionRT(gMinLot)) / pv) * gPoint);
-     }
-
-   // The stop must clear spread + commission, otherwise the cost model alone
-   // can turn a technically-correct stop into a guaranteed loss.
-   double costGuard = TotalCostPoints() * 1.5 * gPoint;
-   dist = MathMax(dist, costGuard);
-   dist = MathMax(dist, MinStopDistance());
-   return dist;
-  }
-
-double ComputeTakeDistance(int shift)
-  {
-   double atr = iATR(NULL, 0, MathMax(1, ATRLength), shift);
-   double dist = atr * MathMax(0.1, TakeProfitATR);
-   if(TakeProfitMode == SF_TP_FIXED) dist = MathMax(1.0, TakeProfitPoints) * gPoint;
-   if(TakeProfitMode == SF_TP_COST)  dist = TotalCostPoints() * MathMax(1.0, TakeProfitCostMultiple) * gPoint;
-
-   // Enforce the cost-aware minimum target. On Exness Raw gold the round turn
-   // is ~70 points of commission plus live spread; a target that does not
-   // clear a multiple of that has negative expectancy no matter the win rate.
-   double minTP = TotalCostPoints() * MathMax(1.0, MinTPtoCostRatio) * gPoint;
-   dist = MathMax(dist, minTP);
-   dist = MathMax(dist, MinStopDistance());
-   return dist;
-  }
-
-// True break-even: entry price shifted by spread + commission, so "flat"
-// really means flat after the broker has been paid.
-double BreakEvenPrice(int type, double entry, double lots)
-  {
-   double commPoints = gCostPointsRT;                  // round turn, in points
-   double spreadPts  = SpreadPoints();
-   double shift = (commPoints + spreadPts) * gPoint;
-   if(!BreakEvenIncludesCost) shift = 0;
-   double lock = MathMax(0.0, BreakEvenLockPoints) * gPoint;
-   return (type == OP_BUY) ? entry + shift + lock : entry - shift - lock;
-  }
-
-//==================================================================//
-//              O R D E R   O P E R A T I O N S                     //
-//==================================================================//
 int CountOwnPositions(int &type, int &ticket)
   {
-   int n = 0; type = -1; ticket = -1;
+   type = -1; ticket = -1;
+   int n = 0;
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
       if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber) continue;
       if(OrderType() != OP_BUY && OrderType() != OP_SELL) continue;
+      if(n == 0) { type = OrderType(); ticket = OrderTicket(); }
       n++;
-      if(ticket < 0) { ticket = OrderTicket(); type = OrderType(); }
      }
    return n;
   }
 
-bool SafeModify(int ticket, double price, double sl, double tp)
-  {
-   for(int a = 0; a < MathMax(1, OrderRetries); a++)
-     {
-      if(!OrderSelect(ticket, SELECT_BY_TICKET)) return false;
-      if(MathAbs(OrderStopLoss() - sl) < gPoint * 0.5 &&
-         MathAbs(OrderTakeProfit() - tp) < gPoint * 0.5) return true;
-      if(OrderModify(ticket, price, NormalizeDouble(sl, gDigits),
-                     NormalizeDouble(tp, gDigits), 0, clrNONE)) return true;
-      int err = GetLastError();
-      if(err == 1) return true;
-      Sleep(120); RefreshRates();
-     }
-   return false;
-  }
-
 bool CloseAllOwn(string reason)
   {
-   bool all = true;
+   bool allClosed = true;
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
       if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber) continue;
-      if(OrderType() != OP_BUY && OrderType() != OP_SELL) continue;
+      RefreshRates();
       bool ok = false;
-      for(int a = 0; a < MathMax(1, OrderRetries) && !ok; a++)
-        {
-         RefreshRates();
-         double px = (OrderType() == OP_BUY) ? Bid : Ask;
-         ok = OrderClose(OrderTicket(), OrderLots(), NormalizeDouble(px, gDigits),
-                         SlippagePoints, clrNONE);
-         if(!ok) Sleep(120);
-        }
-      if(!ok) { all = false; Journal("CLOSE FAILED " + IntegerToString(GetLastError())); }
+      if(OrderType() == OP_BUY)  ok = OrderClose(OrderTicket(), OrderLots(), Bid, SlippagePoints, C'255,80,100');
+      if(OrderType() == OP_SELL) ok = OrderClose(OrderTicket(), OrderLots(), Ask, SlippagePoints, C'0,240,180');
+      if(!ok) { Print("Signal Forge close failed: ", GetLastError()); allClosed = false; }
      }
-   if(all) Journal("CLOSED: " + reason);
-   return all;
+   if(allClosed) { gLastAction = "CLOSED: " + reason; Journal(gLastAction); }
+   return allClosed;
   }
 
-bool OpenTrade(int type, int shift)
+bool OpenPosition(int type)
   {
    RefreshRates();
-
-   double slDist = ComputeStopDistance(type, shift);
-   double tpDist = ComputeTakeDistance(shift);
-
-   double riskUsed = 0; string note = "";
-   double lots = CalculateLots(slDist, riskUsed, note);
-   if(lots < gMinLot - 1e-8)
-     { gBlockReason = "SIZE: " + note; Journal("BLOCKED " + gBlockReason); return false; }
-
-   double entry = (type == OP_BUY) ? Ask : Bid;
-   double sl = (type == OP_BUY) ? entry - slDist : entry + slDist;
-   double tp = (type == OP_BUY) ? entry + tpDist : entry - tpDist;
-   sl = NormalizeDouble(sl, gDigits);
-   tp = NormalizeDouble(tp, gDigits);
-
-   int ticket = -1;
-   for(int a = 0; a < MathMax(1, OrderRetries) && ticket < 0; a++)
+   double spread = (Ask - Bid) / Point;
+   if(MaximumSpreadPoints > 0 && spread > MaximumSpreadPoints)
      {
-      RefreshRates();
-      entry = (type == OP_BUY) ? Ask : Bid;
-      ticket = OrderSend(Symbol(), type, lots, NormalizeDouble(entry, gDigits),
-                         SlippagePoints, sl, tp, TradeComment, MagicNumber, 0,
-                         type == OP_BUY ? clrDodgerBlue : clrTomato);
-      if(ticket < 0)
-        {
-         int err = GetLastError();
-         if(err == 130 || err == 145)   // invalid stops -> send naked, then modify
-           {
-            ticket = OrderSend(Symbol(), type, lots, NormalizeDouble(entry, gDigits),
-                               SlippagePoints, 0, 0, TradeComment, MagicNumber, 0, clrNONE);
-            if(ticket > 0)
-              {
-               sl = (type == OP_BUY) ? entry - slDist : entry + slDist;
-               tp = (type == OP_BUY) ? entry + tpDist : entry - tpDist;
-               SafeModify(ticket, entry, sl, tp);
-              }
-           }
-         else Sleep(150);
-        }
-     }
-
-   if(ticket < 0)
-     {
-      gBlockReason = "SEND ERR " + IntegerToString(GetLastError());
-      Journal(gBlockReason);
+      gLastAction = "BLOCKED: SPREAD " + DoubleToString(spread, 0) + " PTS";
+      gBlockReason = "SPREAD " + DoubleToString(spread, 0) + "p";
       return false;
      }
 
-   gDayTrades++;
-   gLastTradeBar = Time[0];
-   double costUsd = CommissionRT(lots) + (SpreadPoints() * PointValue(lots));
-   Journal(StringFormat("%s %.2f lots @ %s | SL %.0fp TP %.0fp | risk %.2f%% | cost %.2f USD",
-           (type == OP_BUY ? "BUY" : "SELL"), lots, Fmt(entry, gDigits),
-           slDist / gPoint, tpDist / gPoint, riskUsed, costUsd));
+   double lots  = NormalizeLots(FixedLots);
+   double entry = (type == OP_BUY) ? Ask : Bid;
+   double atr   = iATR(NULL, 0, MathMax(1, ATRLength), 1);
+   double atrSLDistance = atr * MathMax(0.1, StopLossATR);
+   double slDistance = (StopLossMode == SL_By_Risk_Percent) ? RiskStopDistance(lots) : atrSLDistance;
+   double tpDistance = (TakeProfitMode == TP_By_Points)
+                       ? MathMax(Point, TakeProfitPoints * Point)
+                       : atr * MathMax(0.1, TakeProfitATR);
+   double minimum = (MarketInfo(Symbol(), MODE_STOPLEVEL) + 2) * Point;
+   slDistance = MathMax(slDistance, minimum);
+   tpDistance = MathMax(tpDistance, minimum);
+   double sl = (type == OP_BUY) ? entry - slDistance : entry + slDistance;
+   double tp = (type == OP_BUY) ? entry + tpDistance : entry - tpDistance;
+   sl = NormalizeDouble(sl, Digits);
+   tp = NormalizeDouble(tp, Digits);
 
-   if(AlertOnEntry) Alert("Signal Forge PRO: ", (type == OP_BUY ? "BUY " : "SELL "), Symbol(), " ", lots);
-   if(PushOnEntry)  SendNotification("SF-PRO " + (type == OP_BUY ? "BUY " : "SELL ") + Symbol() +
-                                     " " + DoubleToString(lots, 2) + " @ " + Fmt(entry, gDigits));
+   string cmt  = TradeComment + ((type == OP_BUY) ? " BUY" : " SELL");
+   color  arrw = (type == OP_BUY) ? C'0,255,170' : C'255,64,96';
+   int ticket = OrderSend(Symbol(), type, lots, entry, SlippagePoints, sl, tp, cmt, MagicNumber, 0, arrw);
+   if(ticket < 0 && GetLastError() == 130)
+     {
+      // ECN: send naked, then attach the stops
+      RefreshRates();
+      entry = (type == OP_BUY) ? Ask : Bid;
+      ticket = OrderSend(Symbol(), type, lots, entry, SlippagePoints, 0, 0, cmt, MagicNumber, 0, arrw);
+      if(ticket > 0 && OrderSelect(ticket, SELECT_BY_TICKET))
+        {
+         sl = (type == OP_BUY) ? entry - slDistance : entry + slDistance;
+         tp = (type == OP_BUY) ? entry + tpDistance : entry - tpDistance;
+         if(!OrderModify(ticket, OrderOpenPrice(), NormalizeDouble(sl, Digits),
+                         NormalizeDouble(tp, Digits), 0, arrw))
+            Print("Signal Forge ECN SL/TP modify failed: ", GetLastError());
+        }
+     }
+   if(ticket < 0)
+     {
+      int err = GetLastError();
+      gLastAction = "ORDER ERROR " + IntegerToString(err);
+      Print(gLastAction);
+      Journal(gLastAction);
+      return false;
+     }
+   gLastTradeBar = Time[0];
+   gDayTrades++;
+   gLastAction = (type == OP_BUY) ? "BUY OPENED" : "SELL OPENED";
+   Journal(gLastAction + " " + DoubleToString(lots, 2) + " @ " + DoubleToString(entry, Digits));
+
+   if(AlertOnEntry)
+      Alert("Signal Forge PRO: ", (type == OP_BUY ? "BUY " : "SELL "), Symbol(), " ", lots);
+   if(PushOnEntry)
+      SendNotification("SF-PRO " + (type == OP_BUY ? "BUY " : "SELL ") + Symbol() +
+                       " " + DoubleToString(lots, 2) + " @ " + DoubleToString(entry, Digits));
+   gCardsDirty = true;
    return true;
   }
 
-//==================================================================//
-//              T R A D E   M A N A G E M E N T                     //
-//==================================================================//
-bool WasPartialed(datetime key)
+void ManageTrailing()
   {
-   for(int i = 0; i < gPartialCount; i++) if(gPartialDone[i] == key) return true;
-   return false;
-  }
-void MarkPartialed(datetime key)
-  {
-   if(gPartialCount >= 64) { for(int i = 0; i < 63; i++) gPartialDone[i] = gPartialDone[i+1]; gPartialCount = 63; }
-   gPartialDone[gPartialCount++] = key;
-  }
-bool WasBreakEven(datetime key)
-  {
-   for(int i = 0; i < gBECount; i++) if(gBEDone[i] == key) return true;
-   return false;
-  }
-void MarkBreakEven(datetime key)
-  {
-   if(gBECount >= 64) { for(int i = 0; i < 63; i++) gBEDone[i] = gBEDone[i+1]; gBECount = 63; }
-   gBEDone[gBECount++] = key;
-  }
-
-void ManageOpenTrades()
-  {
-   double atr = iATR(NULL, 0, MathMax(1, ATRLength), 1);
-   if(atr <= 0) return;
-   double minStop = MinStopDistance();
-
+   if(!EnableTrailingStop) return;
+   double start    = MathMax(0, TrailingStartPoints) * Point;
+   double distance = MathMax(1, TrailingDistancePoints) * Point;
+   double step     = MathMax(1, TrailingStepPoints) * Point;
+   double minStop  = (MarketInfo(Symbol(), MODE_STOPLEVEL) + 1) * Point;
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
       if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber) continue;
-      int type = OrderType();
-      if(type != OP_BUY && type != OP_SELL) continue;
-
       RefreshRates();
-      int      ticket = OrderTicket();
-      datetime key    = OrderOpenTime();   // survives partial closes
-      double   entry  = OrderOpenPrice();
-      double lots   = OrderLots();
-      double px     = (type == OP_BUY) ? Bid : Ask;
-      double moved  = (type == OP_BUY) ? (px - entry) : (entry - px);
-      double curSL  = OrderStopLoss();
-      double curTP  = OrderTakeProfit();
-
-      //---------------- partial close at TP1 ----------------
-      if(UsePartialClose && !WasPartialed(key) &&
-         moved >= atr * MathMax(0.1, PartialTriggerATR))
+      if(OrderType() == OP_BUY && Bid - OrderOpenPrice() >= start)
         {
-         double part = NormalizeDouble(lots * MathMax(1.0, MathMin(90.0, PartialClosePercent)) / 100.0, 2);
-         part = MathFloor(part / gLotStep + 1e-8) * gLotStep;
-         if(part >= gMinLot && (lots - part) >= gMinLot)
-           {
-            if(OrderClose(ticket, part, NormalizeDouble(px, gDigits), SlippagePoints, clrGold))
-              {
-               MarkPartialed(key);
-               Journal("PARTIAL " + Fmt(part, 2) + " BANKED @ " + Fmt(atr * PartialTriggerATR / gPoint, 0) + "p");
-               continue;   // order list changed
-              }
-           }
-         else MarkPartialed(key);   // cannot split a minimum position
+         double next = NormalizeDouble(Bid - MathMax(distance, minStop), Digits);
+         if((OrderStopLoss() == 0 || next - OrderStopLoss() >= step) && next > OrderOpenPrice())
+            if(!OrderModify(OrderTicket(), OrderOpenPrice(), next, OrderTakeProfit(), 0, C'41,150,255'))
+               Print("Trailing BUY error: ", GetLastError());
         }
-
-      //---------------- true break-even ----------------
-      if(UseBreakEven && !WasBreakEven(key) &&
-         moved >= atr * MathMax(0.1, BreakEvenTriggerATR))
+      if(OrderType() == OP_SELL && OrderOpenPrice() - Ask >= start)
         {
-         double be = BreakEvenPrice(type, entry, lots);
-         bool better = (type == OP_BUY) ? (curSL < be - gPoint * 0.5) : (curSL > be + gPoint * 0.5 || curSL == 0);
-         bool valid  = (type == OP_BUY) ? (be < Bid - minStop) : (be > Ask + minStop);
-         if(better && valid && SafeModify(ticket, entry, be, curTP))
-           {
-            MarkBreakEven(key);
-            Journal("BREAK-EVEN+COST LOCKED @ " + Fmt(be, gDigits));
-            curSL = be;
-           }
-        }
-
-      //---------------- trailing ----------------
-      if(TrailingMode != SF_TRAIL_OFF && moved >= MathMax(0.0, TrailingStartPoints) * gPoint)
-        {
-         double newSL = 0;
-         if(TrailingMode == SF_TRAIL_POINTS)
-           {
-            double d = MathMax(minStop, TrailingDistancePoints * gPoint);
-            newSL = (type == OP_BUY) ? Bid - d : Ask + d;
-           }
-         else if(TrailingMode == SF_TRAIL_ATR)
-           {
-            double d = MathMax(minStop, atr * MathMax(0.2, TrailingATRMultiple));
-            newSL = (type == OP_BUY) ? Bid - d : Ask + d;
-           }
-         else // chandelier
-           {
-            int look = MathMax(3, ChandelierLookback);
-            double k = atr * MathMax(0.2, TrailingATRMultiple);
-            if(type == OP_BUY)
-              {
-               int hi = iHighest(NULL, 0, MODE_HIGH, look, 0);
-               newSL = High[hi < 0 ? 0 : hi] - k;
-              }
-            else
-              {
-               int lo = iLowest(NULL, 0, MODE_LOW, look, 0);
-               newSL = Low[lo < 0 ? 0 : lo] + k;
-              }
-           }
-
-         newSL = NormalizeDouble(newSL, gDigits);
-         double step = MathMax(1.0, TrailingStepPoints) * gPoint;
-         bool improves = (type == OP_BUY)
-                         ? (curSL == 0 || newSL - curSL >= step)
-                         : (curSL == 0 || curSL - newSL >= step);
-         bool safe = (type == OP_BUY) ? (newSL < Bid - minStop) : (newSL > Ask + minStop);
-         // Never trail into a worse-than-break-even stop once in profit.
-         double floorSL = BreakEvenPrice(type, entry, lots);
-         if(WasBreakEven(key))
-            safe = safe && ((type == OP_BUY) ? (newSL >= floorSL - gPoint) : (newSL <= floorSL + gPoint));
-         if(improves && safe) SafeModify(ticket, entry, newSL, curTP);
-        }
-
-      //---------------- time stop ----------------
-      if(UseTimeStop)
-        {
-         int barsOpen = iBarShift(Symbol(), Period(), OrderOpenTime(), false);
-         if(barsOpen >= MathMax(1, TimeStopBars))
-           {
-            double rDist = MathAbs(entry - (curSL == 0 ? entry - atr : curSL));
-            double progressR = (rDist > 0) ? moved / rDist : 0;
-            if(progressR < TimeStopMinProgressR)
-              {
-               if(OrderClose(ticket, lots, NormalizeDouble(px, gDigits), SlippagePoints, clrSilver))
-                  Journal("TIME STOP after " + IntegerToString(barsOpen) + " bars");
-              }
-           }
+         double next = NormalizeDouble(Ask + MathMax(distance, minStop), Digits);
+         if((OrderStopLoss() == 0 || OrderStopLoss() - next >= step) && next < OrderOpenPrice())
+            if(!OrderModify(OrderTicket(), OrderOpenPrice(), next, OrderTakeProfit(), 0, C'41,150,255'))
+               Print("Trailing SELL error: ", GetLastError());
         }
      }
   }
 
+// True break-even price including the round-turn commission, used by the
+// HUD's break-even line. Purely informational - it never moves a stop.
+double BreakEvenPrice(int type, double entry, double lots)
+  {
+   double costPts = (lots > 0) ? (CommissionPer001LotRT * (lots / 0.01)) / (PointValuePerLot() * lots) : 0;
+   if(costPts <= 0) return entry;
+   return (type == OP_BUY) ? entry + costPts * gPoint : entry - costPts * gPoint;
+  }
+//==================================================================//
+//              D A Y   +   A T R   R E A D O U T S                 //
+//==================================================================//
+// These feed the dashboard only. Nothing here can block a trade - the
+// original strategy has no daily limits.
+
+// ATR of the current symbol/timeframe expressed in points.
+double ATRPoints(int shift)
+  {
+   double atr = iATR(NULL, 0, ATRLength, shift);
+   return (gPoint > 0) ? atr / gPoint : 0.0;
+  }
+
+// Current ATR against its own 50-bar average: >1 = expanding volatility.
+double ATRRatio(int shift)
+  {
+   double atr = iATR(NULL, 0, ATRLength, shift);
+   if(atr <= 0) return 0.0;
+   double sum = 0; int n = 0;
+   for(int i = shift; i < shift + 50; i++)
+     {
+      double a = iATR(NULL, 0, ATRLength, i);
+      if(a > 0) { sum += a; n++; }
+     }
+   if(n == 0) return 1.0;
+   double avg = sum / n;
+   return (avg > 0) ? atr / avg : 1.0;
+  }
+
+// The agreement level at which the combined signal actually fires.
+// AND mode needs every enabled filter to agree, so the meter must hit +/-100.
+// OR mode fires on a single vote, so the arm line sits at one filter's share.
+double ArmThreshold()
+  {
+   if(RequireAllEnabledIndicatorsToAlign) return 100.0;
+   if(gAgreeOn <= 0) return 100.0;
+   return 100.0 / gAgreeOn;
+  }
+
+// Today's realised P/L as a percentage of the day's opening equity.
+double DayPnLPercent()
+  {
+   if(gDayStartEquity <= 0) return 0.0;
+   return gDayNet / gDayStartEquity * 100.0;
+  }
+
+// Reset the per-day counters when the server date rolls over.
+void RollDailyCounters()
+  {
+   datetime today = DayStart(TimeCurrent());
+   if(today == gDayStamp) return;
+   gDayStamp       = today;
+   gDayStartEquity = AccountEquity();
+   gDayTrades      = 0;
+   gDayNet         = 0.0;
+  }
+
+// Watch the history list grow and fold each newly closed deal into the
+// day tally, the losing streak and the journal.
 void TrackClosedTrades()
   {
    int total = OrdersHistoryTotal();
-   if(total == gLastHistoryCount) return;
    if(gLastHistoryCount < 0) { gLastHistoryCount = total; return; }
-   gLastHistoryCount = total;
+   if(total <= gLastHistoryCount) { gLastHistoryCount = total; return; }
 
-   datetime newest = 0; double newestNet = 0; bool found = false;
-   for(int i = total - 1; i >= 0 && i >= total - 10; i--)
+   for(int i = gLastHistoryCount; i < total; i++)
      {
       if(!OrderSelect(i, SELECT_BY_POS, MODE_HISTORY)) continue;
       if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber) continue;
       if(OrderType() != OP_BUY && OrderType() != OP_SELL) continue;
-      if(OrderCloseTime() > newest)
-        { newest = OrderCloseTime(); newestNet = OrderProfit() + OrderSwap() + OrderCommission(); found = true; }
+      double net = SelectedNetUSD();
+      gDayNet += net;
+      if(net > 0) gConsecLosses = 0; else gConsecLosses++;
+      gCardsDirty = true;
+      Journal("CLOSED #" + IntegerToString(OrderTicket()) + "  " + Signed(net, 2));
      }
-   if(!found) return;
-
-   gDayNet += newestNet;
-   if(newestNet < 0)
-     {
-      gConsecLosses++;
-      if(MaxConsecutiveLosses > 0 && gConsecLosses >= MaxConsecutiveLosses)
-        {
-         gCooldownUntil = TimeCurrent() + MathMax(1, CooldownMinutes) * 60;
-         Journal("COOLDOWN " + IntegerToString(CooldownMinutes) + "m after " +
-                 IntegerToString(gConsecLosses) + " losses");
-         gConsecLosses = 0;
-        }
-     }
-   else gConsecLosses = 0;
+   gLastHistoryCount = total;
   }
 
 //==================================================================//
@@ -1440,10 +870,12 @@ void RebuildStats()
       if(!OrderSelect(i, SELECT_BY_POS, MODE_HISTORY)) continue;
       if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber) continue;
       if(OrderType() != OP_BUY && OrderType() != OP_SELL) continue;
-      double net = OrderProfit() + OrderSwap() + OrderCommission();
+      bool   ce  = false;                       // discarded: the estimate flag
+      double cm  = TradeCommissionUSD(OrderLots(), OrderCommission(), ce);
+      double net = SelectedNetUSD();
       gStatTrades++;
       gStatNet += net;
-      gStatCommission += MathAbs(OrderCommission());
+      gStatCommission += cm;
       if(net > 0) { gStatWins++; gStatGP += net; }
       else        { gStatLosses++; gStatGL += MathAbs(net); }
       gStatBestTrade  = MathMax(gStatBestTrade, net);
@@ -1469,10 +901,12 @@ void RebuildStats()
       for(int b = 0; b < SF_TRACK_DAYS; b++)
         {
          if(cd != gTrkDate[b]) continue;
-         double nt = OrderProfit() + OrderSwap() + OrderCommission();
+         bool   tce = false;                    // discarded: the estimate flag
+         double tcm = TradeCommissionUSD(OrderLots(), OrderCommission(), tce);
+         double nt  = SelectedNetUSD();
          gTrkLots[b]   += OrderLots();
          gTrkProfit[b] += nt;
-         gTrkComm[b]   += MathAbs(OrderCommission());
+         gTrkComm[b]   += tcm;
          gTrkTrades[b]++;
          if(nt > 0) gTrkWins[b]++;
          break;
@@ -1496,7 +930,7 @@ void RebuildStats()
          if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber) continue;
          if(OrderType() != OP_BUY && OrderType() != OP_SELL) continue;
          if(OrderCloseTime() < gTrkDate[od])
-            before += OrderProfit() + OrderSwap() + OrderCommission();
+            before += SelectedNetUSD();
         }
       dayOpen[od] = before;
       gTrkGainPct[od] = (before > 0) ? gTrkProfit[od] / before * 100.0 : 0.0;
@@ -1510,7 +944,7 @@ void RebuildStats()
       if(!OrderSelect(j, SELECT_BY_POS, MODE_HISTORY)) continue;
       if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber) continue;
       if(OrderType() != OP_BUY && OrderType() != OP_SELL) continue;
-      run += OrderProfit() + OrderSwap() + OrderCommission();
+      run += SelectedNetUSD();
       peak = MathMax(peak, run);
       if(peak > 0) gStatMaxDD = MathMax(gStatMaxDD, (peak - run) / peak * 100.0);
       gEquityCurve[gEquityPoints++] = run;
@@ -1744,8 +1178,9 @@ void MeterGraded(int x, int y, int w, int h, double pct01, uint strongC, uint tr
 void ScoreGauge(int cx, int cy, int radius, double score)
   {
    double norm = MathMax(-100.0, MathMin(100.0, score));
-   uint  col   = (norm >=  EntryScoreThreshold) ? TBull :
-                 (norm <= -EntryScoreThreshold) ? TBear : TFlat;
+   double arm  = ArmThreshold();
+   uint  col   = (norm >=  arm) ? TBull :
+                 (norm <= -arm) ? TBear : TFlat;
 
    for(int deg = 180; deg <= 360; deg++)
      {
@@ -1811,16 +1246,14 @@ void StatusDot(int x, int y, int r, bool on, uint onC, uint offC)
 string StateText()
   {
    if(gPaused) return "PAUSED";
-   if(gHalted) return gHaltReason;
-   if(InCooldown()) return "COOLDOWN";
    if(gBlockReason != "") return gBlockReason;
    return "ARMED";
   }
 
 uint StateColor()
   {
-   if(gPaused || gHalted) return TBear;
-   if(InCooldown() || gBlockReason != "") return TFlat;
+   if(gPaused) return TBear;
+   if(gBlockReason != "") return TFlat;
    return TBull;
   }
 
@@ -1898,7 +1331,14 @@ void PaintHud()
 
    int headerH = SC(54);
    // Each page owns its natural height, so no page shows dead space.
-   int pageH = SC(652);                       // CORE
+   // CORE height is the SUM of the panels actually switched on, so the
+   // Show*Panel inputs genuinely remove their block instead of leaving a hole.
+   int pageH = headerH + SC(6) + SC(32) + SC(34);     // header + tabs + control strip
+   if(ShowSignalPanel)      pageH += SC(126) + SC(8); // agreement gauge
+   if(ShowHeaderPanel)      pageH += SC(92)  + SC(8); // cost intelligence
+   if(ShowPerformancePanel) pageH += SC(40)*2 + SC(6) + SC(8); // balance/equity chips
+   if(ShowRiskPanel)        pageH += SC(112) + SC(8); // execution console
+   if(ShowTradePanel)       pageH += SC(74)  + SC(8); // live trade ticket
    if(gHudPage == 1) pageH = SC(500);         // FILTERS
    if(gHudPage == 2) pageH = SC(700);         // TRACKER
    int H = gHudCollapsed ? headerH + SC(8) : pageH;
@@ -1948,10 +1388,10 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v2.04", TTextDim, 7);
+        "  ·  RAW  ·  v2.05", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
-   StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused && !gHalted, StateColor(), TGridC);
+   StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
    TextCenter(pillX + SC(13) + (pillW - SC(13)) / 2, hy + SC(6), st, StateColor(), 7,
               "Segoe UI Semibold", SF_FW_SEMI);
 
@@ -1976,136 +1416,167 @@ void PaintHud()
    //================================================================
    if(gHudPage == 0)
      {
-      //---------- conviction gauge ----------
-      int gaugeH = SC(126);
-      RaisedPlate(pad, y, innerW, gaugeH, SC(10), TPanel, TBorder);
-      AccentSpine(pad + SC(4), y + SC(7), SC(13), TAccent);
-      Text(pad + SC(13), y + SC(6), "CONFLUENCE CONVICTION", TText, 8, "Segoe UI Black", SF_FW_BLACK);
+      //---------- filter agreement gauge ----------
+      if(ShowSignalPanel)
+        {
+        // v1 has no weighted conviction score: every enabled filter is one
+        // equal vote, so this meter shows how the votes currently split.
+        int gaugeH = SC(126);
+        RaisedPlate(pad, y, innerW, gaugeH, SC(10), TPanel, TBorder);
+        AccentSpine(pad + SC(4), y + SC(7), SC(13), TAccent);
+        Text(pad + SC(13), y + SC(6), "FILTER AGREEMENT", TText, 8, "Segoe UI Black", SF_FW_BLACK);
 
-      int cx = pad + innerW / 2, cy = y + gaugeH - SC(18);
-      ScoreGauge(cx, cy, SC(58), gScore);
+        int cx = pad + innerW / 2, cy = y + gaugeH - SC(18);
+        ScoreGauge(cx, cy, SC(58), gScore);
 
-      uint sc = (gScore >= EntryScoreThreshold) ? TBull :
-                (gScore <= -EntryScoreThreshold) ? TBear : TFlat;
-      string dir = (gScore >= EntryScoreThreshold) ? "LONG" :
-                   (gScore <= -EntryScoreThreshold) ? "SHORT" : "NEUTRAL";
-      TextCenter(cx, cy - SC(48), Signed(gScore, 0), sc, 19, "Segoe UI Black", SF_FW_BLACK);
-      TextCenter(cx, cy - SC(19), dir, sc, 8, "Segoe UI Semibold", SF_FW_SEMI);
-      Text(pad + SC(14), cy - SC(6), "-100", TTextDim, 7);
-      TextRight(pad + innerW - SC(14), cy - SC(6), "+100", TTextDim, 7);
+        double arm = ArmThreshold();
+        uint sc = (gScore >= arm) ? TBull : (gScore <= -arm) ? TBear : TFlat;
+        string dir = gLongSignal ? "LONG" : (gShortSignal ? "SHORT" : "NEUTRAL");
+        TextCenter(cx, cy - SC(48), Signed(gScore, 0), sc, 19, "Segoe UI Black", SF_FW_BLACK);
+        TextCenter(cx, cy - SC(19), dir, sc, 8, "Segoe UI Semibold", SF_FW_SEMI);
+        Text(pad + SC(14), cy - SC(6), "-100", TTextDim, 7);
+        TextRight(pad + innerW - SC(14), cy - SC(6), "+100", TTextDim, 7);
 
-      // threshold markers on the arc
-      Text(pad + SC(12), y + SC(22), "ARM ±" + Fmt(EntryScoreThreshold, 0), TAccent, 7);
-      string htf = (gHTFBias > 0) ? "HTF UP" : (gHTFBias < 0 ? "HTF DOWN" : "HTF FLAT");
-      TextRight(pad + innerW - SC(12), y + SC(22), htf,
-                gHTFBias > 0 ? TBull : (gHTFBias < 0 ? TBear : TFlat), 7, "Segoe UI Semibold", SF_FW_SEMI);
-      y += gaugeH + SC(8);
+        Text(pad + SC(12), y + SC(22),
+             RequireAllEnabledIndicatorsToAlign ? "MODE: ALL" : "MODE: ANY", TAccent, 7);
+        TextRight(pad + innerW - SC(12), y + SC(22),
+                  IntegerToString(gAgreeBull) + "▲ / " + IntegerToString(gAgreeBear) + "▼  of " +
+                  IntegerToString(gAgreeOn), TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
+        y += gaugeH + SC(8);
+        }
 
       //---------- cost intelligence ----------
-      int costH = SC(92);
-      RaisedPlate(pad, y, innerW, costH, SC(10), TPanel, TBorder);
-      AccentSpine(pad + SC(4), y + SC(7), SC(13), TAccent2);
-      Text(pad + SC(13), y + SC(6), "COST INTELLIGENCE  ·  RAW SPREAD", TText, 8, "Segoe UI Black", SF_FW_BLACK);
+      if(ShowHeaderPanel)
+        {
+        int costH = SC(92);
+        RaisedPlate(pad, y, innerW, costH, SC(10), TPanel, TBorder);
+        AccentSpine(pad + SC(4), y + SC(7), SC(13), TAccent2);
+        Text(pad + SC(13), y + SC(6), "COST INTELLIGENCE  ·  RAW SPREAD", TText, 8, "Segoe UI Black", SF_FW_BLACK);
 
-      double spPts  = SpreadPoints();
-      double cost   = TotalCostPoints();
-      double atrP   = ATRPoints(1);
-      double costPct= (atrP > 0) ? cost / atrP : 1.0;
-      uint costCol  = (costPct < 0.12) ? TBull : (costPct < 0.25 ? TFlat : TBear);
+        double spPts  = SpreadPoints();
+        double cost   = TotalCostPoints();
+        double atrP   = ATRPoints(1);
+        double costPct= (atrP > 0) ? cost / atrP : 1.0;
+        uint costCol  = (costPct < 0.12) ? TBull : (costPct < 0.25 ? TFlat : TBear);
 
-      int col = innerW / 3;
-      Text(pad + SC(12), y + SC(26), "SPREAD", TTextDim, 7);
-      Text(pad + SC(12), y + SC(37), Fmt(spPts, 0) + " pts",
-           spPts <= MaxSpreadPoints ? TText : TBear, 10, "Segoe UI Semibold", SF_FW_SEMI);
+        int col = innerW / 3;
+        Text(pad + SC(12), y + SC(26), "SPREAD", TTextDim, 7);
+        Text(pad + SC(12), y + SC(37), Fmt(spPts, 0) + " pts",
+             (MaximumSpreadPoints <= 0 || spPts <= MaximumSpreadPoints) ? TText : TBear, 10, "Segoe UI Semibold", SF_FW_SEMI);
 
-      Text(pad + SC(12) + col, y + SC(26), "COMMISSION", TTextDim, 7);
-      Text(pad + SC(12) + col, y + SC(37), Fmt(gCostPointsRT, 0) + " pts", TText, 10, "Segoe UI Semibold", SF_FW_SEMI);
+        Text(pad + SC(12) + col, y + SC(26), "COMMISSION", TTextDim, 7);
+        Text(pad + SC(12) + col, y + SC(37), Fmt(gCostPointsRT, 0) + " pts", TText, 10, "Segoe UI Semibold", SF_FW_SEMI);
 
-      Text(pad + SC(12) + col * 2, y + SC(26), "ROUND TURN", TTextDim, 7);
-      Text(pad + SC(12) + col * 2, y + SC(37), Fmt(cost, 0) + " pts", costCol, 10, "Segoe UI Semibold", SF_FW_SEMI);
+        Text(pad + SC(12) + col * 2, y + SC(26), "ROUND TURN", TTextDim, 7);
+        Text(pad + SC(12) + col * 2, y + SC(37), Fmt(cost, 0) + " pts", costCol, 10, "Segoe UI Semibold", SF_FW_SEMI);
 
-      Text(pad + SC(12), y + SC(57), "COST / ATR(" + IntegerToString(ATRLength) + ")", TTextDim, 7);
-      TextRight(pad + innerW - SC(12), y + SC(57), Fmt(costPct * 100.0, 1) + "% of ATR", costCol, 7,
-                "Segoe UI Semibold", SF_FW_SEMI);
-      Meter(pad + SC(12), y + SC(72), innerW - SC(24), SC(8), costPct * 4.0, costCol, TGridC);
-      y += costH + SC(8);
+        Text(pad + SC(12), y + SC(57), "COST / ATR(" + IntegerToString(ATRLength) + ")", TTextDim, 7);
+        TextRight(pad + innerW - SC(12), y + SC(57), Fmt(costPct * 100.0, 1) + "% of ATR", costCol, 7,
+                  "Segoe UI Semibold", SF_FW_SEMI);
+        Meter(pad + SC(12), y + SC(72), innerW - SC(24), SC(8), costPct * 4.0, costCol, TGridC);
+        y += costH + SC(8);
+        }
 
-      //---------- account / risk chips ----------
-      int chipH = SC(40), chipW = (innerW - SC(8)) / 2;
-      double eq = AccountEquity(), bal = AccountBalance();
-      double flt = eq - bal;
-      DrawChip(pad, y, chipW, chipH, "BALANCE", "$" + Fmt(bal, 2), TText, TAccent);
-      DrawChip(pad + chipW + SC(8), y, chipW, chipH, "EQUITY", "$" + Fmt(eq, 2),
-               flt >= 0 ? TBull : TBear, TAccent2);
-      y += chipH + SC(6);
-      DrawChip(pad, y, chipW, chipH, "FLOATING P/L", Signed(flt, 2),
-               flt > 0 ? TBull : (flt < 0 ? TBear : TText), flt >= 0 ? TBull : TBear);
-      DrawChip(pad + chipW + SC(8), y, chipW, chipH, "DAY P/L",
-               Signed(DayPnLPercent(), 2) + "%",
-               DayPnLPercent() >= 0 ? TBull : TBear, TAccent);
-      y += chipH + SC(8);
+      //---------- account / equity chips ----------
+      if(ShowPerformancePanel)
+        {
+        int chipH = SC(40), chipW = (innerW - SC(8)) / 2;
+        double eq = AccountEquity(), bal = AccountBalance();
+        double flt = eq - bal;
+        DrawChip(pad, y, chipW, chipH, "BALANCE", "$" + Fmt(bal, 2), TText, TAccent);
+        DrawChip(pad + chipW + SC(8), y, chipW, chipH, "EQUITY", "$" + Fmt(eq, 2),
+                 flt >= 0 ? TBull : TBear, TAccent2);
+        y += chipH + SC(6);
+        DrawChip(pad, y, chipW, chipH, "FLOATING P/L", Signed(flt, 2),
+                 flt > 0 ? TBull : (flt < 0 ? TBear : TText), flt >= 0 ? TBull : TBear);
+        DrawChip(pad + chipW + SC(8), y, chipW, chipH, "DAY P/L",
+                 Signed(DayPnLPercent(), 2) + "%",
+                 DayPnLPercent() >= 0 ? TBull : TBear, TAccent);
+        y += chipH + SC(8);
+        }
 
-      //---------- risk console ----------
-      int riskH = SC(112);
-      RaisedPlate(pad, y, innerW, riskH, SC(10), TPanel, TBorder);
-      AccentSpine(pad + SC(4), y + SC(7), SC(13), TFlat);
-      Text(pad + SC(13), y + SC(6), "RISK CONSOLE", TText, 8, "Segoe UI Black", SF_FW_BLACK);
+      //---------- execution console ----------
+      if(ShowRiskPanel)
+        {
+        // The original strategy carries no daily budget, so this panel reports
+        // what the EA is actually configured to do on the next fill.
+        int riskH = SC(112);
+        RaisedPlate(pad, y, innerW, riskH, SC(10), TPanel, TBorder);
+        AccentSpine(pad + SC(4), y + SC(7), SC(13), TFlat);
+        Text(pad + SC(13), y + SC(6), "EXECUTION CONSOLE", TText, 8, "Segoe UI Black", SF_FW_BLACK);
 
-      double dl = (DailyLossLimitPercent > 0) ? MathMax(0.0, -DayPnLPercent()) / DailyLossLimitPercent : 0;
-      double dp = (DailyProfitTargetPct  > 0) ? MathMax(0.0,  DayPnLPercent()) / DailyProfitTargetPct  : 0;
-      double tr = (MaxTradesPerDay > 0) ? (double)gDayTrades / MaxTradesPerDay : 0;
+        string slTxt = (StopLossMode == SL_By_ATR)
+                       ? ("ATR x " + Fmt(StopLossATR, 2))
+                       : ("RISK " + Fmt(RiskPercent, 2) + "%");
+        string tpTxt = (TakeProfitMode == TP_By_ATR)
+                       ? ("ATR x " + Fmt(TakeProfitATR, 2))
+                       : (Fmt(TakeProfitPoints, 0) + " pts");
 
-      Text(pad + SC(12), y + SC(26), "DAILY LOSS BUDGET", TTextDim, 7);
-      TextRight(pad + innerW - SC(12), y + SC(26), Fmt(dl * 100, 0) + "%", dl > 0.7 ? TBear : TText, 7,
-                "Segoe UI Semibold", SF_FW_SEMI);
-      Meter(pad + SC(12), y + SC(39), innerW - SC(24), SC(7), dl, dl > 0.7 ? TBear : TFlat, TGridC);
+        Text(pad + SC(12), y + SC(26), "STOP LOSS", TTextDim, 7);
+        TextRight(pad + innerW - SC(12), y + SC(26), slTxt, TText, 7, "Segoe UI Semibold", SF_FW_SEMI);
 
-      Text(pad + SC(12), y + SC(54), "DAILY TARGET", TTextDim, 7);
-      TextRight(pad + innerW - SC(12), y + SC(54), Fmt(dp * 100, 0) + "%", TBull, 7, "Segoe UI Semibold", SF_FW_SEMI);
-      Meter(pad + SC(12), y + SC(67), innerW - SC(24), SC(7), dp, TBull, TGridC);
+        Text(pad + SC(12), y + SC(42), "TAKE PROFIT", TTextDim, 7);
+        TextRight(pad + innerW - SC(12), y + SC(42), tpTxt, TText, 7, "Segoe UI Semibold", SF_FW_SEMI);
 
-      Text(pad + SC(12), y + SC(82), "TRADES TODAY  " + IntegerToString(gDayTrades) + " / " +
-           IntegerToString(MaxTradesPerDay), TTextDim, 7);
-      TextRight(pad + innerW - SC(12), y + SC(82), "STREAK " + IntegerToString(gConsecLosses) + "L",
-                gConsecLosses > 0 ? TBear : TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
-      Meter(pad + SC(12), y + SC(95), innerW - SC(24), SC(7), tr, TAccent2, TGridC);
-      y += riskH + SC(8);
+        Text(pad + SC(12), y + SC(58), "TRAILING", TTextDim, 7);
+        TextRight(pad + innerW - SC(12), y + SC(58),
+                  EnableTrailingStop ? (Fmt(TrailingStartPoints, 0) + " / " +
+                                        Fmt(TrailingDistancePoints, 0) + " pts")
+                                     : "OFF",
+                  EnableTrailingStop ? TBull : TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
+
+        Text(pad + SC(12), y + SC(76), "LOTS  " + Fmt(FixedLots, 2), TTextDim, 7);
+        TextRight(pad + innerW - SC(12), y + SC(76),
+                  "TRADES TODAY " + IntegerToString(gDayTrades), TTextDim, 7,
+                  "Segoe UI Semibold", SF_FW_SEMI);
+
+        // spread headroom against the only hard gate v1 enforces
+        double sprUse = (MaximumSpreadPoints > 0)
+                        ? SpreadPoints() / (double)MaximumSpreadPoints : 0.0;
+        Meter(pad + SC(12), y + SC(93), innerW - SC(24), SC(7), sprUse,
+              sprUse > 0.9 ? TBear : (sprUse > 0.6 ? TFlat : TBull), TGridC);
+        y += riskH + SC(8);
+        }
 
       //---------- live trade ticket ----------
-      int type = -1, ticket = -1;
-      int open = CountOwnPositions(type, ticket);
-      int tkH = SC(74);
-      RaisedPlate(pad, y, innerW, tkH, SC(10), TPanel, TBorder);
-      if(open > 0 && OrderSelect(ticket, SELECT_BY_TICKET))
+      if(ShowTradePanel)
         {
-         uint sideC = (OrderType() == OP_BUY) ? TBull : TBear;
-         string side = (OrderType() == OP_BUY) ? "LONG" : "SHORT";
-         RoundRect(pad + SC(10), y + SC(10), SC(56), SC(20), SC(5), sideC, sideC);
-         TextCenter(pad + SC(38), y + SC(13), side, A(C'6,10,18',255), 8, "Segoe UI Black", SF_FW_BLACK);
-         Text(pad + SC(74), y + SC(12), Fmt(OrderLots(), 2) + " lots @ " + Fmt(OrderOpenPrice(), gDigits),
-              TText, 8, "Segoe UI Semibold", SF_FW_SEMI);
-         double pnl = OrderProfit() + OrderSwap() + OrderCommission();
-         TextRight(pad + innerW - SC(12), y + SC(11), Signed(pnl, 2),
-                   pnl >= 0 ? TBull : TBear, 11, "Segoe UI Black", SF_FW_BLACK);
-         int c3 = (innerW - SC(20)) / 3;
-         Text(pad + SC(12),          y + SC(38), "SL", TTextDim, 7);
-         Text(pad + SC(12),          y + SC(48), OrderStopLoss() > 0 ? Fmt(OrderStopLoss(), gDigits) : "--", TBear, 8);
-         Text(pad + SC(12) + c3,     y + SC(38), "TP", TTextDim, 7);
-         Text(pad + SC(12) + c3,     y + SC(48), OrderTakeProfit() > 0 ? Fmt(OrderTakeProfit(), gDigits) : "--", TBull, 8);
-         Text(pad + SC(12) + c3 * 2, y + SC(38), "BREAK-EVEN", TTextDim, 7);
-         Text(pad + SC(12) + c3 * 2, y + SC(48),
-              Fmt(BreakEvenPrice(OrderType(), OrderOpenPrice(), OrderLots()), gDigits), TAccent, 8);
+        int type = -1, ticket = -1;
+        int open = CountOwnPositions(type, ticket);
+        int tkH = SC(74);
+        RaisedPlate(pad, y, innerW, tkH, SC(10), TPanel, TBorder);
+        if(open > 0 && OrderSelect(ticket, SELECT_BY_TICKET))
+          {
+           uint sideC = (OrderType() == OP_BUY) ? TBull : TBear;
+           string side = (OrderType() == OP_BUY) ? "LONG" : "SHORT";
+           RoundRect(pad + SC(10), y + SC(10), SC(56), SC(20), SC(5), sideC, sideC);
+           TextCenter(pad + SC(38), y + SC(13), side, A(C'6,10,18',255), 8, "Segoe UI Black", SF_FW_BLACK);
+           Text(pad + SC(74), y + SC(12), Fmt(OrderLots(), 2) + " lots @ " + Fmt(OrderOpenPrice(), gDigits),
+                TText, 8, "Segoe UI Semibold", SF_FW_SEMI);
+           double pnl = OrderProfit() + OrderSwap() + OrderCommission();
+           TextRight(pad + innerW - SC(12), y + SC(11), Signed(pnl, 2),
+                     pnl >= 0 ? TBull : TBear, 11, "Segoe UI Black", SF_FW_BLACK);
+           int c3 = (innerW - SC(20)) / 3;
+           Text(pad + SC(12),          y + SC(38), "SL", TTextDim, 7);
+           Text(pad + SC(12),          y + SC(48), OrderStopLoss() > 0 ? Fmt(OrderStopLoss(), gDigits) : "--", TBear, 8);
+           Text(pad + SC(12) + c3,     y + SC(38), "TP", TTextDim, 7);
+           Text(pad + SC(12) + c3,     y + SC(48), OrderTakeProfit() > 0 ? Fmt(OrderTakeProfit(), gDigits) : "--", TBull, 8);
+           Text(pad + SC(12) + c3 * 2, y + SC(38), "BREAK-EVEN", TTextDim, 7);
+           Text(pad + SC(12) + c3 * 2, y + SC(48),
+                Fmt(BreakEvenPrice(OrderType(), OrderOpenPrice(), OrderLots()), gDigits), TAccent, 8);
         }
       else
         {
          TextCenter(pad + innerW / 2, y + SC(16), "NO OPEN POSITION", TTextDim, 9, "Segoe UI Semibold", SF_FW_SEMI);
-         TextCenter(pad + innerW / 2, y + SC(34), "SESSION: " + ActiveSessionName() +
+         TextCenter(pad + innerW / 2, y + SC(34),
+                    (RequireAllEnabledIndicatorsToAlign ? "ALL-ALIGN" : "ANY-ALIGN") +
                     "   ·   " + (gBlockReason == "" ? "SCANNING" : gBlockReason), TTextDim, 7);
          double atrNow = ATRPoints(1);
          TextCenter(pad + innerW / 2, y + SC(50), "ATR " + Fmt(atrNow, 0) + " pts   ·   REGIME " +
                     Fmt(ATRRatio(1), 2) + "x", TTextDim, 7);
         }
       y += tkH + SC(8);
+        }
 
       //---------- control strip ----------
       int bw = (innerW - SC(16)) / 3;
@@ -2124,14 +1595,17 @@ void PaintHud()
       SunkenWell(pad, y, innerW, SC(26), SC(6), TBg2);
       TextVC(pad + SC(10), y, SC(26), "FILTER", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
       TextVC(pad + SC(142), y, SC(26), "BIAS", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-      TextVC(pad + SC(212), y, SC(26), "WGT", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-      TextRight(pad + innerW - SC(10), y + SC(9), "CONTRIBUTION", TAccent, 7,
+      TextVC(pad + SC(212), y, SC(26), "VOTE", TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
+      TextRight(pad + innerW - SC(10), y + SC(9), "AGREEMENT", TAccent, 7,
                 "Segoe UI Black", SF_FW_BLACK);
       y += SC(30);
 
-      double totalW = 0;
-      for(int i = 0; i < SF_FILTERS; i++) if(gEnabled[i]) totalW += gWeight[i];
-      if(totalW <= 0) totalW = 1;
+      // Every enabled filter is one equal vote in the original strategy,
+      // so each active row carries the same share of the decision.
+      int votes = 0;
+      for(int i = 0; i < SF_FILTERS; i++) if(gEnabled[i]) votes++;
+      if(votes <= 0) votes = 1;
+      double share = 1.0 / votes;
 
       int rowH = SC(27);
       for(int i = 0; i < SF_FILTERS; i++)
@@ -2162,18 +1636,19 @@ void PaintHud()
          TextCenterVC(bX + bW / 2, bY, bH, bias, A(C'255,255,255',255), 7,
                       "Segoe UI Black", SF_FW_BLACK);
 
-         TextVC(pad + SC(216), y, cellH, Fmt(gWeight[i], 1),
+         TextVC(pad + SC(216), y, cellH,
+                gEnabled[i] ? (Fmt(share * 100.0, 0) + "%") : "--",
                 gEnabled[i] ? TText : TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
 
-         // contribution bar, colour graded by this filter's share of the vote
-         double share = gEnabled[i] ? gWeight[i] / totalW : 0;
-         double norm  = MathMin(1.0, share * 2.5);
+         // AGREEMENT bar: full when this filter votes with the current signal
          int barX = pad + SC(248), barW = innerW - SC(260);
          if(!gEnabled[i]) Meter(barX, y + (cellH - SC(7)) / 2, barW, SC(7), 0, TGridC, TGridC);
          else
            {
+            bool sides = (gBull[i] && gLongSignal) || (gBear[i] && gShortSignal);
+            double fill = (gBull[i] || gBear[i]) ? (sides ? 1.0 : 0.55) : 0.12;
             uint strongC = gBull[i] ? TBull : (gBear[i] ? TBear : TFlat);
-            MeterGraded(barX, y + (cellH - SC(7)) / 2, barW, SC(7), norm, strongC, TGridC);
+            MeterGraded(barX, y + (cellH - SC(7)) / 2, barW, SC(7), fill, strongC, TGridC);
            }
          y += rowH;
         }
@@ -2434,13 +1909,14 @@ void BuildHistoricalOrbs()
    if(!DrawSignalOrbs || gSignalHistoryBuilt != 0) return;
    int maxBars = MathMax(10, MathMin(SignalHistoryBars, Bars - 5));
    int bull[SF_FILTERS], bear[SF_FILTERS];
+   ArrayInitialize(bull, 0); ArrayInitialize(bear, 0);
    bool prevL = false, prevS = false;
+   // walk oldest -> newest so the incremental supertrend cache stays in step
    for(int shift = maxBars + 1; shift >= 1; shift--)
      {
-      EvaluateFilters(shift, bull, bear);
-      double sc = ConfluenceScore(bull, bear);
+      GetConditions(shift, bull, bear);
       bool l = false, s = false;
-      ResolveSignal(bull, bear, sc, l, s);
+      CombinedSignal(bull, bear, l, s);
       if(shift <= maxBars)
         {
          if(l && !prevL) DrawOrb(true, shift);
@@ -2533,37 +2009,19 @@ void BuildSTSeries(int maxShift, double &line[], int &dir[])
      }
   }
 
-void BuildVWAPSeries(int maxShift, double &vw[])
-  {
-   ArrayResize(vw, maxShift + 2);
-   ArrayInitialize(vw, EMPTY_VALUE);
-   double pv = 0, vol = 0;
-   datetime curDay = 0;
-   int oldest = MathMin(Bars - 2, maxShift + 1);
-   for(int i = oldest; i >= 0; i--)
-     {
-      datetime day = DayStart(Time[i]);
-      if(day != curDay) { curDay = day; pv = 0; vol = 0; }   // reset each session
-      double typical = (High[i] + Low[i] + Close[i]) / 3.0;
-      double v = (double)MathMax(1, Volume[i]);
-      pv += typical * v; vol += v;
-      vw[i] = (vol > 0) ? pv / vol : Close[i];
-     }
-  }
-
 void DrawOverlay()
   {
    ObjectsDeleteAll(0, PFX + "OV_");
    if(!DrawIndicatorOverlay) return;
    int bars = MathMax(10, MathMin(OverlayBars, Bars - 5));
 
-   if(gEnabled[6])   // EMA pair
+   if(gEnabled[0])   // SMA cross
       for(int s = bars; s >= 1; s--)
         {
-         PlotSegment(6,0,s, iMA(NULL,0,EMAFastLength,0,MODE_EMA,PRICE_CLOSE,s+1),
-                            iMA(NULL,0,EMAFastLength,0,MODE_EMA,PRICE_CLOSE,s), C'0,229,255', 1);
-         PlotSegment(6,1,s, iMA(NULL,0,EMASlowLength,0,MODE_EMA,PRICE_CLOSE,s+1),
-                            iMA(NULL,0,EMASlowLength,0,MODE_EMA,PRICE_CLOSE,s), C'150,100,255', 1);
+         PlotSegment(0,0,s, iMA(NULL,0,SMAFastLength,0,MODE_SMA,PRICE_CLOSE,s+1),
+                            iMA(NULL,0,SMAFastLength,0,MODE_SMA,PRICE_CLOSE,s), C'120,200,255', 1);
+         PlotSegment(0,1,s, iMA(NULL,0,SMASlowLength,0,MODE_SMA,PRICE_CLOSE,s+1),
+                            iMA(NULL,0,SMASlowLength,0,MODE_SMA,PRICE_CLOSE,s), C'170,130,255', 1);
         }
 
    if(gEnabled[3])   // Supertrend - one pass
@@ -2575,44 +2033,30 @@ void DrawOverlay()
             PlotSegment(3,0,s, stl[s+1], stl[s], std[s] == -1 ? C'0,230,160' : C'255,70,102', 2);
      }
 
-   if(gEnabled[13])  // VWAP - one pass
-     {
-      double vw[];
-      BuildVWAPSeries(bars, vw);
+   if(gEnabled[5])   // Bollinger midline
       for(int s = bars; s >= 1; s--)
-         if(vw[s] != EMPTY_VALUE && vw[s+1] != EMPTY_VALUE)
-            PlotSegment(13,0,s, vw[s+1], vw[s], C'255,206,84', 1);
-     }
+         PlotSegment(5,0,s, iMA(NULL,0,BollingerLength,0,MODE_SMA,PRICE_CLOSE,s+1),
+                            iMA(NULL,0,BollingerLength,0,MODE_SMA,PRICE_CLOSE,s), C'255,206,84', 1);
 
-   if(gEnabled[12])  // structure channel
+   if(gEnabled[6])   // EMA pair
       for(int s = bars; s >= 1; s--)
         {
-         int look = MathMax(3, StructureLookback);
-         PlotSegment(12,0,s, DonchianHigh(s+1,look), DonchianHigh(s,look), C'90,120,180', 1);
-         PlotSegment(12,1,s, DonchianLow(s+1,look),  DonchianLow(s,look),  C'90,120,180', 1);
+         PlotSegment(6,0,s, iMA(NULL,0,EMAFastLength,0,MODE_EMA,PRICE_CLOSE,s+1),
+                            iMA(NULL,0,EMAFastLength,0,MODE_EMA,PRICE_CLOSE,s), C'0,229,255', 1);
+         PlotSegment(6,1,s, iMA(NULL,0,EMASlowLength,0,MODE_EMA,PRICE_CLOSE,s+1),
+                            iMA(NULL,0,EMASlowLength,0,MODE_EMA,PRICE_CLOSE,s), C'150,100,255', 1);
         }
+
+   if(gEnabled[8])   // Parabolic SAR
+      for(int s = bars; s >= 1; s--)
+         PlotSegment(8,0,s, iSAR(NULL,0,SARStep,SARMaximum,s+1),
+                            iSAR(NULL,0,SARStep,SARMaximum,s), C'90,120,180', 1);
   }
 
 // ---- SOLID RAISED RESULT CARDS ----------------------------------------
 // Each closed trade gets a multi-line card anchored at its close, built from
 // stacked OBJ_RECTANGLE_LABEL rows (BORDER_RAISED) so it is legible on any
 // chart background - far more informative than the old one-line price tag.
-// Commission actually charged for a trade. Brokers (and the Strategy Tester
-// when no commission is configured in the symbol settings) frequently report
-// OrderCommission() == 0. Falling back to the configured Raw Spread rate keeps
-// the cost story honest instead of printing a flattering "FEE -0.00".
-// `estimated` tells the caller the number was derived, not reported, so the
-// card can mark it with a ~ rather than pass an estimate off as fact.
-double TradeCommissionUSD(double lots, double reported, bool &estimated)
-  {
-   estimated = false;
-   double c = MathAbs(reported);
-   if(c > 0.0) return c;
-   if(lots <= 0.0) return 0.0;
-   estimated = true;
-   return CommissionPer001LotRT * (lots / 0.01);
-  }
-
 // ======================================================================
 //  ON-CHART TRADE CARDS
 //  A card is born the moment a trade OPENS (entry / TP / SL / live P&L),
@@ -2993,37 +2437,50 @@ void ApplySkin()
 //==================================================================//
 //              E N T R Y   G A T E                                 //
 //==================================================================//
+// The original strategy had no risk layer: the only pre-trade checks were
+// the spread cap (inside OpenPosition) and the manual pause. Everything
+// else - sessions, daily loss caps, equity kill-switch, cooldowns - was a
+// v2 addition and has been removed at the user's request.
 bool MayOpenNewTrade(string &why)
   {
    why = "";
-   if(gPaused)  { why = "PAUSED";  return false; }
-   if(gHalted)  { why = gHaltReason; return false; }
-   if(InCooldown())
-     {
-      why = "COOLDOWN " + IntegerToString((int)((gCooldownUntil - TimeCurrent()) / 60)) + "m";
-      return false;
-     }
+   if(gPaused)                { why = "PAUSED";            return false; }
    if(!IsTradeAllowed())      { why = "TRADE NOT ALLOWED"; return false; }
    if(IsTradeContextBusy())   { why = "CONTEXT BUSY";      return false; }
-
-   string sw = "";
-   if(!SessionAllows(sw)) { why = sw; return false; }
-   if(!VolatilityAllows(TradeOnClosedBar ? 1 : 0, sw)) { why = sw; return false; }
-
-   double sp = SpreadPoints();
-   if(MaxSpreadPoints > 0 && sp > MaxSpreadPoints)
-     { why = "SPREAD " + Fmt(sp, 0) + "p"; return false; }
-   if(UseAdaptiveSpreadCap && gSpreadCount >= 20 && gMedianSpread > 0 &&
-      sp > gMedianSpread * AdaptiveSpreadFactor)
-     { why = "SPREAD SPIKE"; return false; }
-
-   if(MinBarsBetweenTrades > 0 && gLastTradeBar > 0)
-     {
-      int barsSince = iBarShift(Symbol(), Period(), gLastTradeBar, false);
-      if(barsSince < MinBarsBetweenTrades)
-        { why = "COOLING " + IntegerToString(MinBarsBetweenTrades - barsSince) + "b"; return false; }
-     }
    return true;
+  }
+
+//==================================================================//
+//              F I L T E R   R E G I S T R Y                       //
+//==================================================================//
+// The 11 original filters, in the exact index order GetConditions() writes.
+// Index 3 is Supertrend - the only one enabled by default, which is what
+// makes the shipped configuration the original Supertrend strategy.
+void LoadFilterConfig()
+  {
+   gFilterName[0]  = "SMA CROSS";
+   gFilterName[1]  = "RSI";
+   gFilterName[2]  = "MACD";
+   gFilterName[3]  = "SUPERTREND";
+   gFilterName[4]  = "STOCHASTIC";
+   gFilterName[5]  = "BOLLINGER MID";
+   gFilterName[6]  = "EMA CROSS";
+   gFilterName[7]  = "AWESOME OSC";
+   gFilterName[8]  = "PARABOLIC SAR";
+   gFilterName[9]  = "CCI";
+   gFilterName[10] = "ADX / DI";
+
+   gEnabled[0]  = EnableSMA;
+   gEnabled[1]  = EnableRSI;
+   gEnabled[2]  = EnableMACD;
+   gEnabled[3]  = EnableSupertrend;
+   gEnabled[4]  = EnableStochastic;
+   gEnabled[5]  = EnableBollinger;
+   gEnabled[6]  = EnableEMA;
+   gEnabled[7]  = EnableAO;
+   gEnabled[8]  = EnableSAR;
+   gEnabled[9]  = EnableCCI;
+   gEnabled[10] = EnableADX;
   }
 
 //==================================================================//
@@ -3035,7 +2492,6 @@ int OnInit()
    CacheSymbolSpec();
    RecalcCostPoints();
    LoadFilterConfig();
-   ParseBlackout();
 
    gBuyOrb  = "::SFP_BUY_"  + IntegerToString((int)ChartID());
    gSellOrb = "::SFP_SELL_" + IntegerToString((int)ChartID());
@@ -3046,7 +2502,7 @@ int OnInit()
 
    gDayStamp       = DayStart(TimeCurrent());
    gDayStartEquity = AccountEquity();
-   gDayPeakEquity  = AccountEquity();
+   gLastHistoryCount = -1;
 
    if(HudInteractive) ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, true);
    if(!IsTesting() || IsVisualMode()) ApplySkin();
@@ -3056,7 +2512,7 @@ int OnInit()
       Print("[SF-PRO] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("SF-PRO v2.04 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("SF-PRO v2.05 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
    gLastBar = 0;
    return INIT_SUCCEEDED;
@@ -3084,7 +2540,7 @@ void OnDeinit(const int reason)
 //==================================================================//
 void OnTimer()
   {
-   UpdateGuardians();
+   RollDailyCounters();
    TrackClosedTrades();
    DrawTradeLevelLines();
    DrawResultPills();
@@ -3167,35 +2623,19 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 //==================================================================//
 void OnTick()
   {
-   if(Bars < 200) return;
+   // ---- ORIGINAL v1 FLOW -----------------------------------------
+   // trailing first, then graphics, then the closed-bar decision.
+   ManageTrailing();
+   if(Bars < 100) return;
 
    PushSpreadSample();
-   UpdateGuardians();
    TrackClosedTrades();
-   ManageOpenTrades();
 
    bool graphics = (!IsTesting() || IsVisualMode());
 
-   //--- weekend / session flattening ---------------------------------
-   MqlDateTime now; TimeToStruct(TimeCurrent(), now);
-   int openType = -1, openTicket = -1;
-   int openCount = CountOwnPositions(openType, openTicket);
-   if(openCount > 0)
-     {
-      if(CloseBeforeWeekend && now.day_of_week == 5 && now.hour >= FridayCloseHour)
-         CloseAllOwn("WEEKEND FLATTEN");
-      else if(FlattenAtSessionEnd && UseSessionFilter && ActiveSessionName() == "CLOSED")
-         CloseAllOwn("SESSION END FLATTEN");
-      else if(gHalted && gHaltReason == "EQUITY DRAWDOWN")
-         CloseAllOwn("KILL SWITCH");
-     }
-
-   //--- bar gate ------------------------------------------------------
+   //--- intrabar repaint ------------------------------------------
    if(Time[0] == gLastBar)
      {
-      // The live card shows running P&L, so it has to follow price on every
-      // tick - not only when a new bar forms. In the tester OnTimer() never
-      // fires, so this is also the tester's only repaint path.
       if(graphics)
         {
          uint tnow = GetTickCount();
@@ -3205,29 +2645,32 @@ void OnTick()
       return;
      }
    gLastBar = Time[0];
+   RollDailyCounters();
 
    int shift = TradeOnClosedBar ? 1 : 0;
 
-   //--- evaluate confluence -------------------------------------------
+   //--- evaluate the 11 filters on this bar and the one before -----
    int bull[SF_FILTERS], bear[SF_FILTERS];
-   EvaluateFilters(shift, bull, bear);
+   int pbull[SF_FILTERS], pbear[SF_FILTERS];
+   ArrayInitialize(bull, 0);  ArrayInitialize(bear, 0);
+   ArrayInitialize(pbull, 0); ArrayInitialize(pbear, 0);
+   GetConditions(shift,     bull,  bear);
+   GetConditions(shift + 1, pbull, pbear);
    for(int i = 0; i < SF_FILTERS; i++) { gBull[i] = bull[i]; gBear[i] = bear[i]; }
 
+   CombinedSignal(bull,  bear,  gLongSignal, gShortSignal);
+   bool prevLong = false, prevShort = false;
+   CombinedSignal(pbull, pbear, prevLong,    prevShort);
+
+   // v1 fires only on the bar the combined signal first turns true
+   bool enterLong  = gLongSignal  && !prevLong;
+   bool enterShort = gShortSignal && !prevShort;
+
+   // agreement figure drives the HUD gauge (v1 has no weighted score)
    gPrevScore = gScore;
-   gScore = ConfluenceScore(bull, bear);
-   ResolveSignal(bull, bear, gScore, gLongSignal, gShortSignal);
+   gScore = AgreementScore(bull, bear, gAgreeBull, gAgreeBear, gAgreeOn);
 
-   //--- previous bar state for a fresh-cross test ----------------------
-   int pbull[SF_FILTERS], pbear[SF_FILTERS];
-   EvaluateFilters(shift + 1, pbull, pbear);
-   double prevScore = ConfluenceScore(pbull, pbear);
-   bool prevL = false, prevS = false;
-   ResolveSignal(pbull, pbear, prevScore, prevL, prevS);
-
-   bool enterLong  = gLongSignal  && (!RequireFreshCross || !prevL);
-   bool enterShort = gShortSignal && (!RequireFreshCross || !prevS);
-
-   //--- visuals --------------------------------------------------------
+   //--- visuals ----------------------------------------------------
    if(graphics)
      {
       BuildHistoricalOrbs();
@@ -3236,30 +2679,30 @@ void OnTick()
       if(DrawSignalOrbs && enterShort) DrawOrb(false, shift);
      }
 
-   //--- flip on opposite signal ----------------------------------------
-   openCount = CountOwnPositions(openType, openTicket);
+   //--- flip out on the opposite signal ----------------------------
+   int curType = -1, curTicket = -1;
+   int openCount = CountOwnPositions(curType, curTicket);
    if(CloseOnOppositeSignal && openCount > 0)
      {
-      if((openType == OP_BUY && gShortSignal) || (openType == OP_SELL && gLongSignal))
-         if(CloseAllOwn("OPPOSITE SIGNAL"))
-            openCount = 0;
+      if((curType == OP_BUY && gShortSignal) || (curType == OP_SELL && gLongSignal))
+         if(CloseAllOwn("OPPOSITE SIGNAL")) openCount = 0;
      }
 
-   //--- entry ----------------------------------------------------------
+   //--- entry ------------------------------------------------------
    string why = "";
    if(MayOpenNewTrade(why))
      {
       gBlockReason = "";
-      if(!OnePositionOnly || openCount == 0)
+      if((!OnePositionOnly || openCount == 0) && !(enterLong && enterShort))
         {
-         if(enterLong && !enterShort)       OpenTrade(OP_BUY,  shift);
-         else if(enterShort && !enterLong)  OpenTrade(OP_SELL, shift);
+         if(enterLong)       OpenPosition(OP_BUY);
+         else if(enterShort) OpenPosition(OP_SELL);
         }
-      else if(enterLong || enterShort) gBlockReason = "POSITION OPEN";
+      else if((enterLong || enterShort) && openCount > 0) gBlockReason = "POSITION OPEN";
      }
    else gBlockReason = why;
 
-   //--- repaint --------------------------------------------------------
+   //--- repaint ----------------------------------------------------
    if(graphics)
      {
       DrawTradeLevelLines();
