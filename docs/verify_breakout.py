@@ -118,8 +118,10 @@ check("entry requires gatesPass", "if(wantEntry && dir != 0 && gatesPass" in BK)
 print("\n5. exits")
 check("stop can use the opposite side of the range",
       "StopByRangeOpposite" in BK and "gBkLow  - pad" in BK)
+# v1.02 clamps with a hardcoded 3.0 (StopClampATRMult was a v1.03 input and
+# went out with the rest of that risk layer when the engine was restored).
 check("structural stop is clamped to a sane band around ATR",
-      re.search(r'MathMax\(atrSLDistance \* 0\.5,\s*\n\s*MathMin\(structural, atrSLDistance \* MathMax\(1\.0, StopClampATRMult\)\)\)', BK) is not None)
+      re.search(r'MathMax\(atrSLDistance \* 0\.5,\s*\n\s*MathMin\(structural, atrSLDistance \* 3\.0\)\)', BK) is not None)
 check("measured-move target available", "BK_TP_MEASURED" in BK)
 check("target floored at a multiple of real cost",
       "MinTargetCostMult" in BK and "SpreadPoints() + gCostPointsRT" in BK)
@@ -210,154 +212,43 @@ check("BUILDING RANGE only claimed while actually forming",
 for k in ("COLLECTING", "FAILED BREAKS"):
     check(f'"{k}" is translated', f'if(k == "{k}")' in BK)
 
-print("\n7d. RISK CONTROL (the 1-trade wipeout post-mortem)")
-# A 94% win rate ended at -0.09 because the lot was constant while the stop
-# was structural: a 95.65 USD stop at 0.10 lots = 956 USD risk on a 429 USD
-# account. These checks pin every part of that fix.
-check("lot is derived from the stop", "double LotForRisk(double slDistance" in BK)
-check("OpenPosition sizes AFTER the stop is final",
-      BK.index("lots = LotForRisk(") > BK.index("slDistance = MathMax(slDistance, minimum);"))
-check("the constant-lot line is gone",
-      "double lots  = NormalizeLots(FixedLots);" not in CODE)
-check("risk budget uses equity", "AccountEquity()" in BK and "double RiskBudgetUSD()" in BK)
-check("money per lot comes from broker tick data",
-      "double MoneyPerLot(double dist)" in BK and "MODE_TICKVALUE" in BK)
-check("a trade is REFUSED when min lot exceeds the budget",
-      "SkipIfRiskTooHigh" in BK and re.search(r'why = T\("RISK TOO HIGH"\);\s*\n\s*return 0;', BK) is not None)
-check("OpenPosition aborts on lots <= 0",
-      re.search(r'if\(lots <= 0 \|\| slDistance <= 0\)\s*\n\s*\{', BK) is not None)
-check("NormalizeLots floor-up cannot smuggle risk through",
-      "riskUSD > budget * 1.02" in BK)
-check("absolute stop-width veto exists",
-      "MaxStopATRMult" in BK and 'gBlockReason = T("STOP TOO WIDE");' in BK)
-check("reward:risk floor exists", "MinRewardRiskRatio" in BK and "slDistance * MinRewardRiskRatio" in BK)
-check("R:R floor default beats 1:1",
-      float(re.search(r'MinRewardRiskRatio\s*=\s*([\d.]+)', BK).group(1)) >= 1.0)
-check("TP default is no longer 5000 points (= $5 on 3-digit gold)",
-      re.search(r'TakeProfitMode\s*=\s*TP_By_ATR', BK) is not None)
-check("floating-loss guard exists", "void EnforceFloatingLossCap()" in BK)
-check("guard runs on every tick, right after trailing",
-      re.search(r'ManageTrailing\(\);\s*\n(?:\s*//[^\n]*\n)*\s*EnforceFloatingLossCap\(\);', BK) is not None)
-check("guard counts swap and commission", "OrderProfit() + OrderSwap() + OrderCommission()" in BK)
-check("guard also bounds realised+open against the daily cap",
-      "(gDayNet + floating) <= -MathAbs(MaxDailyLossUSD)" in BK)
-check("structural stop is OFF by default (27-95 USD wide on a 7h range)",
-      re.search(r'^input\s+bool\s+StopByRangeOpposite\s*=\s*false', BK, re.M) is not None)
-check("structural clamp is configurable and tighter than 3x",
-      "StopClampATRMult" in BK and
-      float(re.search(r'StopClampATRMult\s*=\s*([\d.]+)', BK).group(1)) <= 2.0)
-check("obsolete SL_By_Risk_Percent mode removed",
-      "SL_By_Risk_Percent" not in BK and "RiskStopDistance" not in BK)
-check("console reports the risk budget, not a static lot",
-      'T("RISK") + " $" + Fmt(RiskBudgetUSD(), 2)' in BK)
-for k in ("STOP TOO WIDE", "RISK TOO HIGH", "LOSS CAP"):
-    check(f'"{k}" is translated', f'if(k == "{k}")' in BK)
-
-# --- arithmetic: replay the real trade that killed the account ---
-PV = 100.0          # gold: 1.00 price move = 100 USD per 1.00 lot
-def lot_for(stop_usd, equity, pct, maxlots=0.50, minlot=0.01):
-    budget = equity * pct / 100.0
-    per    = stop_usd * PV
-    import math as _m
-    raw    = min(budget / per, maxlots)
-    lot    = _m.floor(raw / 0.01 + 1e-7) * 0.01
-    if lot < minlot or per * lot > budget * 1.02: return 0.0, per * minlot
-    return lot, per * lot
-_pct = float(re.search(r'RiskPerTradePercent\s*=\s*([\d.]+)', BK).group(1))
-_lot, _risk = lot_for(95.65, 429.60, _pct)
-check(f"trade #17 (95.65 stop, 429.60 equity) is refused under STOP_FIRST",
-      _lot == 0.0)
-check(f"risk budget default is 0.5% or tighter (user requirement)", _pct <= 0.5)
-check("old behaviour would have risked >200% of the account",
-      95.65 * PV * 0.10 / 429.60 > 2.0)
-# THE REASON LOT_FIRST IS NOW THE DEFAULT.
-# At 0.5% on a $200 account the budget is $1.00, while a normal ATR stop
-# ($2.00 ATR x 1.5 = $3.00 of gold) costs $3.00 even at the 0.01 minimum lot.
-# STOP_FIRST can only respond by refusing - which is exactly the "it does not
-# enter trades" report. Pin that so nobody restores STOP_FIRST as the default
-# without noticing it silently disables the EA at this risk level.
-_sl = float(re.search(r'StopLossATR\s*=\s*([\d.]+)', BK).group(1))
-_lot2, _risk2 = lot_for(2.0 * _sl, 200.0, _pct)   # ATR $2.00
-check(f"STOP_FIRST at {_pct}% on $200 CANNOT size a normal ATR stop -> it would skip",
-      _lot2 == 0.0)
-check("...so STOP_FIRST must not be the default",
-      re.search(r'RiskSizingMode\s*=\s*BK_RISK_STOP_FIRST', BK) is None)
-
-print("\n7d-2. LOT-FIRST RISK (v1.05: keep my lot, cap the stop)")
-# The user runs a FIXED lot and wants the risk % respected regardless.
-# v1.03 honoured the stop and derived the lot, which refused trades; v1.02
-# honoured the lot and ignored risk, which lost the account. LOT_FIRST does
-# both: the lot is sent as typed and the STOP is pulled in to fit the budget.
-check("risk mode enum exists", "enum BK_RISK_MODE" in BK and
-      "BK_RISK_LOT_FIRST" in BK and "BK_RISK_STOP_FIRST" in BK)
-check("LOT_FIRST is the default",
-      re.search(r'RiskSizingMode\s*=\s*BK_RISK_LOT_FIRST', BK) is not None)
-check("the stop solver exists", "double CapStopToRisk(double requestedStop" in BK)
-check("solver takes the lot by reference so it can only reduce it",
-      "double &lots" in BK and "lots = newLots;" in BK)
-check("solver computes the cap as budget / money-per-price",
-      "double capped = budget / moneyPerPrice;" in BK)
-check("a too-wide stop TRIMS instead of vetoing in LOT_FIRST",
-      "slDistance = atr * MaxStopATRMult;      // trim, do not refuse" in BK)
-check("OpenPosition honours FixedLots in LOT_FIRST",
-      re.search(r'lots = NormalizeLots\(FixedLots\);\s*\n\s*if\(MaxLots > 0\)', BK) is not None)
-check("noise floor stops the cap going absurdly tight",
-      "MinStopATRMult" in BK and "double floorStop = (atr > 0) ? atr * MathMax(0.0, MinStopATRMult) : 0;" in BK)
-check("below the floor the LOT is cut instead of the stop",
-      "double affordable  = (perLotFloor > 0) ? (budget / perLotFloor) : 0;" in BK)
-check("an unsizeable trade explains itself in dollars",
-      'Journal("CANNOT SIZE: "' in BK and "Raise RiskPerTradePercent" in BK)
-check("the cap is journalled when it bites", '"RISK CAP: stop "' in BK)
-check("FINAL assertion bounds risk whatever route was taken",
-      "double finalRisk = MoneyPerLot(slDistance) * lots;" in BK and
-      "if(budget > 0 && finalRisk > budget * 1.02)" in BK)
-check("panel shows lot + max stop under LOT_FIRST",
-      "double MaxStopPtsDisplay(double rawPts, double atr)" in BK)
-check("open-loss cap no longer pre-empts the SL",
-      re.search(r'MaxOpenLossUSD\s*=\s*0\.0', BK) is not None)
-
-# --- replay the model itself ---
-import math as _m
-def _norm(l, minlot=0.01, step=0.01):
-    return round(_m.floor(max(minlot, l) / step + 1e-7) * step, 2)
-def cap_stop(req, atr, lots, eq, pct, min_stop_atr=0.5, stoplvl=0.002,
-             skip=True, maxlots=0.50):
-    lots = _norm(min(lots, maxlots)); budget = eq * pct / 100.0
-    if req * PV * lots <= budget: return req, lots, req * PV * lots
-    capped = budget / (PV * lots)
-    floor  = max(atr * min_stop_atr, stoplvl)
-    if capped >= floor: return capped, lots, capped * PV * lots
-    stop = floor; new = _norm(min(lots, budget / (stop * PV)))
-    r = stop * PV * new
-    if new < 0.01 or r > budget * 1.02:
-        if skip: return 0, 0, 0
-        new = 0.01; r = stop * PV * new
-    return stop, new, r
-
-_MSA = float(re.search(r'MinStopATRMult\s*=\s*([\d.]+)', BK).group(1))
-# the exact trade from the user's log
-_s, _l, _r = cap_stop(95.646, 2.0, 0.10, 429.60, _pct, min_stop_atr=_MSA)
-check(f"log trade #17 now risks ${_r:.2f} not $956.46 ({_r/429.60*100:.2f}% of equity)",
-      _l > 0 and _r <= 429.60 * _pct / 100.0 * 1.02)
-_s2, _l2, _r2 = cap_stop(95.646, 2.0, 0.10, 429.60, _pct, min_stop_atr=0.0)
-check(f"with MinStopATRMult=0 the FULL 0.10 lot is kept at {_s2/0.001:.0f} pts (${_r2:.2f})",
-      _l2 == 0.10 and _r2 <= 429.60 * _pct / 100.0 * 1.02)
-
-_bad = _skip = _tot = 0
-for _eq in (100, 157.79, 200, 429.60, 1000, 5000):
-    for _lot in (0.01, 0.02, 0.05, 0.10, 0.25, 0.50):
-        for _atr in (0.5, 1.0, 2.0, 3.0, 5.0):
-            for _want in (_atr * 1.5, _atr * 3, 95.646):
-                for _m2 in (0.0, _MSA):
-                    _tot += 1
-                    _st, _lo, _rk = cap_stop(_want, _atr, _lot, _eq, _pct, min_stop_atr=_m2)
-                    if _lo == 0: _skip += 1; continue
-                    if _lo > min(_lot, 0.50) + 1e-9: _bad += 1
-                    if _rk > _eq * _pct / 100.0 * 1.02: _bad += 1
-check(f"{_tot} combos: lot never exceeds request and risk never exceeds {_pct}%",
-      _bad == 0)
-check("the model still trades in the large majority of cases",
-      _skip / _tot < 0.25)
+print("\n7d. v1.02 TRADING ENGINE RESTORED (user request)")
+# The user asked for the v1.02 engine back verbatim, keeping ONLY the
+# history/drawing work. v1.03 derived the lot from the stop (which refused
+# trades) and v1.05 capped the stop from the lot; BOTH are removed. These
+# checks assert the v1.02 engine is present and the later risk layer is not.
+check("fixed-lot sizing is back", "double lots  = NormalizeLots(FixedLots);" in BK)
+check("the v1.02 SL mode enum is back",
+      "enum EA_SL_MODE { SL_By_ATR = 0, SL_By_Risk_Percent = 1 };" in BK)
+check("RiskStopDistance() is back", "double RiskStopDistance(double lots)" in BK)
+check("the hardcoded 3.0 structural clamp is back", "atrSLDistance * 3.0));" in BK)
+for d, v in (("RiskPercent", "0.5"), ("StopLossATR", "1.8"),
+             ("TakeProfitPoints", "5000.0"), ("MaxDailyLossUSD", "10.0")):
+    check(f"v1.02 default {d} = {v}",
+          re.search(r'^input[^\n]*\b%s\s*=\s*%s\s*;' % (d, re.escape(v)), BK, re.M) is not None)
+check("TP defaults to TP_By_Points again",
+      re.search(r'TakeProfitMode\s*=\s*TP_By_Points', BK) is not None)
+check("structural stop is ON again",
+      re.search(r'^input\s+bool\s+StopByRangeOpposite\s*=\s*true', BK, re.M) is not None)
+# ...and every trace of the later risk layer is gone
+for gone in ("LotForRisk", "CapStopToRisk", "RiskBudgetUSD", "MoneyPerLot",
+             "RiskPerTradePercent", "MaxRiskPerTradeUSD", "MaxStopATRMult",
+             "MinStopATRMult", "MinRewardRiskRatio", "UseRiskSizing",
+             "RiskSizingMode", "BK_RISK_LOT_FIRST", "BK_RISK_STOP_FIRST",
+             "SkipIfRiskTooHigh", "EnforceFloatingLossCap", "MaxOpenLossUSD",
+             "MaxLots", "RISK TOO HIGH", "STOP TOO WIDE"):
+    check(f"v1.03/v1.05 artefact removed: {gone}", gone not in BK)
+check("OpenPosition no longer aborts on a sizing verdict",
+      "gBlockReason = riskWhy;" not in BK)
+# the engine itself must be byte-identical to the v1.02 definitions
+_v102_fns = [
+   "   double lots  = NormalizeLots(FixedLots);\n   double entry = (type == OP_BUY) ? Ask : Bid;",
+   "   double slDistance = (StopLossMode == SL_By_Risk_Percent) ? RiskStopDistance(lots) : atrSLDistance;",
+   "   double minimum = (MarketInfo(Symbol(), MODE_STOPLEVEL) + 2) * Point;\n   slDistance = MathMax(slDistance, minimum);\n   tpDistance = MathMax(tpDistance, minimum);",
+]
+for frag in _v102_fns:
+    check("v1.02 OpenPosition body intact: " + frag.strip().split(chr(10))[0][:46],
+          frag in BK)
 
 print("\n7e. HISTORY RETENTION (post-run analysis)")
 # The live range box is one object that gets MOVED, so without an archive

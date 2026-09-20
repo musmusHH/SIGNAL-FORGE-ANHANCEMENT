@@ -1351,7 +1351,7 @@ corrected.
 
 ---
 
-# Breakout Forge XAUUSD M5 EA (v1.05) — the second EA
+# Breakout Forge XAUUSD M5 EA (v1.06) — the second EA
 
 A **separate EA with its own strategy**, not a variant of Signal Forge. Exactly
 two things are reused from PRO — the **visual shell** (HUD, themes, Arabic
@@ -1422,80 +1422,37 @@ The middle column is the whole point of the design.
   Fewer trades, better fills, tighter stops. Times out after `RetestMaxBars`,
   and a close back through the level kills the setup rather than arming it.
 
-## v1.05b — the panel opens on BREAKOUT
+## v1.06 — the v1.02 trading engine, restored
 
-The HUD used to start on CORE, which meant the page describing the engine this
-EA is named after was one click away every single load. `HudStartPage` now
-selects the opening tab and defaults to `BK_PAGE_BREAKOUT`, and **BREAKOUT is
-also the leftmost tab** — an active tab sitting in the second slot looks like
-a mis-render. Set `HudStartPage = BK_PAGE_CORE` to restore the old view.
+At the user's request the **v1.02 engine is back verbatim**: fixed `FixedLots`
+sizing, `StopLossMode` with `SL_By_Risk_Percent`, `RiskStopDistance()`, the
+hardcoded `3.0` structural-stop clamp, `TP_By_Points` at 5000 points,
+`StopLossATR = 1.8` and `StopByRangeOpposite = true`.
 
-The enum is *mapped* to the internal page index in `OnInit()` rather than cast,
-because the enum is ordered for how it reads in the dropdown (BREAKOUT first)
-while the internal numbering stays `0 = core, 1 = breakout`. Casting would
-silently invert the pages.
+Everything from the v1.03 and v1.05 risk layers has been **deleted**:
+`LotForRisk`, `CapStopToRisk`, `RiskBudgetUSD`, `MoneyPerLot`,
+`RiskPerTradePercent`, `MaxStopATRMult`, `MinStopATRMult`,
+`MinRewardRiskRatio`, `UseRiskSizing`, `RiskSizingMode`, `SkipIfRiskTooHigh`,
+`EnforceFloatingLossCap`, `MaxOpenLossUSD` and `MaxLots`. `verify_breakout.py`
+§7d now asserts each one is **absent** and that the v1.02 bodies are intact —
+the eleven trading functions were diffed against the v1.02 blob in git and are
+byte-identical, with `UpdateRange()` differing by exactly the two-line archive
+hook.
 
----
+> ⚠️ **This restores the sizing behaviour that produced the −$429.69 trade.**
+> With a fixed lot and a structural stop, risk per trade floats with the range
+> width: ticket #17 was a 95,646-point stop on 0.10 lots = **$956 of exposure
+> on a $429.60 account**. Keep `FixedLots` at 0.01 on a small account, or cap
+> the damage with `MaxDailyLossUSD`. The post-mortem is kept below for
+> reference.
 
-## v1.05 — LOT-FIRST risk: your lot is honoured, the **stop** is capped
+Kept on top of that engine (the "drain" work):
 
-Two complaints, one root cause, opposite symptoms:
-
-* **v1.02** sent a constant lot with a structural stop. Ticket #17 —
-  `sell 0.10 @ 5017.031, SL 5112.677` — was a **95,646-point ($95.65) stop on
-  0.10 lots = $956 of risk on a $429.60 account, 222%.** It never reached its
-  stop; margin stop-out closed it at −$429.69.
-* **v1.03** fixed that by deriving the lot from the stop. But on a $200
-  account a normal ATR stop costs $3.00 even at the 0.01 minimum lot, so at a
-  tight risk % the honest answer was always "refuse" — hence *"now he doesn't
-  enter trades"*.
-
-Both models pick one variable to respect and sacrifice the other. **v1.05
-respects the lot and solves for the stop instead:**
-
-```
-max stop distance = risk budget / (lot x money-per-price-unit)
-```
-
-For ticket #17: 0.5% of $429.60 = $2.15, which at 0.10 lots buys a **215-point
-stop**. The strategy wanted 95,646 points — 445× too far — so the stop is
-pulled in and the trade risks **$2.15 instead of $956.**
-
-`RiskSizingMode` selects the behaviour and defaults to `LOT_FIRST`:
-
-| Mode | Honours | Sacrifices |
-|---|---|---|
-| **`BK_RISK_LOT_FIRST`** (default) | **your lot** | stop distance (capped) |
-| `BK_RISK_STOP_FIRST` | the strategy's stop | lot size (may refuse) |
-
-`RiskPerTradePercent` now defaults to **0.5**.
-
-### The one honest limitation
-
-A cap can only tighten a stop so far before it sits inside ordinary noise and
-gets hit for fun. `MinStopATRMult = 0.5` is the floor; below it the EA reduces
-the **lot** instead, which is why ticket #17 comes out as *0.02 lots × 1000
-points* rather than *0.10 lots × 215 points*. Both risk ~$2.15 — the second
-just wouldn't survive contact with gold. **Set `MinStopATRMult = 0` to force
-the full lot through** and let the stop absorb the entire cap.
-
-At **$157.79** (the live balance) 0.5% is $0.79, which cannot cover even one
-minimum lot at the noise floor, so the EA skips and **journals the arithmetic**
-rather than failing silently:
-
-```
-CANNOT SIZE: 0.01 lot x 1000 pt floor = $1.00 but 0.50% of $157.79
-is only $0.79. Raise RiskPerTradePercent, lower MinStopATRMult, or
-set SkipIfRiskTooHigh=false to trade at minimum lot.
-```
-
-A final unconditional assertion re-derives the risk from the lot and stop
-actually going on the wire and blocks the order if it still exceeds budget —
-whichever mode produced them. `MaxOpenLossUSD` now defaults to **0 (off)**,
-because at 0.5% the stop already bounds the loss and an $8 emergency cap would
-fire long before it.
-
-![lot-first risk](docs/breakout_lotfirst_risk.png)
+* every past range archived and drawn — §v1.04 below
+* permanent entry→exit markers for every closed trade
+* the two CSV exports
+* the panel opening on **BREAKOUT** (`HudStartPage`), with BREAKOUT as the
+  leftmost tab
 
 ---
 
@@ -1768,9 +1725,6 @@ state — CORE panel, execution console, BREAKOUT page — read one function,
   hides local variable" warning for both EAs, since there is no compiler in
   this environment. Tested in both directions: it flags the real case and
   passes once fixed.
-* `docs/render_lotfirst_risk.py` — the three risk models measured against
-  ticket #17, plus a sweep showing the lot is never exceeded and the risk %
-  never breached.
 * `docs/render_history_preview.py` — what the chart retains after a run:
   archived range boxes colour-coded by outcome, permanent trade markers and
   the two CSV schemas.

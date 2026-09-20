@@ -1,8 +1,7 @@
-; Breakout Forge XAUUSD M5 EA v1.05
+; Breakout Forge XAUUSD M5 EA v1.06
 ; Exness Raw Spread, 3-digit gold, commission 0.07 USD / 0.01 lot RT
-; LOT-FIRST RISK: your lot is sent as typed; the STOP is capped so the
-; trade cannot lose more than RiskPerTradePercent of equity.
-; 200 USD: 0.01 lot, 0.5% hard risk cap, full history kept
+; v1.02 TRADING ENGINE (fixed lot, ATR/structural stop) + full history.
+; 200 USD baseline: 0.01 lot, full range + trade history kept
 ; ---
 MagicNumber=260915
 FixedLots=0.01
@@ -12,21 +11,14 @@ OnePositionOnly=1
 CloseOnOppositeSignal=1
 TradeOnClosedBar=1
 TradeComment=Breakout Forge
-TakeProfitMode=1
+StopLossMode=0
+TakeProfitMode=0
 ATRLength=14
-StopLossATR=1.5
+StopLossATR=1.8
 TakeProfitATR=2.4
 TakeProfitPoints=5000.0
-MinRewardRiskRatio=1.5
+RiskPercent=0.5
 RiskReferenceBalance=0.0
-UseRiskSizing=1
-RiskSizingMode=0
-RiskPerTradePercent=0.5
-MaxRiskPerTradeUSD=0.0
-MaxLots=0.50
-SkipIfRiskTooHigh=1
-MinStopATRMult=0.5
-MaxStopATRMult=3.0
 EnableTrailingStop=1
 TrailingStartPoints=700.0
 TrailingDistancePoints=100.0
@@ -51,9 +43,8 @@ MaxRangeATRMult=3.00
 MinRangePoints=6000
 AllowReEntry=1
 MaxBreakoutsPerRange=3
-StopByRangeOpposite=0
+StopByRangeOpposite=1
 StopRangePadATR=0.5
-StopClampATRMult=1.5
 TargetMode=0
 MeasuredMoveMult=1.0
 MinTargetCostMult=3.0
@@ -65,7 +56,6 @@ RolloverStartHour=20
 RolloverEndHour=22
 MaxTradesPerDay=6
 MaxDailyLossUSD=10.0
-MaxOpenLossUSD=0.0
 CommissionPer001LotRT=0.07
 ShowHUD=1
 HudLanguage=0
@@ -84,12 +74,12 @@ HudMargin=12
 HudRefreshMs=220
 HudInteractive=1
 HudScalePercent=100
-HudStartPage=0
 KeepRangeHistory=1
 MaxRangeHistory=80
 ShowRangeLabels=1
 KeepAllTradeMarkers=1
 ExportHistoryCSV=1
+HudStartPage=0
 DrawTradeLevels=1
 DrawTradeResults=1
 MaxResultPills=25
