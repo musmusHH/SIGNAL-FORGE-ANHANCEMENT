@@ -13,8 +13,8 @@ def f(sz,b=False):
 W,H=1180,760
 img=Image.new("RGB",(W,H),BG);d=ImageDraw.Draw(img)
 
-d.text((26,20),"PRICE-RELATIVE WIDTH GATE  +  MONEY-DEFINED STOP",font=f(20,True),fill=CY)
-d.text((26,48),"ATR is gone. The range is judged as a PERCENT OF PRICE; the stop is whatever distance loses the budget at 0.10 lot.",font=f(12),fill=DIM)
+d.text((26,20),"SELECTABLE WIDTH GATE  +  MONEY-DEFINED STOP",font=f(20,True),fill=CY)
+d.text((26,48),"Choose points, percent, either or both. The stop is whatever distance loses the budget at 0.10 lot.",font=f(12),fill=DIM)
 
 def block(x,y,w,h,title,col,sub):
     d.rounded_rectangle([x,y,x+w,y+h],10,fill=PANEL,outline=EDGE,width=2)
@@ -22,28 +22,34 @@ def block(x,y,w,h,title,col,sub):
     d.text((x+16,y+34),sub,font=f(11),fill=DIM)
 
 # ---------- width gate ----------
-MINPCT,MAXPCT=0.25,3.00
-block(26,86,1128,238,"RANGE WIDTH GATE  -  PERCENT OF PRICE",BULL,
-      "accepted band: %.2f%% - %.2f%% of the gold price.  Scale-free: it does not go stale when gold re-rates."%(MINPCT,MAXPCT))
-x0,y0=60,164
-d.text((x0,y0-24),"range width as % of price",font=f(11),fill=DIM)
-SPAN=4.0
+MINP,MAXP=4000,100000
+MINC,MAXC=0.10,3.00
+block(26,86,1128,238,"RANGE WIDTH GATE  -  SELECTABLE",BULL,
+      "WidthGateMode: POINTS %d-%d  |  PERCENT %.2f-%.2f%% of price  |  EITHER (default)  |  BOTH"%(MINP,MAXP,MINC,MAXC))
+x0,y0=60,168
+PXREF=4323.97
+SPAN=220000.0
 scale=1040/SPAN
-for t in [x*0.5 for x in range(0,9)]:
+d.text((x0,y0-26),"range width in points   (at $%.0f gold;  1000 pts = $1.00)"%PXREF,font=f(11),fill=DIM)
+for t in range(0,220001,20000):
     px=x0+t*scale
-    d.line([px,y0,px,y0+12],fill=EDGE,width=1)
-    d.text((px-12,y0+16),"%.1f%%"%t,font=f(10),fill=DIM)
-d.rectangle([x0+MINPCT*scale,y0+34,x0+MAXPCT*scale,y0+74],fill=(0,70,55),outline=BULL,width=2)
-d.text((x0+MINPCT*scale+10,y0+46),"ACCEPTED   %.2f%% - %.2f%%"%(MINPCT,MAXPCT),font=f(13,True),fill=BULL)
-d.rectangle([x0,y0+34,x0+MINPCT*scale,y0+74],fill=(60,18,26),outline=BEAR,width=2)
-d.rectangle([x0+MAXPCT*scale,y0+34,x0+SPAN*scale,y0+74],fill=(60,18,26),outline=BEAR,width=2)
-d.text((x0+MAXPCT*scale+10,y0+46),"trend, not a range",font=f(10),fill=BEAR)
-# the user's real range
-obs=2.29
+    d.line([px,y0,px,y0+10],fill=EDGE,width=1)
+    d.text((px-14,y0+13),"%dk"%(t/1000),font=f(9),fill=DIM)
+# points band
+d.rectangle([x0+MINP*scale,y0+32,x0+MAXP*scale,y0+56],fill=(0,70,55),outline=BULL,width=2)
+d.text((x0+MINP*scale+8,y0+37),"POINTS  %d - %d"%(MINP,MAXP),font=f(11,True),fill=BULL)
+# percent band expressed in points at this price
+pcl=MINC/100*PXREF/0.001; pch=MAXC/100*PXREF/0.001
+d.rectangle([x0+pcl*scale,y0+62,x0+min(pch,SPAN)*scale,y0+86],fill=(0,54,74),outline=CY,width=2)
+d.text((x0+pcl*scale+8,y0+67),"PERCENT  %.2f-%.2f%%  =  %d - %d pts here"%(MINC,MAXC,pcl,pch),font=f(11,True),fill=CY)
+# either = union
+d.rectangle([x0+min(MINP,pcl)*scale,y0+92,x0+max(MAXP,pch)*scale,y0+116],fill=(38,30,60),outline=(150,120,255),width=2)
+d.text((x0+min(MINP,pcl)*scale+8,y0+97),"EITHER (default)  =  the union:  %d - %d pts"%(min(MINP,pcl),max(MAXP,pch)),font=f(11,True),fill=(170,150,255))
+# observed
+obs=99054
 px=x0+obs*scale
-d.line([px,y0+78,px,y0+98],fill=CY,width=3)
-d.text((px-116,y0+102),"the REJECTED $99.05 range @ $4324 gold = 2.29%  -> now PASSES",font=f(11,True),fill=CY)
-d.text((x0,y0+126),"the old absolute band ($6-$40) was only 0.14%-0.93% at $4324 gold, so it rejected every real session range.",font=f(11),fill=AMB)
+d.line([px,y0+120,px,y0+140],fill=AMB,width=3)
+d.text((px-150,y0+143),"your range 99054 pts ($99.05 = 2.29%)  ->  accepted by all 8 presets",font=f(11,True),fill=AMB)
 
 # ---------- money stop ----------
 block(26,344,1128,392,"MONEY-DEFINED STOP AT 0.10 LOT",CY,"stop distance = risk budget / money-per-point.  0.10 lot on 3-digit gold = $0.01 per point.")

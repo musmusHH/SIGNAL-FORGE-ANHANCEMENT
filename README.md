@@ -1351,7 +1351,7 @@ corrected.
 
 ---
 
-# Breakout Forge XAUUSD M5 EA (v1.08) — the second EA
+# Breakout Forge XAUUSD M5 EA (v1.09) — the second EA
 
 A **separate EA with its own strategy**, not a variant of Signal Forge. Exactly
 two things are reused from PRO — the **visual shell** (HUD, themes, Arabic
@@ -1421,6 +1421,46 @@ The middle column is the whole point of the design.
 * **RETEST** — wait for price to come back to the broken level and hold.
   Fewer trades, better fills, tighter stops. Times out after `RetestMaxBars`,
   and a close back through the level kills the setup rather than arming it.
+
+## v1.09 — the width gate is yours to choose
+
+The points band is now **4000 – 100000** (\$4 – \$100) as asked, *and* the gate
+is selectable rather than hardcoded. `WidthGateMode`:
+
+| mode | meaning |
+|---|---|
+| `BK_WIDTH_POINTS` | absolute points only — predictable, but goes stale if gold re-rates |
+| `BK_WIDTH_PERCENT` | percent of price only — scale-free, no absolute floor |
+| `BK_WIDTH_EITHER` | **default.** Passes if *either* test passes — the loosest |
+| `BK_WIDTH_BOTH` | passes only if *both* agree — the strictest |
+
+Defaults: `MinRangePoints 4000`, `MaxRangePoints 100000`, `MinRangePercent 0.10`,
+`MaxRangePercent 3.00`. Any single bound set to `0` is switched off.
+
+At \$4,324 gold the two bands are 4,000–100,000 pts and 4,323–129,719 pts, so
+**EITHER** accepts 4,000–129,719 — the points band anchors the floor while the
+percent band extends the ceiling as gold rises. Your 99,054-point range passes
+in **all four modes**.
+
+### Ready-made sets
+
+Four presets exist purely to pick a width gate, plus the four strategy sets:
+
+| preset | gate |
+|---|---|
+| `BKF_WIDTH_Points-4k-100k.set` | POINTS only, 4000–100000 |
+| `BKF_WIDTH_Percent-ScaleFree.set` | PERCENT only, 0.10–3.00% |
+| `BKF_WIDTH_Wide-Open.set` | EITHER, 2000–250000 pts / 0.05–6.00% — takes almost anything |
+| `BKF_WIDTH_Strict-Both.set` | BOTH, 6000–110000 pts AND 0.20–2.50% |
+
+All eight presets were replayed against the 99,054-point range and every one
+accepts it.
+
+When a range is rejected the panel now names **which** test failed and the
+active mode (`[EITHER]`, `[BOTH]`…), and the journal prints
+`pts OK/no  pct OK/no  mode ...` — so a rejection is never a mystery again.
+
+---
 
 ## v1.08 — the width gate is a PERCENT OF PRICE (it was rejecting everything)
 

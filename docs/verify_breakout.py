@@ -80,36 +80,57 @@ check("buffer can be fixed points or a spread multiple",
 # THE WIDTH GATE MUST BE PRICE-RELATIVE. An absolute dollar band goes stale:
 # $6-$40 was sane at $2000 gold, but at $4324 a $40 ceiling is 0.93% of price
 # and rejected a real 99054-point ($99.05) session range in the user's log.
-check("width gate is a PERCENTAGE of price, not an absolute band",
-      re.search(r'gBkValid = \(MinRangePercent <= 0 \|\| gBkWidthPct >= MinRangePercent\) &&', BK) is not None
-      and "(MaxRangePercent <= 0 || gBkWidthPct <= MaxRangePercent)" in BK)
+# The width gate is SELECTABLE: an absolute points band, a scale-free
+# percent-of-price band, or a combination. The points band alone goes stale
+# when gold re-rates ($6-$40 was sane at $2000, rejected a real $99 range at
+# $4324); the percent band alone has no absolute floor. WidthGateMode picks.
+check("WidthGateMode input exists with four modes",
+      re.search(r'^input\s+ENUM_BK_WIDTH\s+WidthGateMode', BK, re.M) is not None
+      and all(m in BK for m in ("BK_WIDTH_POINTS", "BK_WIDTH_PERCENT",
+                                "BK_WIDTH_EITHER", "BK_WIDTH_BOTH")))
+check("the two tests are evaluated independently",
+      "bool pctOK = (MinRangePercent <= 0 || gBkWidthPct >= MinRangePercent) &&" in BK
+      and "bool ptsOK = (MinRangePoints  <= 0 || widthPts    >= MinRangePoints)  &&" in BK)
+check("the mode combines them, it does not hardcode AND",
+      "if(WidthGateMode == BK_WIDTH_POINTS)       gBkValid = ptsOK;" in BK
+      and "else if(WidthGateMode == BK_WIDTH_BOTH)    gBkValid = (ptsOK && pctOK);" in BK
+      and "else                                       gBkValid = (ptsOK || pctOK);" in BK)
 check("width percent is computed off the range MIDPOINT, not Bid",
       "double refPx = (hi + lo) / 2.0;" in BK and
       "gBkWidthPct = (refPx > 0) ? (width / refPx) * 100.0 : 0.0;" in BK)
 check("BuildRange reports the bar count",
       "bool BuildRange(double &hi, double &lo, datetime &stamp, int &bars)" in BK)
+check("the requested 4000-100000 point band is the default",
+      re.search(r'^input\s+double\s+MinRangePoints\s*=\s*4000', BK, re.M) is not None and
+      re.search(r'^input\s+double\s+MaxRangePoints\s*=\s*100000', BK, re.M) is not None)
 check("percent bounds are inputs",
       re.search(r'^input\s+double\s+MinRangePercent', BK, re.M) is not None and
       re.search(r'^input\s+double\s+MaxRangePercent', BK, re.M) is not None)
-check("the absolute points band still exists as an opt-in backstop",
-      re.search(r'^input\s+double\s+MinRangePoints\s*=\s*0\s*;', BK, re.M) is not None and
-      re.search(r'^input\s+double\s+MaxRangePoints\s*=\s*0\s*;', BK, re.M) is not None)
-_mn = float(re.search(r'MinRangePercent\s*=\s*([\d.]+)', BK).group(1))
-_mx = float(re.search(r'MaxRangePercent\s*=\s*([\d.]+)', BK).group(1))
-# THE REGRESSION FROM THE USER'S LOG, replayed exactly.
-_hi, _lo = 4373.493, 4274.439
-_pct = (_hi - _lo) / ((_hi + _lo) / 2.0) * 100.0
-check(f"the rejected $99.05 range at $4324 gold ({_pct:.2f}%) now PASSES {_mn}-{_mx}%",
-      _mn <= _pct <= _mx)
-# and the gate must still behave across price regimes
-for _px in (2000, 3000, 4324, 5000):
-    _lowW  = _px * (_mn / 100.0) * 0.5      # half the minimum -> reject
-    _goodW = _px * 0.02                      # 2% -> accept
-    _bigW  = _px * (_mx / 100.0) * 1.5      # 1.5x the max -> reject
-    ok = (not (_mn <= _lowW / _px * 100 <= _mx)) and \
-         (_mn <= _goodW / _px * 100 <= _mx) and \
-         (not (_mn <= _bigW / _px * 100 <= _mx))
-    check(f"gate behaves correctly at ${_px} gold (scale-free)", ok)
+check("which test failed is reported on the panel",
+      "gBkPctOK" in BK and "gBkPtsOK" in BK and "string WidthModeName()" in BK)
+
+_MINP = float(re.search(r'MinRangePoints\s*=\s*([\d.]+)', BK).group(1))
+_MAXP = float(re.search(r'MaxRangePoints\s*=\s*([\d.]+)', BK).group(1))
+_MINC = float(re.search(r'MinRangePercent\s*=\s*([\d.]+)', BK).group(1))
+_MAXC = float(re.search(r'MaxRangePercent\s*=\s*([\d.]+)', BK).group(1))
+def _gate(wpts, px, mode):
+    pct = (wpts * 0.001) / px * 100.0
+    ptsOK = (_MINP <= 0 or wpts >= _MINP) and (_MAXP <= 0 or wpts <= _MAXP)
+    pctOK = (_MINC <= 0 or pct >= _MINC) and (_MAXC <= 0 or pct <= _MAXC)
+    return {"PTS": ptsOK, "PCT": pctOK,
+            "BOTH": ptsOK and pctOK, "EITHER": ptsOK or pctOK}[mode]
+# the user's real range must pass in EVERY mode
+for _m in ("PTS", "PCT", "BOTH", "EITHER"):
+    check(f"the $99.05 range at $4324 gold passes in {_m} mode",
+          _gate(99054, 4323.97, _m))
+check("a 2000pt ($2) range is still rejected (whipsaw)",
+      not _gate(2000, 4323.97, "EITHER"))
+check("a 200000pt ($200 / 4.6%) range is still rejected (trend)",
+      not _gate(200000, 4323.97, "EITHER"))
+check("EITHER is looser than BOTH at the points ceiling",
+      _gate(120000, 4323.97, "EITHER") and not _gate(120000, 4323.97, "BOTH"))
+check("the points floor still applies at low gold prices",
+      _gate(4000, 2000, "EITHER") and not _gate(1000, 2000, "EITHER"))
 check("range-vs-spread gate replaces the ATR expansion gate",
       "MinRangeSpreadMult" in BK and
       re.search(r'widthPts < MathMax\(0\.0, MinRangeSpreadMult\) \* spPts', BK) is not None)
@@ -188,7 +209,7 @@ n_sf = len([x for x in re.findall(r'^input\s+[\w ]+?\s+(\w+)\s*=', SF, re.M)
 print(f"   (Signal Forge {n_sf} inputs -> Breakout Forge {n_inputs})")
 for bi in ("RangeMode", "DonchianBars", "BufferMode", "BufferFixedPoints",
            "RequireBodyClose", "EntryMode", "RetestMaxBars", "UseVolatilityGate",
-           "MinRangePercent", "MaxBreakoutsPerRange", "StopByRangeOpposite",
+           "MinRangePercent", "MinRangePoints", "WidthGateMode", "StopByRangeOpposite",
            "TargetMode", "MinTargetCostMult", "UseSessionFilter",
            "BlockRollover", "MaxTradesPerDay", "MaxDailyLossUSD"):
     check(f"breakout input {bi} present",

@@ -1,8 +1,8 @@
-; Breakout Forge XAUUSD M5 EA v1.08
+; Breakout Forge XAUUSD M5 EA v1.09
 ; Exness Raw Spread, 3-digit gold, commission 0.07 USD / 0.01 lot RT
-; 0.10 fixed lot. Stop is MONEY-DEFINED (no ATR anywhere in the EA).
-; Width gate is a PERCENT OF PRICE, so it survives gold re-rating.
-; 0.10 lot, 0.5% risk. Below ~400 USD the stop floors at 200pts = 2.00 USD.
+; 0.10 fixed lot. Money-defined stop (no ATR). Selectable width gate.
+; WidthGateMode: 0=POINTS 1=PERCENT 2=EITHER 3=BOTH
+; DEFAULT. EITHER mode: 4000-100000 pts OR 0.10-3.00% of price.
 ; ---
 MagicNumber=260915
 FixedLots=0.1
@@ -39,10 +39,11 @@ RetestMaxBars=12
 RetestTolerancePoints=150.0
 UseVolatilityGate=1
 MinRangeSpreadMult=5.0
-MinRangePercent=0.25
+WidthGateMode=2
+MinRangePoints=4000
+MaxRangePoints=100000
+MinRangePercent=0.10
 MaxRangePercent=3.00
-MinRangePoints=0
-MaxRangePoints=0
 AllowReEntry=1
 MaxBreakoutsPerRange=3
 StopByRangeOpposite=1
