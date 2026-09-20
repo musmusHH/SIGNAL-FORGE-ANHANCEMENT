@@ -167,13 +167,6 @@ input double MinRangeATRMult          = 0.5;    // Range must be >= ATR x this
 input double MaxRangeATRMult          = 6.0;    // Range must be <= ATR x this
 input int    MaxBreakoutsPerRange     = 1;      // Trades per range (anti re-entry)
 
-// ---- optional indicator confluence ---------------------------------
-// The 11 filters below are INHERITED from Signal Forge PRO and are OFF by
-// default. Switch this on to demand that the enabled ones also agree with
-// the breakout direction. The FILTERS page keeps working either way.
-input bool   UseIndicatorConfluence   = false;  // Require indicators to agree too
-input bool RequireAllEnabledIndicatorsToAlign = true; // ALL enabled must align (else ANY)
-
 input string __04c = "======== BREAKOUT EXITS ========"; // .
 input bool   StopByRangeOpposite      = true;   // Stop at the far side of the range
 input double StopRangePadATR          = 0.5;    // ...padded by ATR x this
@@ -194,41 +187,6 @@ input int    RolloverEndHour          = 22;     // Rollover blackout end
 input int    MaxTradesPerDay          = 6;      // 0 = unlimited
 input double MaxDailyLossUSD          = 10.0;   // Stop for the day after this loss (0=off)
 
-input string __05 = "======== INDICATOR FILTERS (optional confluence) ========"; // .
-input bool EnableSMA          = false;    // SMA cross
-input int  SMAFastLength      = 9;
-input int  SMASlowLength      = 30;
-input bool EnableRSI          = false;    // RSI
-input int  RSILength          = 14;
-input double RSILongAbove     = 52.0;
-input double RSIShortBelow    = 48.0;
-input bool EnableMACD         = false;    // MACD
-input int  MACDFastLength     = 8;
-input int  MACDSlowLength     = 21;
-input int  MACDSignalLength   = 5;
-input bool EnableSupertrend   = true;     // Supertrend (default strategy)
-input double SupertrendFactor = 2.5;
-input int  SupertrendLength   = 10;
-input bool EnableStochastic   = false;    // Stochastic
-input int  StochasticKLength  = 14;
-input int  StochasticDLength  = 3;
-input int  StochasticSmooth   = 3;
-input bool EnableBollinger    = false;    // Bollinger midline
-input int  BollingerLength    = 20;
-input bool EnableEMA          = false;    // EMA cross
-input int  EMAFastLength      = 9;
-input int  EMASlowLength      = 21;
-input bool EnableAO           = false;    // Awesome Oscillator
-input bool EnableSAR          = false;    // Parabolic SAR
-input double SARStep          = 0.02;
-input double SARMaximum       = 0.2;
-input bool EnableCCI          = false;    // CCI
-input int  CCILength          = 20;
-input double CCILongAbove     = 50.0;
-input double CCIShortBelow    = -50.0;
-input bool EnableADX          = false;    // ADX / DI
-input int  ADXPeriod          = 14;
-input double ADXThreshold     = 22.0;
 input string __10 = "======== BROKER COST (DISPLAY ONLY) ========"; // .
 // Commission never gates a trade in the original strategy - it is used only
 // so the result cards and the tracker can report the true cost of a fill.
@@ -248,16 +206,12 @@ input bool   ShowTradePanel         = true;     // Live trade ticket
 input bool   ShowTrackerPanel       = true;     // Standalone tracker (top-right)
 input int    TrackerWidthPx         = 430;      // Tracker panel width (px)
 input int    TrackerHeightPx        = 660;      // Tracker panel height (px)
-input ENUM_SF_FILTERVIEW FilterView = SF_VIEW_ACTIVE; // Filter list mode
 input int    HudMargin              = 12;       // Outer margin (px)
 input int    HudRefreshMs           = 220;      // Repaint interval (ms)
 input bool   HudInteractive         = true;     // Buttons + hover + hotkeys
 input int    HudScalePercent        = 100;      // 80..130 UI scale
 
 input string __12 = "======== CHART VISUALS ========"; // .
-input bool   DrawSignalOrbs         = true;     // Buy/Sell orbs
-input int    SignalHistoryBars      = 250;      // Historic orbs
-input int    SignalOrbSize          = 16;       // Orb radius (px)
 input bool   DrawTradeLevels        = true;     // Entry/SL/TP lines
 input bool   DrawTradeResults       = true;     // Closed trade result cards
 input int    MaxResultPills         = 25;       // Max result cards on chart
@@ -268,9 +222,6 @@ input bool   ShowLiveTradeCard      = true;     // Live card while a trade is op
 input int    ResultCardGapPx        = 18;       // Min gap from candles (px)
 input int    ResultCardSeparationPx = 40;       // Min gap BETWEEN result cards (px)
 input bool   BuyCardsAbove          = true;     // BUY cards above price, SELL below
-input bool   DrawIndicatorOverlay   = true;     // Master switch: plot filters on chart
-input string OverlayFilters         = "3";      // Filters drawn at start: CSV of indices, "all", or ""
-input int    OverlayBars            = 180;      // Bars plotted
 input bool   KeepVisualsAfterTest   = true;     // Keep graphics after a visual test
 
 input string __13 = "======== ALERTS ========"; // .
@@ -281,7 +232,6 @@ input bool   VerboseJournal         = true;     // Detailed journal logging
 //==================================================================//
 //                    G L O B A L   S T A T E                       //
 //==================================================================//
-#define SF_FILTERS 11
 
 // MQL4 has no OP_BALANCE / OP_CREDIT constants - those belong to MQL5. In
 // MQL4 the non-trade rows in the account history report these bare values
@@ -301,32 +251,8 @@ input bool   VerboseJournal         = true;     // Detailed journal logging
 #define SF_FW_BLACK    900
 
 string   PFX = "BKF_";   // object prefix - must differ from Signal Forge PRO
-string   gFilterName[SF_FILTERS];
 
-//--- signal state
-// gScore is the FILTER AGREEMENT meter (-100..+100), not a weighted conviction
-// score: the original strategy treats every enabled filter as an equal vote.
-int      gBull[SF_FILTERS], gBear[SF_FILTERS];
-bool     gEnabled[SF_FILTERS];
-// Per-filter chart-overlay visibility, toggled by the small DRAW button on
-// the FILTERS page. Independent of gEnabled[]: you can watch an indicator on
-// the chart without it voting, or let it vote without cluttering the chart.
-bool     gDrawFilter[SF_FILTERS];
-bool     gOverlayDirty = true;   // force a DrawOverlay() on the next paint
-
-// Does this filter have a price-chart representation? The oscillators are
-// read from indicator buffers that belong in a separate sub-window, so there
-// is nothing meaningful to plot over the candles for them.
-bool FilterHasOverlay(int i)
-  {
-   return (i == 0 ||   // SMA cross
-           i == 3 ||   // Supertrend
-           i == 5 ||   // Bollinger midline
-           i == 6 ||   // EMA cross
-           i == 8);    // Parabolic SAR
-  }
-double   gScore = 0.0, gPrevScore = 0.0;
-int      gAgreeBull = 0, gAgreeBear = 0, gAgreeOn = 0;
+//--- signal state: the live breakout direction, read by the shared HUD
 bool     gLongSignal = false, gShortSignal = false;
 
 //--- symbol / cost cache
@@ -360,7 +286,6 @@ string T(const string k);
 // MQL4 resolves top-down: the breakout engine sits far above these, so they
 // need forward declarations.
 bool MayOpenNewTrade(string &why);
-void CombinedSignal(int &bull[], int &bear[], bool &lng, bool &sht);
 
 string   gBlockReason = "";
 
@@ -372,10 +297,6 @@ int      gTheme = 0;    // see ENUM_SF_THEME
 int      gLastHistoryCount = -1;
 
 //--- supertrend incremental cache
-bool     gSTReady = false;
-double   gSTUpper = 0, gSTLower = 0, gSTLine = 0, gSTClose = 0;
-int      gSTDir = 0, gSTPrevDir = 0;
-datetime gSTTime = 0, gSTPrevTime = 0;
 
 //--- HUD
 // Two independent bitmap panels: the main HUD (top-left) and the standalone
@@ -404,6 +325,7 @@ bool     gHudCollapsed = false;
 #define BK_RETEST  3   // waiting for the retest to hold
 #define BK_TRADED  4   // this range already produced its trade(s)
 
+bool     gShowRangeBox = true;  // live copy of ShowRangeBox (inputs are read-only)
 int      gBkState      = BK_IDLE;
 double   gBkHigh       = 0.0;   // range high
 double   gBkLow        = 0.0;   // range low
@@ -425,9 +347,8 @@ string   gBkGateFail   = "";    // which gate rejected the setup
 #define BK_GATES 8
 bool     gBkGate[BK_GATES];
 
-int      gHudPage = 0;          // 0 = core, 1 = filters
+int      gHudPage = 0;          // 0 = core, 1 = breakout
 bool     gTrkCollapsed = false; // standalone tracker panel collapsed?
-bool     gShowAllFilters = false;
 bool     gPaused = false;
 int      gMouseX = -1, gMouseY = -1;   // chart-space cursor, for hover + click fallback
 uint     gLastMouseMs = 0;             // when the pointer last moved/clicked
@@ -454,7 +375,6 @@ bool DuplicateClick(const string id)
    gLastActionMs = GetTickCount();
    return false;
   }
-datetime gSignalHistoryBuilt = 0;
 int      gKnownResultHistory = -1;
 bool     gCardsDirty = true;      // force a closed-card rebuild (chart moved)
 // Cards are positioned in SCREEN pixels, so they must be re-laid-out whenever
@@ -588,11 +508,6 @@ double PointValue(double lots)
   }
 
 // Round-turn commission in account currency for the given lots.
-double CommissionRT(double lots)
-  {
-   return (lots / 0.01) * CommissionPer001LotRT;
-  }
-
 // The whole point of this block: express commission as PRICE DISTANCE.
 // Exness Raw gold = 3.50/lot/side = 0.07 round turn per 0.01 lot.
 // One point (0.001) on 0.01 lot is worth 0.001 USD, so 0.07 USD == 70 points.
@@ -677,19 +592,8 @@ void Journal(string msg)
 string Fmt(double v, int d) { return DoubleToString(v, d); }
 string Signed(double v, int d) { return (v >= 0 ? "+" : "") + DoubleToString(v, d); }
 
-double MinStopDistance()
-  {
-   return (gStopLevel + 2) * gPoint;
-  }
-
 // v1 sized risk off the balance, with an optional fixed reference balance so
 // a small live account can be tuned as if it were larger (or smaller).
-double RiskCapital()
-  {
-   if(RiskReferenceBalance > 0) return RiskReferenceBalance;
-   return AccountBalance();
-  }
-
 // Money value of one point per 1.00 lot - used by the cost readouts.
 double PointValuePerLot()
   {
@@ -722,129 +626,6 @@ datetime MonthStart(datetime t)
 // cooldowns, cost-aware targets, adaptive spread) has been removed
 // at the user's request.
 //==================================================================//
-
-//---- Supertrend: recursive band, advanced one closed bar at a time
-void AdvanceSupertrend(int shift)
-  {
-   double atr = iATR(NULL, 0, MathMax(1, SupertrendLength), shift);
-   double upper = (High[shift] + Low[shift]) * 0.5 + SupertrendFactor * atr;
-   double lower = (High[shift] + Low[shift]) * 0.5 - SupertrendFactor * atr;
-   double finalUpper = upper, finalLower = lower, st = upper;
-   int direction = 1;
-   if(!gSTReady || atr <= 0)
-     {
-      if(atr > 0) gSTReady = true;
-     }
-   else
-     {
-      finalUpper = (upper < gSTUpper || gSTClose > gSTUpper) ? upper : gSTUpper;
-      finalLower = (lower > gSTLower || gSTClose < gSTLower) ? lower : gSTLower;
-      if(gSTLine == gSTUpper) st = (Close[shift] > finalUpper) ? finalLower : finalUpper;
-      else                    st = (Close[shift] < finalLower) ? finalUpper : finalLower;
-      direction = (st == finalLower) ? -1 : 1;
-     }
-   gSTPrevTime = gSTTime;
-   gSTPrevDir  = gSTDir;
-   gSTUpper = finalUpper; gSTLower = finalLower; gSTLine = st; gSTClose = Close[shift];
-   gSTDir  = gSTReady ? direction : 0;
-   gSTTime = Time[shift];
-  }
-
-int SupertrendDirection(int shift)
-  {
-   if(Time[shift] == gSTTime)     return gSTDir;
-   if(Time[shift] == gSTPrevTime) return gSTPrevDir;
-   // Normal sequential tester/live path: advance only the newly closed bar.
-   if(gSTTime != 0 && shift + 1 < Bars && Time[shift + 1] == gSTTime)
-     {
-      AdvanceSupertrend(shift);
-      return gSTDir;
-     }
-   // First call or a history/timeframe jump: seed once from older history.
-   gSTReady = false; gSTUpper = 0; gSTLower = 0; gSTLine = 0; gSTClose = 0;
-   gSTDir = 0; gSTPrevDir = 0; gSTTime = 0; gSTPrevTime = 0;
-   int oldest = MathMin(Bars - 2, shift + 600);
-   for(int i = oldest; i >= shift; i--) AdvanceSupertrend(i);
-   return gSTDir;
-  }
-
-//---- the 11 original filters -------------------------------------
-void GetConditions(int shift, int &bull[], int &bear[])
-  {
-   double a = iMA(NULL, 0, MathMax(1, SMAFastLength), 0, MODE_SMA, PRICE_CLOSE, shift);
-   double b = iMA(NULL, 0, MathMax(1, SMASlowLength), 0, MODE_SMA, PRICE_CLOSE, shift);
-   bull[0] = (a > b); bear[0] = (a < b);
-
-   double r = iRSI(NULL, 0, MathMax(1, RSILength), PRICE_CLOSE, shift);
-   bull[1] = (r > RSILongAbove); bear[1] = (r < RSIShortBelow);
-
-   double m = iMACD(NULL, 0, MACDFastLength, MACDSlowLength, MACDSignalLength, PRICE_CLOSE, MODE_MAIN, shift);
-   double s = iMACD(NULL, 0, MACDFastLength, MACDSlowLength, MACDSignalLength, PRICE_CLOSE, MODE_SIGNAL, shift);
-   bull[2] = (m > s); bear[2] = (m < s);
-
-   int sd = SupertrendDirection(shift);
-   bull[3] = (sd == -1); bear[3] = (sd == 1);
-
-   double k = iStochastic(NULL, 0, StochasticKLength, StochasticDLength, StochasticSmooth, MODE_SMA, 0, MODE_MAIN, shift);
-   bull[4] = (k > 50); bear[4] = (k < 50);
-
-   double mid = iMA(NULL, 0, BollingerLength, 0, MODE_SMA, PRICE_CLOSE, shift);
-   bull[5] = (Close[shift] > mid); bear[5] = (Close[shift] < mid);
-
-   double ef = iMA(NULL, 0, EMAFastLength, 0, MODE_EMA, PRICE_CLOSE, shift);
-   double es = iMA(NULL, 0, EMASlowLength, 0, MODE_EMA, PRICE_CLOSE, shift);
-   bull[6] = (ef > es); bear[6] = (ef < es);
-
-   double ao = iAO(NULL, 0, shift);
-   bull[7] = (ao > 0); bear[7] = (ao < 0);
-
-   double sar = iSAR(NULL, 0, SARStep, SARMaximum, shift);
-   bull[8] = (Close[shift] > sar); bear[8] = (Close[shift] < sar);
-
-   double cci = iCCI(NULL, 0, CCILength, PRICE_CLOSE, shift);
-   bull[9] = (cci > CCILongAbove); bear[9] = (cci < CCIShortBelow);
-
-   double adx = iADX(NULL, 0, ADXPeriod, PRICE_CLOSE, MODE_MAIN,    shift);
-   double dp  = iADX(NULL, 0, ADXPeriod, PRICE_CLOSE, MODE_PLUSDI,  shift);
-   double dm  = iADX(NULL, 0, ADXPeriod, PRICE_CLOSE, MODE_MINUSDI, shift);
-   bull[10] = (adx > ADXThreshold && dp > dm);
-   bear[10] = (adx > ADXThreshold && dm > dp);
-  }
-
-//---- AND / OR combination ----------------------------------------
-void CombinedSignal(int &bull[], int &bear[], bool &lng, bool &sht)
-  {
-   lng = RequireAllEnabledIndicatorsToAlign;
-   sht = RequireAllEnabledIndicatorsToAlign;
-   bool any = false;
-   for(int i = 0; i < SF_FILTERS; i++)
-     {
-      if(!gEnabled[i]) continue;
-      if(RequireAllEnabledIndicatorsToAlign)
-        { lng = (lng && bull[i] != 0); sht = (sht && bear[i] != 0); }
-      else
-        { lng = (lng || bull[i] != 0); sht = (sht || bear[i] != 0); }
-      any = true;
-     }
-   if(!any) { lng = false; sht = false; }
-  }
-
-// Agreement of the ENABLED filters, as a signed -100..+100 figure.
-// v1 has no weighted score, so the HUD gauge shows how many enabled
-// filters currently agree rather than inventing a conviction number.
-double AgreementScore(int &bull[], int &bear[], int &nBull, int &nBear, int &nOn)
-  {
-   nBull = 0; nBear = 0; nOn = 0;
-   for(int i = 0; i < SF_FILTERS; i++)
-     {
-      if(!gEnabled[i]) continue;
-      nOn++;
-      if(bull[i]) nBull++;
-      if(bear[i]) nBear++;
-     }
-   if(nOn <= 0) return 0.0;
-   return (double)(nBull - nBear) / (double)nOn * 100.0;
-  }
 
 //==================================================================//
 //              P O S I T I O N   /   O R D E R S                   //
@@ -1011,6 +792,17 @@ string BkGateName(int g)
    if(g == 5) return "BODY CLOSE";
    if(g == 6) return "NO ROLLOVER";
    return "DAILY LIMIT";
+  }
+
+// One place that turns the state machine into words, so the CORE panel and
+// the BREAKOUT page can never describe the same state differently.
+string BkStateText()
+  {
+   if(gBkState == BK_TRADED)  return T("TRADE TAKEN");
+   if(gBkState == BK_RETEST)  return T("WAITING RETEST");
+   if(gBkState == BK_BROKEN)  return T("BROKEN");
+   if(gBkValid)               return T("WAITING FOR BREAK");
+   return T("BUILDING RANGE");
   }
 
 int BkGatesPassed()
@@ -1274,16 +1066,6 @@ int RetestResult(int shift)
   }
 
 // Optional confluence with the inherited 11 filters.
-bool ConfluenceAgrees(int dir, int &bull[], int &bear[])
-  {
-   if(!UseIndicatorConfluence) return true;
-   bool lng = false, sht = false;
-   CombinedSignal(bull, bear, lng, sht);
-   if(dir > 0) return lng;
-   if(dir < 0) return sht;
-   return false;
-  }
-
 void ManageTrailing()
   {
    if(!EnableTrailingStop) return;
@@ -1353,13 +1135,6 @@ double ATRRatio(int shift)
 // The agreement level at which the combined signal actually fires.
 // AND mode needs every enabled filter to agree, so the meter must hit +/-100.
 // OR mode fires on a single vote, so the arm line sits at one filter's share.
-double ArmThreshold()
-  {
-   if(RequireAllEnabledIndicatorsToAlign) return 100.0;
-   if(gAgreeOn <= 0) return 100.0;
-   return 100.0 / gAgreeOn;
-  }
-
 // Today's realised P/L as a percentage of the day's opening equity.
 double DayPnLPercent()
   {
@@ -2044,10 +1819,6 @@ string T(const string k)
    return k;                       // untranslated keys stay English
   }
 
-// Convenience: translate AND shape in one call, for text that is drawn
-// through a path that does not already run ArFix().
-string TR(const string k) { return ArFix(T(k)); }
-
 // The Latin UI font has no Arabic glyphs, so the font must switch with the
 // language. Everything else (sizes, weights, layout) is unchanged.
 string UIFont(const string latin)
@@ -2159,21 +1930,6 @@ void RegisterButton(string id, int x, int y, int w, int h)
    gButtons[gButtonCount].w  = w;
    gButtons[gButtonCount].h  = h;
    gButtonCount++;
-  }
-
-void PruneHotspots()
-  {
-   int total = ObjectsTotal(0, -1, OBJ_BUTTON);
-   for(int i = total - 1; i >= 0; i--)
-     {
-      string n = ObjectName(0, i, -1, OBJ_BUTTON);
-      if(StringFind(n, PFX + "BTN_") != 0) continue;
-      string id = StringSubstr(n, StringLen(PFX + "BTN_"));
-      bool live = false;
-      for(int k = 0; k < gButtonCount; k++)
-         if(gButtons[k].id == id) { live = true; break; }
-      if(!live) ObjectDelete(0, n);
-     }
   }
 
 string HitButton(int x, int y)
@@ -2320,16 +2076,6 @@ void TextVC(int x, int y, int h, string s, uint c, int size = 8,
    gCv.TextOut(x, y + (h - th) / 2, d, c, SF_AL_LEFT | SF_AL_TOP);
   }
 
-void TextCenterVC(int cx, int y, int h, string s, uint c, int size = 8,
-                  string font = "Segoe UI", uint flags = 0)
-  {
-   gCv.FontSet(UIFont(font), SC(size) * -10, flags);
-   string d = ArFix(s);
-   int tw = 0, th = 0;
-   gCv.TextSize(d, tw, th);
-   gCv.TextOut(cx, y + (h - th) / 2, d, c, SF_AL_CENTER | SF_AL_TOP);
-  }
-
 void TextRight(int x, int y, string s, uint c, int size = 8, string font = "Segoe UI", uint flags = 0)
   {
    gCv.FontSet(UIFont(font), SC(size) * -10, flags);
@@ -2359,26 +2105,8 @@ void TextBoxCenter(int x, int y, int w, int h, string s, uint c, int size = 8,
 
 // Horizontal meter with a filled portion - used for score, risk and cost.
 // blend two ARGB colours (t = 0..1)
-uint MixC(uint a, uint b, double t)
-  {
-   t = MathMax(0.0, MathMin(1.0, t));
-   int ar = (int)((a >> 16) & 0xFF), ag = (int)((a >> 8) & 0xFF), ab = (int)(a & 0xFF);
-   int br = (int)((b >> 16) & 0xFF), bg = (int)((b >> 8) & 0xFF), bb = (int)(b & 0xFF);
-   int rr = (int)(ar + (br - ar) * t);
-   int rg = (int)(ag + (bg - ag) * t);
-   int rb = (int)(ab + (bb - ab) * t);
-   return (uint)(0xFF000000 | ((uint)rr << 16) | ((uint)rg << 8) | (uint)rb);
-  }
-
 // Strength-graded fill: weak -> amber, mid -> accent, strong -> bull/bear.
 // Lets you read signal conviction from the bar colour, not just its length.
-uint StrengthColor(double pct01, uint strongC)
-  {
-   pct01 = MathMax(0.0, MathMin(1.0, pct01));
-   if(pct01 < 0.5) return MixC(TWarn, TAccent, pct01 / 0.5);
-   return MixC(TAccent, strongC, (pct01 - 0.5) / 0.5);
-  }
-
 void Meter(int x, int y, int w, int h, double pct01, uint fill, uint track)
   {
    pct01 = MathMax(0.0, MathMin(1.0, pct01));
@@ -2391,48 +2119,9 @@ void Meter(int x, int y, int w, int h, double pct01, uint fill, uint track)
    gCv.Line(x + 2, y + 2, x + fw - 1, y + 2, A(C'255,255,255',70));
   }
 
-void MeterGraded(int x, int y, int w, int h, double pct01, uint strongC, uint track)
-  {
-   Meter(x, y, w, h, pct01, StrengthColor(pct01, strongC), track);
-  }
-
 
 // Semi-circular conviction gauge. The needle sweeps from full bear (left)
 // to full bull (right); the arc itself is coloured by the live score.
-void ScoreGauge(int cx, int cy, int radius, double score)
-  {
-   double norm = MathMax(-100.0, MathMin(100.0, score));
-   double arm  = ArmThreshold();
-   uint  col   = (norm >=  arm) ? TBull :
-                 (norm <= -arm) ? TBear : TFlat;
-
-   for(int deg = 180; deg <= 360; deg++)
-     {
-      double rad = deg * M_PI / 180.0;
-      double frac = (deg - 180) / 180.0;                // 0 = far left
-      double val  = -100.0 + frac * 200.0;
-      bool lit = (norm >= 0) ? (val >= 0 && val <= norm) : (val <= 0 && val >= norm);
-      uint c = lit ? col : TGridC;
-      for(int t = 0; t < SC(7); t++)
-        {
-         int px = cx + (int)MathRound(MathCos(rad) * (radius - t));
-         int py = cy + (int)MathRound(MathSin(rad) * (radius - t));
-         gCv.PixelSet(px, py, c);
-        }
-     }
-   // centre zero tick
-   gCv.Line(cx, cy - radius, cx, cy - radius + SC(9), TTextDim);
-
-   // needle
-   double ndeg = 180.0 + (norm + 100.0) / 200.0 * 180.0;
-   double nrad = ndeg * M_PI / 180.0;
-   int nx = cx + (int)MathRound(MathCos(nrad) * (radius - SC(11)));
-   int ny = cy + (int)MathRound(MathSin(nrad) * (radius - SC(11)));
-   gCv.Line(cx, cy, nx, ny, col);
-   gCv.Line(cx, cy - 1, nx, ny - 1, col);
-   gCv.FillCircle(cx, cy, SC(4), col);
-  }
-
 // Compact sparkline of the closed-trade equity curve.
 void Sparkline(int x, int y, int w, int h, uint line, uint fill)
   {
@@ -2590,24 +2279,6 @@ void DrawButton(int x, int y, int w, int h, string id, string caption, bool acti
 // oscillators that have no price-chart representation at all.
 // Reads "ON" / "OFF" explicitly rather than a cryptic glyph, and is wide
 // enough to hit comfortably with the mouse.
-void DrawMiniToggle(int x, int y, int w, int h, string id, bool on, bool available)
-  {
-   if(!available)
-     {
-      // no chart representation - draw an inert plate on the canvas, with no
-      // clickable object behind it
-      RaisedPlate(x, y, w, h, SC(3), TBg2, TBorder, true, 1);
-      TextBoxCenter(x, y, w, h, T("N/A"), TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
-      return;
-     }
-   uint fill = on ? TBullDeep : TGridC;
-   uint txt  = on ? A(C'255,255,255',255) : TTextDim;
-   uint edge = on ? TBull : TBorder;
-   ChartButton(id, gCvOx + x, gCvOy + y, w, h, on ? "ON" : "OFF",
-               CLR(fill), CLR(txt), CLR(edge), 7, "Segoe UI Black");
-   RegisterButton(id, gCvOx + x, gCvOy + y, w, h);
-  }
-
 
 void PaintHud()
   {
@@ -2638,19 +2309,6 @@ void PaintHud()
    if(ShowRiskPanel)        pageH += SC(112) + SC(8); // execution console
    if(ShowTradePanel)       pageH += SC(74)  + SC(8); // live trade ticket
    if(gHudPage == 1)
-     {
-      // FILTERS page: size to the rows we will actually draw. This used to be
-      // a fixed SC(500), which left a large empty well under the list whenever
-      // only a few filters were enabled (the stock setup runs SUPERTREND
-      // alone, so one row sat above ~400px of nothing).
-      int visRows = 0;
-      for(int r = 0; r < SF_FILTERS; r++)
-         if(gShowAllFilters || gEnabled[r]) visRows++;
-      if(visRows <= 0) visRows = 1;
-      //   header + tabs + column head + rows + footer buttons + padding
-      pageH = headerH + SC(6) + SC(32) + SC(30) + visRows * SC(27) + SC(46) + SC(8);
-     }
-   else if(gHudPage == 2)
      {
       // BREAKOUT page: range card + state strip + distance meter +
       // the 8-gate checklist + the footer buttons. Summed, never guessed.
@@ -2731,17 +2389,15 @@ void PaintHud()
    // Row layout: [ CORE ][ FILTERS ][ lang ][ theme ]
    // The two square buttons on the right switch the interface language and
    // the colour theme live, with no need to reopen the EA properties dialog.
-   // Three pages now: CORE | BREAKOUT | FILTERS, then the two square
-   // language/theme buttons. The tab width is derived, never hardcoded,
-   // so adding the third page cannot push the squares off the panel.
+   // Two pages: CORE | BREAKOUT, then the language and theme squares.
+   // The tab width is derived from the counts, never hardcoded.
    int sqW   = SC(30);
-   int tabW3 = (innerW - SC(8) * 4 - sqW * 2) / 3;
-   int lx    = pad + (tabW3 + SC(8)) * 3;
+   int tabW2 = (innerW - SC(8) * 3 - sqW * 2) / 2;
+   int lx    = pad + (tabW2 + SC(8)) * 2;
    int tx    = lx + sqW + SC(8);
    // TRACKER is no longer a tab - it lives in its own top-right panel.
-   DrawButton(pad,                        y, tabW3, SC(24), "TAB_CORE",     T("CORE"),     gHudPage == 0, TAccent);
-   DrawButton(pad + (tabW3 + SC(8)),      y, tabW3, SC(24), "TAB_BREAKOUT", T("BREAKOUT"), gHudPage == 2, TAccent);
-   DrawButton(pad + (tabW3 + SC(8)) * 2,  y, tabW3, SC(24), "TAB_FILTERS",  T("FILTERS"),  gHudPage == 1, TAccent);
+   DrawButton(pad,                   y, tabW2, SC(24), "TAB_CORE",     T("CORE"),     gHudPage == 0, TAccent);
+   DrawButton(pad + tabW2 + SC(8),   y, tabW2, SC(24), "TAB_BREAKOUT", T("BREAKOUT"), gHudPage == 1, TAccent);
    // Language: shows the language you will switch TO, so the button always
    // reads in the script the user is about to get.
    DrawButton(lx, y, sqW, SC(24), "BTN_LANG",
@@ -2758,29 +2414,29 @@ void PaintHud()
       //---------- filter agreement gauge ----------
       if(ShowSignalPanel)
         {
-        // v1 has no weighted conviction score: every enabled filter is one
-        // equal vote, so this meter shows how the votes currently split.
+        // Breakout status at a glance: where the range is, and how close
+        // price is to the level that would actually fire a trade.
         int gaugeH = SC(126);
         RaisedPlate(pad, y, innerW, gaugeH, SC(10), TPanel, TBorder);
         AccentSpine(pad + SC(4), y + SC(7), SC(13), TAccent);
-        Text(pad + SC(13), y + SC(6), T("FILTER AGREEMENT"), TText, 8, "Segoe UI Black", SF_FW_BLACK);
+        Text(pad + SC(13), y + SC(6), T("BREAKOUT STATUS"), TText, 8, "Segoe UI Black", SF_FW_BLACK);
 
-        int cx = pad + innerW / 2, cy = y + gaugeH - SC(18);
-        ScoreGauge(cx, cy, SC(58), gScore);
+        uint stc = (gBkDir > 0) ? TBull : (gBkDir < 0) ? TBear : TFlat;
+        string stt = BkStateText();
+        TextBoxCenter(pad, y + SC(30), innerW, SC(30), stt, stc, 15,
+                      "Segoe UI Black", SF_FW_BLACK);
 
-        double arm = ArmThreshold();
-        uint sc = (gScore >= arm) ? TBull : (gScore <= -arm) ? TBear : TFlat;
-        string dir = gLongSignal ? T("LONG") : (gShortSignal ? T("SHORT") : T("NEUTRAL"));
-        TextCenter(cx, cy - SC(48), Signed(gScore, 0), sc, 19, "Segoe UI Black", SF_FW_BLACK);
-        TextCenter(cx, cy - SC(19), dir, sc, 8, "Segoe UI Semibold", SF_FW_SEMI);
-        Text(pad + SC(14), cy - SC(6), "-100", TTextDim, 7);
-        TextRight(pad + innerW - SC(14), cy - SC(6), "+100", TTextDim, 7);
+        string sdir = (gBkDir > 0) ? T("UPSIDE") : (gBkDir < 0) ? T("DOWNSIDE")
+                                                                : T("PRICE INSIDE RANGE");
+        TextBoxCenter(pad, y + SC(60), innerW, SC(16), sdir, TTextDim, 7);
 
-        Text(pad + SC(12), y + SC(22),
-             RequireAllEnabledIndicatorsToAlign ? T("MODE: ALL") : T("MODE: ANY"), TAccent, 7);
-        TextRight(pad + innerW - SC(12), y + SC(22),
-                  IntegerToString(gAgreeBull) + "▲ / " + IntegerToString(gAgreeBear) + "▼  of " +
-                  IntegerToString(gAgreeOn), TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
+        // distance-to-trigger meter
+        Text(pad + SC(12), y + SC(80), T("DISTANCE TO BREAK"), TAccent, 7);
+        TextRight(pad + innerW - SC(12), y + SC(80),
+                  DoubleToString(gBkDistPct, 0) + "%", TText, 7,
+                  "Segoe UI Semibold", SF_FW_SEMI);
+        Meter(pad + SC(12), y + SC(96), innerW - SC(24), SC(14),
+              gBkDistPct / 100.0, (gBkDistPct > 85) ? TBull : TAccent, TBg2);
         y += gaugeH + SC(8);
         }
 
@@ -2909,8 +2565,8 @@ void PaintHud()
         {
          TextCenter(pad + innerW / 2, y + SC(16), T("NO OPEN POSITION"), TTextDim, 9, "Segoe UI Semibold", SF_FW_SEMI);
          TextCenter(pad + innerW / 2, y + SC(34),
-                    (RequireAllEnabledIndicatorsToAlign ? T("ALL-ALIGN") : T("ANY-ALIGN")) +
-                    "   ·   " + (gBlockReason == "" ? T("SCANNING") : gBlockReason), TTextDim, 7);
+                    BkStateText() + "   ·   " +
+                    (gBlockReason == "" ? T("SCANNING") : gBlockReason), TTextDim, 7);
          double atrNow = ATRPoints(1);
          TextCenter(pad + innerW / 2, y + SC(50),
                     "ATR " + Fmt(atrNow, 0) + " " + T("pts") + "   ·   " + T("REGIME") + " " +
@@ -2924,93 +2580,14 @@ void PaintHud()
       DrawButton(pad,                    y, bw, SC(26), "BTN_PAUSE",
                  gPaused ? T("RESUME") : T("PAUSE"), gPaused, TFlat);
       DrawButton(pad + bw + SC(8),       y, bw, SC(26), "BTN_CLOSE", T("CLOSE ALL"), false, TBear);
-      DrawButton(pad + (bw + SC(8)) * 2, y, bw, SC(26), "BTN_THEME", T("OVERLAY"),
-                 DrawIndicatorOverlay, TAccent2);
+      DrawButton(pad + (bw + SC(8)) * 2, y, bw, SC(26), "BTN_THEME", T("RANGE BOX"),
+                 gShowRangeBox, TAccent2);
      }
 
    //================================================================
    //                      PAGE 1 : FILTERS
    //================================================================
    else if(gHudPage == 1)
-     {
-      SunkenWell(pad, y, innerW, SC(26), SC(6), TBg2);
-      TextVC(pad + SC(10),  y, SC(26), T("FILTER"), TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-      TextVC(pad + SC(106), y, SC(26), T("DRAW"),   TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-      TextVC(pad + SC(148), y, SC(26), T("BIAS"),   TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-      TextVC(pad + SC(226), y, SC(26), T("VOTE"), TAccent, 7, "Segoe UI Black", SF_FW_BLACK);
-      TextRight(pad + innerW - SC(10), y + SC(9), T("AGREEMENT"), TAccent, 7,
-                "Segoe UI Black", SF_FW_BLACK);
-      y += SC(30);
-
-      // Every enabled filter is one equal vote in the original strategy,
-      // so each active row carries the same share of the decision.
-      int votes = 0;
-      for(int i = 0; i < SF_FILTERS; i++) if(gEnabled[i]) votes++;
-      if(votes <= 0) votes = 1;
-      double share = 1.0 / votes;
-
-      int rowH = SC(27);
-      for(int i = 0; i < SF_FILTERS; i++)
-        {
-         if(!gShowAllFilters && !gEnabled[i]) continue;
-         if(y + rowH > H - SC(46)) break;
-         uint rowBg = (i % 2 == 0) ? TPanel : TBg2;
-         RoundRect(pad, y, innerW, rowH - SC(3), SC(4), rowBg, rowBg, false);
-         if(gEnabled[i]) AccentSpine(pad + 1, y + SC(3), rowH - SC(9),
-                                     gBull[i] ? TBull : (gBear[i] ? TBear : TFlat));
-
-         int cellH = rowH - SC(3);
-         StatusDot(pad + SC(12), y + SC(11), SC(3), gEnabled[i], TAccent, TGridC);
-         TextVC(pad + SC(22), y, cellH, gFilterName[i], gEnabled[i] ? TText : TTextDim, 7,
-                "Segoe UI Semibold", SF_FW_SEMI);
-
-         // DRAW toggle: sits BETWEEN the filter name and the bias card and
-         // adds/removes that indicator's plot on the price chart.
-         int tW = SC(32), tH = SC(15);
-         int tX = pad + SC(106), tY = y + (cellH - tH) / 2;
-         DrawMiniToggle(tX, tY, tW, tH, "DRAW_" + IntegerToString(i),
-                        gDrawFilter[i], FilterHasOverlay(i));
-
-         // BIAS card: SOLID RAISED, background carries the state colour and
-         // the text is always white so it reads at a glance.
-         string bias = gBull[i] ? T("BULLISH") : (gBear[i] ? T("BEARISH") : T("FLAT"));
-         uint bgC, edC;
-         if(!gEnabled[i])      { bgC = TGridC;    edC = TBorder; }
-         else if(gBull[i])     { bgC = TBullDeep; edC = TBull;   }
-         else if(gBear[i])     { bgC = TBearDeep; edC = TBear;   }
-         else                  { bgC = TGreyDeep; edC = TLite;   }  // FLAT = grey
-         int bW = SC(76), bH = SC(17);   // fits the longest bias word in both languages
-         int bX = pad + SC(148), bY = y + (cellH - bH) / 2;
-         RaisedPlate(bX, bY, bW, bH, SC(3), bgC, edC, true, 1);
-         TextBoxCenter(bX, bY, bW, bH, bias, A(C'255,255,255',255), 7,
-                       "Segoe UI Black", SF_FW_BLACK);
-
-         TextVC(pad + SC(230), y, cellH,
-                gEnabled[i] ? (Fmt(share * 100.0, 0) + "%") : "--",
-                gEnabled[i] ? TText : TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
-
-         // AGREEMENT bar: full when this filter votes with the current signal
-         int barX = pad + SC(262), barW = innerW - SC(274);
-         if(!gEnabled[i]) Meter(barX, y + (cellH - SC(7)) / 2, barW, SC(7), 0, TGridC, TGridC);
-         else
-           {
-            bool sides = (gBull[i] && gLongSignal) || (gBear[i] && gShortSignal);
-            double fill = (gBull[i] || gBear[i]) ? (sides ? 1.0 : 0.55) : 0.12;
-            uint strongC = gBull[i] ? TBull : (gBear[i] ? TBear : TFlat);
-            MeterGraded(barX, y + (cellH - SC(7)) / 2, barW, SC(7), fill, strongC, TGridC);
-           }
-         y += rowH;
-        }
-
-      y = H - SC(40);
-      int bw2 = (innerW - SC(8)) / 2;
-      DrawButton(pad, y, bw2, SC(26), "BTN_VIEW",
-                 gShowAllFilters ? T("SHOWING ALL") : T("ACTIVE ONLY"), gShowAllFilters, TAccent);
-      DrawButton(pad + bw2 + SC(8), y, bw2, SC(26), "BTN_PAUSE",
-                 gPaused ? T("RESUME") : T("PAUSE"), gPaused, TFlat);
-     }
-   //================= BREAKOUT PAGE =================
-   else if(gHudPage == 2)
      {
       //---- the range itself -------------------------------------
       RaisedPlate(pad, y, innerW, SC(96), SC(8), TPanel, TBorder, true, 1);
@@ -3045,12 +2622,12 @@ void PaintHud()
       y += SC(96) + SC(8);
 
       //---- state strip -------------------------------------------
-      string st; uint stc;
-      if(gBkState == BK_TRADED)       { st = T("TRADE TAKEN");       stc = TAccent2; }
-      else if(gBkState == BK_RETEST)  { st = T("WAITING RETEST");    stc = TAccent2; }
-      else if(gBkState == BK_BROKEN)  { st = T("BROKEN");            stc = (gBkDir > 0) ? TBull : TBear; }
-      else if(gBkValid)               { st = T("WAITING FOR BREAK"); stc = TAccent; }
-      else                            { st = T("BUILDING RANGE");    stc = TTextDim; }
+      string st = BkStateText();
+      uint stc;
+      if(gBkState == BK_TRADED || gBkState == BK_RETEST) stc = TAccent2;
+      else if(gBkState == BK_BROKEN)                     stc = (gBkDir > 0) ? TBull : TBear;
+      else if(gBkValid)                                  stc = TAccent;
+      else                                               stc = TTextDim;
       RaisedPlate(pad, y, innerW, SC(54), SC(8), TPanelHi, stc, true, 1);
       TextBoxCenter(pad, y + SC(4), innerW, SC(26), st, stc, 11,
                     "Segoe UI Black", SF_FW_BLACK);
@@ -3353,122 +2930,14 @@ void PaintAll()
    // over belongs to something no longer on screen (a collapsed panel, the
    // other tab's rows). Deleting them is what makes collapse actually hide
    // the buttons instead of leaving them floating over the chart.
-   PruneHotspots();
   }
 
 //==================================================================//
 //              C H A R T   V I S U A L S                           //
 //==================================================================//
-string gBuyOrb = "", gSellOrb = "";
-
-void BuildOrb(bool buy)
-  {
-   int side = MathMax(20, SC(SignalOrbSize) * 2);
-   int c = side / 2;
-   double radius = c - 1;
-   uint px[]; ArrayResize(px, side * side); ArrayInitialize(px, 0);
-   uint core = buy ? A(C'0,230,160',255) : A(C'255,70,102',255);
-   uint ring = buy ? A(C'0,110,84',255)  : A(C'120,20,40',255);
-   uint glow = buy ? A(C'120,255,215',255) : A(C'255,150,175',255);
-   for(int y = 0; y < side; y++)
-      for(int x = 0; x < side; x++)
-        {
-         double dx = x - c + 0.5, dy = y - c + 0.5;
-         double d = MathSqrt(dx * dx + dy * dy);
-         if(d > radius) continue;
-         uint v = (d > radius - 2) ? ring : core;
-         if(d > radius - 3 && x < c && y < c) v = glow;
-         px[y * side + x] = v;
-        }
-   string pat[7];
-   if(buy)
-     { pat[0]="11110"; pat[1]="10001"; pat[2]="10001"; pat[3]="11110";
-       pat[4]="10001"; pat[5]="10001"; pat[6]="11110"; }
-   else
-     { pat[0]="01111"; pat[1]="10000"; pat[2]="10000"; pat[3]="01110";
-       pat[4]="00001"; pat[5]="00001"; pat[6]="11110"; }
-   int scale = MathMax(1, MathMin(3, side / 12));
-   int sx = (side - 5 * scale) / 2, sy = (side - 7 * scale) / 2;
-   uint white = A(C'255,255,255',255);
-   for(int r = 0; r < 7; r++)
-      for(int col = 0; col < 5; col++)
-         if(StringSubstr(pat[r], col, 1) == "1")
-            for(int py = 0; py < scale; py++)
-               for(int pxx = 0; pxx < scale; pxx++)
-                 {
-                  int dx2 = sx + col * scale + pxx, dy2 = sy + r * scale + py;
-                  if(dx2 >= 0 && dx2 < side && dy2 >= 0 && dy2 < side) px[dy2 * side + dx2] = white;
-                 }
-   string res = buy ? gBuyOrb : gSellOrb;
-   ResourceFree(res);
-   ResourceCreate(res, px, side, side, 0, 0, side, COLOR_FORMAT_ARGB_NORMALIZE);
-  }
-
-void DrawOrb(bool buy, int shift)
-  {
-   if(shift < 0 || shift >= Bars) return;
-   datetime when = Time[shift];
-   double atr = iATR(NULL, 0, MathMax(1, ATRLength), shift);
-   double price = buy ? Low[shift] - atr * 0.7 : High[shift] + atr * 0.7;
-   string base = PFX + "ORB_" + IntegerToString((int)when) + (buy ? "_B" : "_S");
-   if(ObjectFind(0, base) < 0) ObjectCreate(0, base, OBJ_BITMAP, 0, when, price);
-   ObjectMove(0, base, 0, when, price);
-   ObjectSetString(0, base, OBJPROP_BMPFILE, 0, buy ? gBuyOrb : gSellOrb);
-   ObjectSetInteger(0, base, OBJPROP_ANCHOR, ANCHOR_CENTER);
-   ObjectSetInteger(0, base, OBJPROP_BACK, true);
-   ObjectSetInteger(0, base, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, base, OBJPROP_HIDDEN, true);
-
-   string link = base + "_L";
-   double anchor = buy ? Low[shift] : High[shift];
-   if(ObjectFind(0, link) < 0) ObjectCreate(0, link, OBJ_TREND, 0, when, anchor, when, price);
-   ObjectMove(0, link, 0, when, anchor);
-   ObjectMove(0, link, 1, when, price);
-   ObjectSetInteger(0, link, OBJPROP_RAY_RIGHT, false);
-   ObjectSetInteger(0, link, OBJPROP_STYLE, STYLE_DOT);
-   ObjectSetInteger(0, link, OBJPROP_COLOR, buy ? C'0,230,160' : C'255,70,102');
-   ObjectSetInteger(0, link, OBJPROP_BACK, true);
-   ObjectSetInteger(0, link, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, link, OBJPROP_HIDDEN, true);
-  }
 
 // True once this symbol/period actually has usable data. iMA() on a partially
 // downloaded series returns 0.0, which silently produces invisible plots.
-bool SeriesReady()
-  {
-   if(Bars < 50) return false;
-   if(Close[0] <= 0.0 || Close[Bars - 1] <= 0.0) return false;
-   double probe = iMA(NULL, 0, 20, 0, MODE_SMA, PRICE_CLOSE, 1);
-   return (probe > 0.0 && probe != EMPTY_VALUE && MathIsValidNumber(probe));
-  }
-
-void BuildHistoricalOrbs()
-  {
-   if(!DrawSignalOrbs || gSignalHistoryBuilt != 0) return;
-   // gSignalHistoryBuilt is a ONE-SHOT latch: if it were set while the live
-   // history was still backfilling, the orbs would be computed from 0.0-valued
-   // indicators and never rebuilt. Wait for real data first.
-   if(!SeriesReady()) return;
-   int maxBars = MathMax(10, MathMin(SignalHistoryBars, Bars - 5));
-   int bull[SF_FILTERS], bear[SF_FILTERS];
-   ArrayInitialize(bull, 0); ArrayInitialize(bear, 0);
-   bool prevL = false, prevS = false;
-   // walk oldest -> newest so the incremental supertrend cache stays in step
-   for(int shift = maxBars + 1; shift >= 1; shift--)
-     {
-      GetConditions(shift, bull, bear);
-      bool l = false, s = false;
-      CombinedSignal(bull, bear, l, s);
-      if(shift <= maxBars)
-        {
-         if(l && !prevL) DrawOrb(true, shift);
-         if(s && !prevS) DrawOrb(false, shift);
-        }
-      prevL = l; prevS = s;
-     }
-   gSignalHistoryBuilt = Time[0];
-  }
-
 void SetLevelLine(string id, double price, color c, int style, int width, string txt)
   {
    string n = PFX + "LVL_" + id;
@@ -3512,7 +2981,7 @@ void DrawRangeObjects()
    string idUp  = PFX + "RNG_UP";
    string idDn  = PFX + "RNG_DN";
 
-   if(!ShowRangeBox || !gBkValid || gBkHigh <= gBkLow)
+   if(!gShowRangeBox || !gBkValid || gBkHigh <= gBkLow)
      {
       ObjectDelete(0, idBox); ObjectDelete(0, idUp); ObjectDelete(0, idDn);
       return;
@@ -3563,112 +3032,6 @@ void DrawTradeLevelLines()
    SetLevelLine("TP", OrderTakeProfit(), C'0,230,160',  STYLE_SOLID, 2, "TARGET");
    SetLevelLine("BE", BreakEvenPrice(OrderType(), OrderOpenPrice(), OrderLots()),
                 C'255,206,84', STYLE_DOT, 1, "TRUE BREAK-EVEN (incl. cost)");
-  }
-
-void PlotSegment(int filter, int line, int shift, double v0, double v1, color c, int w)
-  {
-   // On a LIVE chart the M5 history is backfilled asynchronously, so iMA()/
-   // iSAR() return 0.0 (NOT EMPTY_VALUE) for bars that are not downloaded yet.
-   // Only EMPTY_VALUE used to be rejected, so trend lines were created at
-   // price 0.0 - far below the visible range, i.e. invisible. In the Strategy
-   // Tester history is complete before the first tick, which is exactly why
-   // the overlay looked perfect there and missing live.
-   if(v0 == EMPTY_VALUE || v1 == EMPTY_VALUE) return;
-   if(v0 <= 0.0 || v1 <= 0.0) return;
-   if(!MathIsValidNumber(v0) || !MathIsValidNumber(v1)) return;
-   string n = PFX + "OV_" + IntegerToString(filter) + "_" + IntegerToString(line) + "_" + IntegerToString(shift);
-   if(ObjectFind(0, n) < 0) ObjectCreate(0, n, OBJ_TREND, 0, Time[shift + 1], v0, Time[shift], v1);
-   ObjectMove(0, n, 0, Time[shift + 1], v0);
-   ObjectMove(0, n, 1, Time[shift], v1);
-   ObjectSetInteger(0, n, OBJPROP_RAY_RIGHT, false);
-   ObjectSetInteger(0, n, OBJPROP_COLOR, c);
-   ObjectSetInteger(0, n, OBJPROP_WIDTH, w);
-   ObjectSetInteger(0, n, OBJPROP_BACK, true);
-   ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, n, OBJPROP_HIDDEN, true);
-  }
-
-// Overlay plotting used to call SupertrendDir()/SessionVWAP() once per bar,
-// which reseeded a 600-bar loop on every request - roughly 100k redundant
-// iterations per candle. Both series are now built in a single backward pass.
-void BuildSTSeries(int maxShift, double &line[], int &dir[])
-  {
-   ArrayResize(line, maxShift + 2); ArrayResize(dir, maxShift + 2);
-   ArrayInitialize(line, EMPTY_VALUE); ArrayInitialize(dir, 0);
-   bool ready = false;
-   double pUp = 0, pLo = 0, pLine = 0, pClose = 0;
-   int oldest = MathMin(Bars - 2, maxShift + 600);
-   for(int i = oldest; i >= 0; i--)
-     {
-      double atr = iATR(NULL, 0, MathMax(1, SupertrendLength), i);
-      double mid = (High[i] + Low[i]) * 0.5;
-      double up = mid + SupertrendFactor * atr, dn = mid - SupertrendFactor * atr;
-      double fu = up, fl = dn, ln = up; int dr = 1;
-      if(!ready || atr <= 0) { if(atr > 0) ready = true; }
-      else
-        {
-         fu = (up < pUp || pClose > pUp) ? up : pUp;
-         fl = (dn > pLo || pClose < pLo) ? dn : pLo;
-         if(pLine == pUp) ln = (Close[i] > fu) ? fl : fu;
-         else             ln = (Close[i] < fl) ? fu : fl;
-         dr = (ln == fl) ? -1 : 1;
-        }
-      pUp = fu; pLo = fl; pLine = ln; pClose = Close[i];
-      if(i <= maxShift + 1) { line[i] = ready ? ln : EMPTY_VALUE; dir[i] = ready ? dr : 0; }
-     }
-  }
-
-// Plots the filters the user has switched ON for the chart. This is driven by
-// gDrawFilter[], NOT gEnabled[]: an indicator can vote without being drawn,
-// and can be drawn without voting.
-void DrawOverlay()
-  {
-   ObjectsDeleteAll(0, PFX + "OV_");
-   if(!DrawIndicatorOverlay) { gOverlayDirty = false; return; }
-
-   // Do not clear the dirty flag until the symbol actually has enough history
-   // to plot from, otherwise a single early pass during backfill would latch
-   // "clean" and nothing would retry for a full M5 bar.
-   if(Bars < 50 || !SeriesReady()) { gOverlayDirty = true; return; }
-   gOverlayDirty = false;
-   int bars = MathMax(10, MathMin(OverlayBars, Bars - 5));
-
-   if(gDrawFilter[0])   // SMA cross
-      for(int s = bars; s >= 1; s--)
-        {
-         PlotSegment(0,0,s, iMA(NULL,0,SMAFastLength,0,MODE_SMA,PRICE_CLOSE,s+1),
-                            iMA(NULL,0,SMAFastLength,0,MODE_SMA,PRICE_CLOSE,s), C'120,200,255', 1);
-         PlotSegment(0,1,s, iMA(NULL,0,SMASlowLength,0,MODE_SMA,PRICE_CLOSE,s+1),
-                            iMA(NULL,0,SMASlowLength,0,MODE_SMA,PRICE_CLOSE,s), C'170,130,255', 1);
-        }
-
-   if(gDrawFilter[3])   // Supertrend - one pass
-     {
-      double stl[]; int std[];
-      BuildSTSeries(bars, stl, std);
-      for(int s = bars; s >= 1; s--)
-         if(stl[s] != EMPTY_VALUE && stl[s+1] != EMPTY_VALUE)
-            PlotSegment(3,0,s, stl[s+1], stl[s], std[s] == -1 ? C'0,230,160' : C'255,70,102', 2);
-     }
-
-   if(gDrawFilter[5])   // Bollinger midline
-      for(int s = bars; s >= 1; s--)
-         PlotSegment(5,0,s, iMA(NULL,0,BollingerLength,0,MODE_SMA,PRICE_CLOSE,s+1),
-                            iMA(NULL,0,BollingerLength,0,MODE_SMA,PRICE_CLOSE,s), C'255,206,84', 1);
-
-   if(gDrawFilter[6])   // EMA pair
-      for(int s = bars; s >= 1; s--)
-        {
-         PlotSegment(6,0,s, iMA(NULL,0,EMAFastLength,0,MODE_EMA,PRICE_CLOSE,s+1),
-                            iMA(NULL,0,EMAFastLength,0,MODE_EMA,PRICE_CLOSE,s), C'0,229,255', 1);
-         PlotSegment(6,1,s, iMA(NULL,0,EMASlowLength,0,MODE_EMA,PRICE_CLOSE,s+1),
-                            iMA(NULL,0,EMASlowLength,0,MODE_EMA,PRICE_CLOSE,s), C'150,100,255', 1);
-        }
-
-   if(gDrawFilter[8])   // Parabolic SAR
-      for(int s = bars; s >= 1; s--)
-         PlotSegment(8,0,s, iSAR(NULL,0,SARStep,SARMaximum,s+1),
-                            iSAR(NULL,0,SARStep,SARMaximum,s), C'90,120,180', 1);
   }
 
 // ---- SOLID RAISED RESULT CARDS ----------------------------------------
@@ -4290,90 +3653,18 @@ bool MayOpenNewTrade(string &why)
   }
 
 //==================================================================//
-//              F I L T E R   R E G I S T R Y                       //
-//==================================================================//
-
-// The 11 original filters, in the exact index order GetConditions() writes.
-// Index 3 is Supertrend - the only one enabled by default, which is what
-// makes the shipped configuration the original Supertrend strategy.
-void LoadFilterConfig()
-  {
-   gFilterName[0]  = "SMA CROSS";
-   gFilterName[1]  = "RSI";
-   gFilterName[2]  = "MACD";
-   gFilterName[3]  = "SUPERTREND";
-   gFilterName[4]  = "STOCH";
-   gFilterName[5]  = "BOLL MID";
-   gFilterName[6]  = "EMA CROSS";
-   gFilterName[7]  = "AWESOME";
-   gFilterName[8]  = "PSAR";
-   gFilterName[9]  = "CCI";
-   gFilterName[10] = "ADX / DI";
-
-   gEnabled[0]  = EnableSMA;
-   gEnabled[1]  = EnableRSI;
-   gEnabled[2]  = EnableMACD;
-   gEnabled[3]  = EnableSupertrend;
-   gEnabled[4]  = EnableStochastic;
-   gEnabled[5]  = EnableBollinger;
-   gEnabled[6]  = EnableEMA;
-   gEnabled[7]  = EnableAO;
-   gEnabled[8]  = EnableSAR;
-   gEnabled[9]  = EnableCCI;
-   gEnabled[10] = EnableADX;
-
-   //--- which filters start visible on the chart -------------------
-   // "" = none, "all" = every one, otherwise a CSV of indices e.g. "0,3,6".
-   // Only indicators that HAVE a chart representation can be drawn; the
-   // oscillators (RSI, MACD, Stoch, AO, CCI, ADX) live in a sub-window we do
-   // not own, so they are never plotted and their button reads "--".
-   for(int d = 0; d < SF_FILTERS; d++) gDrawFilter[d] = false;
-
-   string spec = OverlayFilters;
-   StringTrimLeft(spec); StringTrimRight(spec);
-   string low = spec;
-   StringToLower(low);
-   if(low == "all")
-     {
-      for(int d2 = 0; d2 < SF_FILTERS; d2++) gDrawFilter[d2] = FilterHasOverlay(d2);
-     }
-   else if(StringLen(spec) > 0)
-     {
-      int cur = 0;
-      for(int c = 0; c <= StringLen(spec); c++)
-        {
-         // parse one CSV field at a time without allocating substrings
-         int ch = (c < StringLen(spec)) ? StringGetChar(spec, c) : ',';
-         if(ch >= '0' && ch <= '9') { cur = cur * 10 + (ch - '0'); continue; }
-         if(ch == ',')
-           {
-            if(cur >= 0 && cur < SF_FILTERS && FilterHasOverlay(cur))
-               gDrawFilter[cur] = true;
-            cur = 0;
-           }
-        }
-     }
-   gOverlayDirty = true;
-  }
-
-//==================================================================//
 //              O N   I N I T   /   D E I N I T                     //
 //==================================================================//
 int OnInit()
   {
    gLang  = (int)HudLanguage;   // seed the live copies from the inputs
+   gShowRangeBox = ShowRangeBox;
    gTheme = (int)HudTheme;
    LoadTheme();
    CacheSymbolSpec();
    RecalcCostPoints();
-   LoadFilterConfig();
 
-   gBuyOrb  = "::SFP_BUY_"  + IntegerToString((int)ChartID());
-   gSellOrb = "::SFP_SELL_" + IntegerToString((int)ChartID());
-   BuildOrb(true); BuildOrb(false);
 
-   for(int i = 0; i < SF_FILTERS; i++) { gBull[i] = 0; gBear[i] = 0; }
-   gShowAllFilters = (FilterView == SF_VIEW_ALL);
 
    gDayStamp       = DayStart(TimeCurrent());
    gDayStartEquity = AccountEquity();
@@ -4393,24 +3684,21 @@ int OnInit()
    // Print exactly which overlays are armed, so a "nothing is drawn" report
    // can be diagnosed from the Experts log without guesswork.
    string ov = "";
-   for(int v = 0; v < SF_FILTERS; v++)
-      if(gDrawFilter[v]) ov += (ov == "" ? "" : ",") + gFilterName[v];
-   Print("[BK-FORGE] v1.00 build | overlay master=", DrawIndicatorOverlay,
-         " | bars=", Bars, " | seriesReady=", SeriesReady(),
-         " | drawing: ", (ov == "" ? "(none - switch one ON in FILTERS)" : ov));
+   Print("[BK-FORGE] v1.00 build | range=",
+         (RangeMode == BK_RANGE_DONCHIAN ? "DONCHIAN" : "SESSION"),
+         " | entry=", (EntryMode == BK_ENTRY_RETEST ? "RETEST" : "BREAK"),
+         " | magic=", MagicNumber);
 
    gLastBar = 0;
 
-   // Paint the chart NOW. DrawOverlay() used to be reachable only from the
-   // new-bar branch of OnTick(), so on a live M5 chart the indicators did not
-   // appear for up to five minutes - while in the tester bars complete every
-   // few seconds, which is why they looked fine there and missing live.
+   // Build and draw the range NOW rather than waiting for the first new bar,
+   // which on a live M5 chart would leave the panel empty for five minutes.
    if(!IsTesting() || IsVisualMode())
      {
       if(Bars > 100)
         {
-         BuildHistoricalOrbs();
-         DrawOverlay();
+         UpdateRange();
+         DrawRangeObjects();
          DrawTradeLevelLines();
          DrawResultPills();
         }
@@ -4471,8 +3759,6 @@ void OnDeinit(const int reason)
    DestroyTracker();
    FreeCanvases();
    ObjectsDeleteAll(0, PFX);
-   if(gBuyOrb  != "") ResourceFree(gBuyOrb);
-   if(gSellOrb != "") ResourceFree(gSellOrb);
    ChartRedraw(0);
   }
 
@@ -4485,12 +3771,6 @@ void OnTimer()
    TrackClosedTrades();
    // Do not rebuild the controls while the user is interacting with them.
    if(RepaintLocked()) { ChartRedraw(0); return; }
-   // A DRAW toggle (or a fresh OnInit) marks the overlay dirty; repaint it
-   // here so the chart reacts instantly instead of waiting for a new bar.
-   // DrawOverlay() re-arms the flag itself while the series is still
-   // backfilling, so this keeps retrying until the data is genuinely there.
-   if(gOverlayDirty) DrawOverlay();
-   if(gSignalHistoryBuilt == 0) BuildHistoricalOrbs();
    DrawTradeLevelLines();
    DrawResultPills();
    PaintAll();
@@ -4502,27 +3782,10 @@ void HandleHudAction(string hit)
    if(hit == "") return;
    if(VerboseJournal) Print("[BK-FORGE] click -> ", hit);
 
-   // per-filter chart overlay toggles: "DRAW_<index>"
-   if(StringSubstr(hit, 0, 5) == "DRAW_")
-     {
-      int fi = (int)StringToInteger(StringSubstr(hit, 5));
-      if(fi >= 0 && fi < SF_FILTERS && FilterHasOverlay(fi))
-        {
-         gDrawFilter[fi] = !gDrawFilter[fi];
-         DrawOverlay();                       // instant feedback
-         Journal((gDrawFilter[fi] ? "DRAW ON  " : "DRAW OFF ") + gFilterName[fi]);
-        }
-      PaintAll();
-      ChartRedraw(0);
-      return;
-     }
-
    if(hit == "BTN_COLLAPSE") gHudCollapsed = !gHudCollapsed;
    else if(hit == "TAB_CORE")     gHudPage = 0;
-   else if(hit == "TAB_FILTERS")  gHudPage = 1;
-   else if(hit == "TAB_BREAKOUT") gHudPage = 2;
+   else if(hit == "TAB_BREAKOUT") gHudPage = 1;
    else if(hit == "TRK_COLLAPSE") gTrkCollapsed = !gTrkCollapsed;
-   else if(hit == "BTN_VIEW")    gShowAllFilters = !gShowAllFilters;
    else if(hit == "BTN_LANG")
      {
       // Live language switch. Every button caption changes script, so the
@@ -4556,14 +3819,16 @@ void HandleHudAction(string hit)
      }
    else if(hit == "BTN_THEME")
      {
-      // master toggle: if anything is drawn, clear it all; otherwise restore
-      // every filter that has a chart representation.
-      bool any = false;
-      for(int q = 0; q < SF_FILTERS; q++) if(gDrawFilter[q]) { any = true; break; }
-      for(int q2 = 0; q2 < SF_FILTERS; q2++)
-         gDrawFilter[q2] = any ? false : FilterHasOverlay(q2);
-      DrawOverlay();
-      Journal(any ? "ALL OVERLAYS OFF" : "ALL OVERLAYS ON");
+      // Toggle the range box and its buffer lines on the price chart.
+      gShowRangeBox = !gShowRangeBox;
+      if(!gShowRangeBox)
+        {
+         ObjectDelete(0, PFX + "RNG_BOX");
+         ObjectDelete(0, PFX + "RNG_UP");
+         ObjectDelete(0, PFX + "RNG_DN");
+        }
+      else DrawRangeObjects();
+      Journal(gShowRangeBox ? "RANGE BOX ON" : "RANGE BOX OFF");
      }
    PaintAll();
    ChartRedraw(0);
@@ -4683,8 +3948,7 @@ void OnTick()
       if(graphics)
         {
          uint tnow = GetTickCount();
-         if(gOverlayDirty) DrawOverlay();
-         if(tnow - gLastHudPaint >= (uint)MathMax(100, HudRefreshMs))
+               if(tnow - gLastHudPaint >= (uint)MathMax(100, HudRefreshMs))
            {
             DrawRangeObjects();
             DrawTradeLevelLines(); DrawResultPills(); PaintAll();
@@ -4700,14 +3964,6 @@ void OnTick()
 
    //--- rebuild the range on the new bar ---------------------------
    UpdateRange();
-
-   //--- inherited filters, only if confluence is switched on -------
-   int bull[SF_FILTERS], bear[SF_FILTERS];
-   ArrayInitialize(bull, 0); ArrayInitialize(bear, 0);
-   GetConditions(shift, bull, bear);
-   for(int i = 0; i < SF_FILTERS; i++) { gBull[i] = bull[i]; gBear[i] = bear[i]; }
-   gPrevScore = gScore;
-   gScore = AgreementScore(bull, bear, gAgreeBull, gAgreeBear, gAgreeOn);
 
    //--- BREAKOUT STATE MACHINE -------------------------------------
    int dir = 0;
@@ -4764,10 +4020,7 @@ void OnTick()
    //--- visuals ----------------------------------------------------
    if(graphics)
      {
-      BuildHistoricalOrbs();
-      DrawOverlay();
-      if(DrawSignalOrbs && wantEntry && dir > 0) DrawOrb(true,  shift);
-      if(DrawSignalOrbs && wantEntry && dir < 0) DrawOrb(false, shift);
+      DrawRangeObjects();
      }
 
    //--- flip out on an opposite break ------------------------------
@@ -4780,7 +4033,7 @@ void OnTick()
      }
 
    //--- entry ------------------------------------------------------
-   if(wantEntry && dir != 0 && gatesPass && ConfluenceAgrees(dir, bull, bear))
+   if(wantEntry && dir != 0 && gatesPass)
      {
       if(!OnePositionOnly || openCount == 0)
         {
@@ -4792,8 +4045,6 @@ void OnTick()
         }
       else gBlockReason = T("POSITION OPEN");
      }
-   else if(wantEntry && dir != 0 && gatesPass && !ConfluenceAgrees(dir, bull, bear))
-      gBlockReason = T("NO CONFLUENCE");
 
    //--- repaint ----------------------------------------------------
    if(graphics)

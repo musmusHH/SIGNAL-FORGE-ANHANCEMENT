@@ -1353,9 +1353,20 @@ corrected.
 
 # Breakout Forge XAUUSD M5 EA (v1.00) — the second EA
 
-A **standalone** second EA: a range-breakout engine wearing the Signal Forge
-PRO interface. It is not a modification of the first EA — both can run on the
-same chart at the same time.
+A **separate EA with its own strategy**, not a variant of Signal Forge. Exactly
+two things are reused from PRO — the **visual shell** (HUD, themes, Arabic
+engine, tracker, result cards) and **`ManageTrailing()`**. Everything that
+decides *whether and where to trade* is breakout-native and was written from
+scratch.
+
+**What was deliberately removed.** Signal Forge's entire 11-indicator voting
+engine is gone from this file — not switched off, deleted: `GetConditions()`,
+`CombinedSignal()`, `AgreementScore()`, the Supertrend series builder, the
+per-filter chart overlays and signal orbs, the FILTERS page and its tab, and
+all 41 of their inputs. `docs/verify_breakout.py` §7 asserts each one is
+absent, so the two EAs cannot quietly converge on the same strategy again.
+The input count fell from Signal Forge's 94 to **83** even after ~30 breakout
+inputs were added.
 
 ![strategy](docs/breakout_strategy_explained.png)
 ![the new page](docs/breakout_page_preview.png)
@@ -1429,26 +1440,41 @@ The middle column is the whole point of the design.
 |---|---|---|
 | magic | 260914 | **260915** |
 | objects | `SFP_` | **`BKF_`** |
-| engine | 11-indicator vote | range breakout |
+| engine | 11-indicator vote | range breakout (no indicators vote) |
+| entry trigger | filter agreement score | body close beyond range ± buffer |
+| stop | ATR only | structural: far side of the range |
+| pages | CORE / FILTERS | CORE / BREAKOUT |
 
 Neither can see or modify the other's trades, and neither deletes the other's
 chart objects.
 
 ## The interface
 
-Identical shell — same HUD, themes, Arabic engine, live LANGUAGE/THEME
-buttons, result cards, and the tracker including the v2.16 honest-accounting
-fix. One new **BREAKOUT** tab (range high/low/width, live state, distance
-meter, the 8-gate checklist) and one new chart object (the range box with its
-buffer lines).
+The shell is the part that *was* kept: same HUD, themes, Arabic engine, live
+LANGUAGE/THEME buttons, result cards, and the tracker including the v2.16
+honest-accounting fix.
+
+What changed to match the new engine: navigation is **two tabs, CORE and
+BREAKOUT** (the FILTERS page went with the filters). The BREAKOUT page shows
+range high/low/width, the live state, a distance-to-break meter and the 8-gate
+checklist. The CORE panel's "FILTER AGREEMENT" readout became **"BREAKOUT
+STATUS"**, and the third control-strip button is now **RANGE BOX**, which
+toggles the range drawing on the chart. All five places that report the engine
+state — CORE panel, execution console, BREAKOUT page — read one function,
+`BkStateText()`, so they cannot disagree.
 
 ## Files
 
-* `Breakout Forge XAUUSD M5 EA.mq4` — 126 inputs, 0 dead.
+* `Breakout Forge XAUUSD M5 EA.mq4` — 4,059 lines, **83 inputs, 0 dead**,
+  110 functions (none unused), 131 dictionary keys (no duplicates).
 * `presets/BKF_XAUUSD_M5_Exness-Raw_200USD.set` — the shipped default.
 * `presets/BKF_XAUUSD_M5_Conservative-Retest.set` — retest entry, overlap only.
 * `presets/BKF_XAUUSD_M5_Donchian-Aggressive.set` — Donchian(20), all session.
-* `docs/verify_breakout.py` — 60+ assertions incl. the trailing-stop diff.
+  All three are generated from the EA's own input list with enum values
+  resolved to their ordinals, so they cannot drift from the code.
+* `docs/verify_breakout.py` — 100+ assertions: the breakout engine, the
+  byte-for-byte trailing-stop diff against PRO, and §7 "the indicator strategy
+  is gone" (14 functions, 11 globals, 16 inputs must all be absent).
 * `docs/render_breakout_page.py` — renders the new page in both languages and
   asserts no element overlaps or overflows.
 

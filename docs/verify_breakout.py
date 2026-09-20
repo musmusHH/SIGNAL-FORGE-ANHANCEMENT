@@ -63,7 +63,7 @@ check("no stale SFP_ prefix left in the new EA", '"SFP_"' not in BK)
 
 print("\n3. the breakout engine")
 for fn in ("BuildRange", "UpdateRange", "BreakDirection", "BreakoutGates",
-           "RetestResult", "ConfluenceAgrees", "DrawRangeObjects"):
+           "RetestResult", "DrawRangeObjects", "BkStateText"):
     check(f"{fn}() exists", re.search(r'^\w[\w ]*\s+%s\s*\(' % fn, BK, re.M) is not None)
 check("range never includes the forming bar (uses shift >= 1)",
       "iHighest(NULL, 0, MODE_HIGH, n, 1)" in BK and "iLowest (NULL, 0, MODE_LOW,  n, 1)" in BK)
@@ -115,22 +115,63 @@ check("tracker columns kept",
 check("tracker commission + final P/L rows kept",
       'T("COMMISSION")' in BK and 'T("ACCOUNT P/L")' in BK)
 
-print("\n7. the new page")
-check("three tabs", all(t in BK for t in ('"TAB_CORE"', '"TAB_BREAKOUT"', '"TAB_FILTERS"')))
+print("\n7. the indicator strategy is GONE, not merely disabled")
+# The user asked for a DIFFERENT EA: keep the visuals and the trailing stop,
+# drop Signal Forge's 11-indicator voting engine entirely. Anything left
+# behind here would mean the two EAs still share a strategy.
+STRIPPED = ["GetConditions", "CombinedSignal", "AgreementScore", "ArmThreshold",
+            "AdvanceSupertrend", "SupertrendDirection", "BuildSTSeries",
+            "LoadFilterConfig", "FilterHasOverlay", "PlotSegment", "DrawOverlay",
+            "BuildHistoricalOrbs", "DrawOrb", "BuildOrb", "ScoreGauge"]
+for fn in STRIPPED:
+    check(f"{fn}() removed", not re.search(r"\b%s\s*\(" % fn, CODE))
+for g in ("gBull", "gBear", "gEnabled", "gDrawFilter", "gFilterName",
+          "gScore", "gAgreeBull", "gShowAllFilters", "gOverlayDirty",
+          "SF_FILTERS", "gBuyOrb"):
+    check(f"{g} removed", not re.search(r"\b%s\b" % g, CODE))
+for i in ("EnableSMA", "EnableRSI", "EnableMACD", "EnableSupertrend",
+          "EnableStochastic", "EnableBollinger", "EnableEMA", "EnableAO",
+          "EnableSAR", "EnableCCI", "EnableADX", "SupertrendFactor",
+          "RequireAllEnabledIndicatorsToAlign", "OverlayFilters",
+          "DrawIndicatorOverlay", "DrawSignalOrbs"):
+    check(f"input {i} removed", not re.search(r"^input[^\n]*\b%s\b" % i, BK, re.M))
+# 41 indicator/overlay inputs were removed and ~30 breakout inputs added, so
+# the useful assertion is that NO indicator input survived (checked above)
+# and that the breakout inputs are all present.
+n_inputs = len([x for x in re.findall(r'^input\s+[\w ]+?\s+(\w+)\s*=', BK, re.M)
+                if not x.startswith("__")])
+n_sf = len([x for x in re.findall(r'^input\s+[\w ]+?\s+(\w+)\s*=', SF, re.M)
+            if not x.startswith("__")])
+print(f"   (Signal Forge {n_sf} inputs -> Breakout Forge {n_inputs})")
+for bi in ("RangeMode", "DonchianBars", "BufferMode", "BufferATRMult",
+           "RequireBodyClose", "EntryMode", "RetestMaxBars", "UseVolatilityGate",
+           "MinRangeATRMult", "MaxBreakoutsPerRange", "StopByRangeOpposite",
+           "TargetMode", "MinTargetCostMult", "UseSessionFilter",
+           "BlockRollover", "MaxTradesPerDay", "MaxDailyLossUSD"):
+    check(f"breakout input {bi} present",
+          re.search(r'^input[^\n]*\b%s\b' % bi, BK, re.M) is not None)
+
+print("\n8. the new page")
+check("two tabs: CORE and BREAKOUT",
+      '"TAB_CORE"' in BK and '"TAB_BREAKOUT"' in BK and '"TAB_FILTERS"' not in BK)
 check("BREAKOUT tab is handled on click", 'hit == "TAB_BREAKOUT"' in BK)
-check("page 2 has its own computed height", "else if(gHudPage == 2)" in BK)
+check("breakout page has its own computed height", "if(gHudPage == 1)" in BK)
+check("CORE panel shows breakout status, not filter agreement",
+      'T("BREAKOUT STATUS")' in BK and 'T("FILTER AGREEMENT")' not in BK)
+check("one place produces the state wording", "string BkStateText()" in BK)
 # nav row must fit
 innerW = 430 - 24; sqW = 30
-tabW3 = (innerW - 8*4 - sqW*2)//3
-tx = 12 + (tabW3+8)*3 + sqW + 8
+tabW2 = (innerW - 8*3 - sqW*2)//2
+tx = 12 + (tabW2+8)*2 + sqW + 8
 check(f"nav row fits: last square ends {tx+sqW} <= {12+innerW}", tx+sqW <= 12+innerW)
 # page height must fit a normal chart
 pageH = 54+6+32+96+8+54+8+64+8+30+8*20+10+8+46+8
 check(f"BREAKOUT page height {pageH}px is sane", 400 <= pageH <= 780)
 
-print("\n8. translation and encoding")
-keys = re.findall(r'if\(k == "([^"]+)"\)',
-                  BK[BK.index("string T(const string k)\n"):BK.index("// Convenience: translate AND shape")])
+print("\n9. translation and encoding")
+_t0 = BK.index("string T(const string k)\n")
+_t1 = BK.index("string UIFont(", _t0)
+keys = re.findall(r'if\(k == "([^"]+)"\)', BK[_t0:_t1])
 check(f"{len(keys)} dictionary keys, no duplicates", len(keys) == len(set(keys)),
       str([k for k in set(keys) if keys.count(k) > 1]))
 for k in ("BREAKOUT", "SESSION RANGE", "WAITING FOR BREAK", "ENTRY CHECKLIST",

@@ -32,14 +32,14 @@ def draw(lang):
     d.rectangle([196,12,228,26],fill=CY); d.text((203,13),"BK",font=f(9,True),fill=(6,10,18))
     y=headerH+SC(6)
     # tabs
-    sqW=SC(30); tabW3=(innerW-SC(8)*4-sqW*2)//3
-    names=[T("CORE","الرئيسية"),T("BREAKOUT","الاختراق"),T("FILTERS","الفلاتر")]
+    sqW=SC(30); tabW3=(innerW-SC(8)*3-sqW*2)//2
+    names=[T("CORE","الرئيسية"),T("BREAKOUT","الاختراق")]
     for i,nm in enumerate(names):
         x=pad+i*(tabW3+SC(8)); act=(i==1)
         plate(x,y,tabW3,SC(24),(16,60,86) if act else PB2,CY if act else EDGE)
         d.text((x+(tabW3-d.textlength(nm,font=f(10,True)))/2,y+6),nm,font=f(10,True),fill=CY if act else DIM)
         boxes.append((x,y,x+tabW3,y+SC(24),"tab%d"%i))
-    lx=pad+(tabW3+SC(8))*3; tx=lx+sqW+SC(8)
+    lx=pad+(tabW3+SC(8))*2; tx=lx+sqW+SC(8)
     for x,t,c in ((lx,"ع|A",CY),(tx,"◐",(167,139,250))):
         plate(x,y,sqW,SC(24),PB2,EDGE); d.text((x+5,y+6),t,font=f(9,True),fill=c)
         boxes.append((x,y,x+sqW,y+SC(24),"sq"))
