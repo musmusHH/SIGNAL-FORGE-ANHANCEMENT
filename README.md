@@ -1351,7 +1351,7 @@ corrected.
 
 ---
 
-# Breakout Forge XAUUSD M5 EA (v1.06) — the second EA
+# Breakout Forge XAUUSD M5 EA (v1.07) — the second EA
 
 A **separate EA with its own strategy**, not a variant of Signal Forge. Exactly
 two things are reused from PRO — the **visual shell** (HUD, themes, Arabic
@@ -1421,6 +1421,63 @@ The middle column is the whole point of the design.
 * **RETEST** — wait for price to come back to the broken level and hold.
   Fewer trades, better fills, tighter stops. Times out after `RetestMaxBars`,
   and a close back through the level kills the setup rather than arming it.
+
+## v1.07 — 0.10 lot, a money-defined stop, and no ATR anywhere
+
+**The lot is the lot.** `FixedLots` defaults to **0.10** and is never reduced.
+A sizing verdict can no longer refuse an entry — `AllowRiskOverrun` defaults to
+`true`, and the one remaining sizing `return` sits behind it.
+
+**The stop is money, not volatility:**
+
+```
+risk USD = min(balance x RiskPercent%, MaxLossUSDPerTrade)   // cap 0 = off
+stop     = risk USD / (lots x money-per-point)
+```
+
+`StopLossMode` picks the model: `SL_By_Risk_Percent` (0.5% default) or
+`SL_By_Max_USD` (a flat dollar stop — set `MaxLossUSDPerTrade` and go). The
+structural range stop may now only ever **tighten** that distance, never widen
+it. That single rule is what makes the −$429.69 trade impossible: the same
+95,646-point structural stop is now capped to **$2.15**.
+
+**ATR is gone from the EA.** No `iATR` call, and every identifier deleted:
+`ATRLength`, `StopLossATR`, `TakeProfitATR`, `BufferATRMult`, `VolATRAvgPeriod`,
+`VolATRMinRatio`, `StopRangePadATR`, `MinRangeATRMult`, `MaxRangeATRMult`,
+`SL_By_ATR`, `TP_By_ATR`, `BK_BUF_ATR`, `BK_TP_ATR`, `gBkATR`, `gBkATRAvg`,
+`ATRPoints`, `ATRRatio`. What replaced each one:
+
+| was | now |
+|---|---|
+| stop = ATR x 1.8 | stop = the money budget at the traded lot |
+| width gate = ratio vs ATR x sqrt(bars) | `MinRangePoints` 6000 – `MaxRangePoints` 40000 (= $6–$40) |
+| gate 2 "ATR expanding" | gate 2 "RANGE vs SPREAD": width >= `MinRangeSpreadMult` x spread |
+| buffer = 0.25 x ATR | `BufferFixedPoints` 250, or `BufferSpreadMult` x spread |
+| stop pad = 0.5 x ATR | `StopRangePadPoints` 400 |
+| TP = ATR x 2.4 | `TakeProfitPoints`, or `TakeProfitRMultiple` x the money stop |
+| panel "COST / ATR(14)" | "COST / 14-BAR RANGE" via `RecentRangePoints()` |
+
+### ⚠️ The floor, and why it is not a block
+
+0.5% of a small balance cannot buy a survivable stop. At $157.79 it is $0.79 —
+a **79-point** stop against a **90-point** spread, i.e. stopped out on the fill.
+So the stop is floored at `MinStopPoints` (200) and **the trade is still taken**:
+
+| balance | 0.5% | stop wanted | stop used | real loss | real % |
+|---|---|---|---|---|---|
+| $157.79 | $0.79 | 79 pts | 200 pts | $2.00 | 1.27% |
+| $200 | $1.00 | 100 pts | 200 pts | $2.00 | 1.00% |
+| $400 | $2.00 | 200 pts | 200 pts | $2.00 | 0.50% |
+| $1000 | $5.00 | 500 pts | 500 pts | $5.00 | 0.50% |
+| $2000 | $10.00 | 1000 pts | 1000 pts | $10.00 | 0.50% |
+
+**0.5% is exact at and above ~$400.** Below that the floor wins and the real
+risk is 0.5–1.3%. To pin the loss to a number you choose regardless of balance,
+use `SL_By_Max_USD` with `MaxLossUSDPerTrade` — see the `FlatRisk-2USD` preset.
+
+See `docs/breakout_width_gate.png` for both gates drawn out.
+
+---
 
 ## v1.06 — the v1.02 trading engine, restored
 

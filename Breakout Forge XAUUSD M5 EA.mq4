@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                Breakout Forge XAUUSD M5 EA       |
-//|                    QUANTUM HUD  .  v1.06  .  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  .  v1.07  .  MQL4 / MetaTrader 4 |
 //|                                                                  |
 //| A RANGE BREAKOUT engine wearing the Signal Forge PRO interface.  |
 //|                                                                  |
@@ -13,10 +13,10 @@
 //|                                                                  |
 //|   1. the candle BODY must close beyond the level - a wick        |
 //|      through it is a liquidity sweep, not a breakout             |
-//|   2. the level is the range edge PLUS a buffer of 0.25 x ATR,    |
+//|   2. the level is the range edge PLUS a fixed-point buffer,      |
 //|      so the bar has to commit, and the buffer scales with        |
 //|      volatility instead of being a fixed pip count               |
-//|   3. ATR(14) must exceed 0.8 x its own SMA50 - if volatility is  |
+//|   3. the range must be several spreads wide - if it is not,      |
 //|      not expanding, the "break" is noise inside a dead range     |
 //|   4. spread <= MaxSpread, checked at the moment of entry         |
 //|   5. inside the session window (London / NY overlap by default)  |
@@ -55,8 +55,18 @@
 //                          E N U M S                               //
 //==================================================================//
 // ---- ORIGINAL v1 STRATEGY ENUMS -------------------------------------
-enum EA_SL_MODE { SL_By_ATR = 0, SL_By_Risk_Percent = 1 };
-enum EA_TP_MODE { TP_By_Points = 0, TP_By_ATR = 1 };
+// The stop is ALWAYS money-defined now - ATR has been removed from the EA
+// entirely. Either a percentage of the balance, or a flat USD amount.
+enum EA_SL_MODE
+  {
+   SL_By_Risk_Percent = 0, // Risk % of balance (capped by MaxLossUSDPerTrade)
+   SL_By_Max_USD      = 1  // Exactly MaxLossUSDPerTrade of risk
+  };
+enum EA_TP_MODE
+  {
+   TP_By_Points       = 0, // Fixed points
+   TP_By_RiskMultiple = 1  // R multiple of the money stop
+  };
 
 enum ENUM_SF_LANG
   {
@@ -80,14 +90,14 @@ enum ENUM_BK_RANGE
 
 enum ENUM_BK_BUFFER
   {
-   BK_BUF_ATR = 0,         // Buffer = ATR x multiplier
-   BK_BUF_FIXED = 1        // Buffer = fixed points
+   BK_BUF_FIXED   = 0,     // Buffer = fixed points
+   BK_BUF_SPREAD  = 1      // Buffer = spread x multiplier
   };
 
 enum ENUM_BK_TP
   {
-   BK_TP_ATR = 0,          // Target = ATR x TakeProfitATR
-   BK_TP_MEASURED = 1      // Target = range height x multiplier
+   BK_TP_RANGE    = 0,     // Target = range height x multiplier
+   BK_TP_MEASURED = 1      // Target = range height x multiplier (alias)
   };
 
 enum ENUM_BK_ENTRY
@@ -113,7 +123,7 @@ enum ENUM_SF_FILTERVIEW
 //==================================================================//
 input string __01 = "======== IDENTITY / EXECUTION ========"; // .
 input int    MagicNumber            = 260915;   // Magic number (differs from Signal Forge PRO)
-input double FixedLots              = 0.01;     // Fixed lot size
+input double FixedLots              = 0.1;     // Fixed lot size
 input int    SlippagePoints         = 50;       // Slippage (points)
 input int    MaximumSpreadPoints    = 91;       // Max spread (points, 0=off)
 input bool   OnePositionOnly        = true;     // Only one position at a time
@@ -122,14 +132,25 @@ input bool   TradeOnClosedBar       = true;     // Evaluate on the closed bar
 input string TradeComment           = "Breakout Forge"; // Order comment
 
 input string __02 = "======== STOP LOSS / TAKE PROFIT ========"; // .
-input EA_SL_MODE StopLossMode       = SL_By_ATR;    // Stop loss mode
+// ---- MONEY-DEFINED STOP ---------------------------------------------
+// The stop is derived from what the trade is ALLOWED TO LOSE, at the lot
+// actually being traded. It is never derived from ATR - ATR is gone.
+//   risk USD  =  min(balance x RiskPercent%, MaxLossUSDPerTrade)
+//   distance  =  risk USD / (lots x money-per-point)
+// The lot is never reduced and a trade is NEVER refused over sizing.
+input EA_SL_MODE StopLossMode       = SL_By_Risk_Percent; // Stop loss mode
 input EA_TP_MODE TakeProfitMode     = TP_By_Points; // Take profit mode
-input int    ATRLength              = 14;       // ATR length
-input double StopLossATR            = 1.8;      // Stop loss = ATR x
-input double TakeProfitATR          = 2.4;      // Take profit = ATR x
 input double TakeProfitPoints       = 5000.0;   // Take profit (points)
-input double RiskPercent            = 0.5;      // Risk % (risk-based SL mode)
+input double TakeProfitRMultiple    = 2.0;      // TP = R x the money stop
+input double RiskPercent            = 0.5;      // Risk % of balance per trade
+input double MaxLossUSDPerTrade     = 0.0;      // Hard cap, USD per trade (0 = off)
 input double RiskReferenceBalance   = 0.0;      // 0 = current account balance
+// A stop cannot be closer than the broker allows, nor sit inside the
+// spread, or it is stopped out on the fill. When the money budget buys a
+// stop tighter than this, the EA still TRADES - it widens to the floor and
+// says so on the panel rather than refusing the entry.
+input double MinStopPoints          = 200.0;    // Absolute min stop (points)
+input bool   AllowRiskOverrun       = true;     // Trade even if the floor > budget
 
 input string __03 = "======== TRAILING STOP ========"; // .
 input bool   EnableTrailingStop     = true;     // Enable trailing stop
@@ -152,9 +173,9 @@ input bool   ShowRangeBox             = true;   // Draw the range box on the cha
 // ---- what counts as a break --------------------------------------
 // The body must close beyond the edge PLUS a buffer. A wick through the
 // level is a liquidity sweep and is deliberately ignored.
-input ENUM_BK_BUFFER BufferMode       = BK_BUF_ATR;  // Buffer type
-input double BufferATRMult            = 0.25;   // Buffer = ATR x this
+input ENUM_BK_BUFFER BufferMode       = BK_BUF_FIXED; // Buffer type
 input double BufferFixedPoints        = 250.0;  // Buffer when mode is FIXED (points)
+input double BufferSpreadMult         = 2.5;    // Buffer = spread x this (SPREAD mode)
 input bool   RequireBodyClose         = true;   // Body close beyond level (not just a wick)
 
 // ---- entry style --------------------------------------------------
@@ -166,27 +187,28 @@ input int    RetestMaxBars            = 12;     // RETEST: give up after N bars
 input double RetestTolerancePoints    = 150.0;  // RETEST: how close counts as a touch
 
 // ---- quality gates -------------------------------------------------
-input bool   UseVolatilityGate        = true;   // ATR must be expanding
-input int    VolATRAvgPeriod          = 50;     // ATR average period
-input double VolATRMinRatio           = 0.8;    // ATR > ratio x average ATR
-// Width is tested as  width / (ATR * sqrt(barsInRange)), so these are a
-// FRACTION OF THE EXPECTED TRAVEL over the range, not a raw ATR multiple.
-// 1.0 = exactly the textbook envelope. Below 0.40 the range is dead flat,
-// above 3.00 it is a trend, not a range.
-input double MinRangeATRMult          = 0.40;   // Min width / expected travel
-input double MaxRangeATRMult          = 3.00;   // Max width / expected travel
+// Gate 2 used to be "ATR is expanding". With ATR gone the honest, and
+// arguably better, liquidity test is the range against the SPREAD: a box
+// that is only a few spreads wide cannot pay for itself. Donchian research
+// puts the usable floor at about 5x the typical spread.
+input bool   UseVolatilityGate        = true;   // Range must dwarf the spread
+input double MinRangeSpreadMult       = 5.0;    // Range width >= spread x this
+// The width gate is now measured in POINTS, not in ATR multiples. On
+// 3-digit gold 1000 points = 1.00 USD, so the defaults below read as
+// "between 6 and 40 dollars wide" - the band real Asian ranges live in.
 // The ratio above is relative, so on a very quiet day a 3 USD "range" can
 // still look proportionate. Research on the Asian range is blunt about the
 // absolute floor: under 6-8 USD the break is whipsaw. 6000 points = 6 USD on
 // 3-digit gold. Set to 0 to disable the absolute test.
-input double MinRangePoints           = 6000;   // Absolute min width, points
+input double MinRangePoints           = 6000;   // Min range width, points
+input double MaxRangePoints           = 40000;  // Max range width, points (0 = off)
 input bool   AllowReEntry             = true;   // Re-enter after a failed / rejected break
 input int    MaxBreakoutsPerRange     = 3;      // Max TRADES one range may produce
 
 input string __04c = "======== BREAKOUT EXITS ========"; // .
 input bool   StopByRangeOpposite      = true;   // Stop at the far side of the range
-input double StopRangePadATR          = 0.5;    // ...padded by ATR x this
-input ENUM_BK_TP TargetMode           = BK_TP_ATR; // Target style
+input double StopRangePadPoints       = 400.0;  // ...padded by this many points
+input ENUM_BK_TP TargetMode           = BK_TP_MEASURED; // Target style
 input double MeasuredMoveMult         = 1.0;    // MEASURED: range height x this
 input double MinTargetCostMult        = 3.0;    // Target >= (spread+commission) x this
 
@@ -367,8 +389,8 @@ double   gBkLevel      = 0.0;   // the level that was broken (for the retest)
 int      gBkBreakBar   = 0;     // Bars value when the break happened
 int      gBkTakenThis  = 0;     // trades already taken from this range
 datetime gBkRangeStamp = 0;     // identifies the current range
-double   gBkATR        = 0.0;   // ATR at the last evaluation
-double   gBkATRAvg     = 0.0;   // its own moving average
+double   gLastRiskUSD  = 0.0;   // USD at risk on the most recent entry
+bool     gLastRiskOver = false; // ...was it widened to the broker floor?
 double   gBkDistPct    = 0.0;   // how close price is to the trigger, 0..100
 string   gBkGateFail   = "";    // which gate rejected the setup
 
@@ -377,7 +399,7 @@ string   gBkGateFail   = "";    // which gate rejected the setup
 // must still SEE it forming on the chart - otherwise the panel says
 // "BUILDING RANGE" while the chart shows nothing at all.
 int      gBkBars       = 0;     // bars the completed range spans
-double   gBkSpan       = 0.0;   // ATR * sqrt(bars) = expected travel
+double   gBkSpan       = 0.0;   // the min-width reference, in price
 double   gBkRatio      = 0.0;   // width / span, what the width gate tests
 int      gBkFormBars   = 0;     // bars collected so far while forming
 bool     gBkForming    = false; // inside the range window right now
@@ -690,7 +712,7 @@ datetime MonthStart(datetime t)
 //==================================================================//
 // This block is the trading engine of "Signal Forge XAUUSD M5 EA"
 // restored verbatim in behaviour: the same 11 filters, the same
-// AND/OR combination, the same ATR/points stop and target, the same
+// AND/OR combination, the same money/points stop and target, the same
 // point-based trailing stop and the same one-position flip logic.
 // The v2 risk layer (sessions, daily loss caps, equity kill-switch,
 // cooldowns, cost-aware targets, adaptive spread) has been removed
@@ -710,15 +732,54 @@ double NormalizeLots(double lots)
    return NormalizeDouble(MathFloor(lots / step + 0.0000001) * step, 2);
   }
 
-double RiskStopDistance(double lots)
+// What one POINT of price movement is worth, in account currency, for the
+// given lot size. On 3-digit XAUUSD at 0.10 lots this is 0.01 USD/point.
+double MoneyPerPoint(double lots)
   {
-   double balance   = (RiskReferenceBalance > 0) ? RiskReferenceBalance : AccountBalance();
-   double money     = balance * MathMax(0.0, RiskPercent) / 100.0;
    double tickSize  = MarketInfo(Symbol(), MODE_TICKSIZE);
    double tickValue = MarketInfo(Symbol(), MODE_TICKVALUE);
-   if(tickSize <= 0) tickSize = Point;
-   if(money <= 0 || tickValue <= 0 || lots <= 0) return 0;
-   return MathMax(Point, money * tickSize / (lots * tickValue));
+   if(tickSize <= 0)  tickSize  = Point;
+   if(tickValue <= 0) tickValue = 1.0;
+   if(lots <= 0) return 0;
+   return lots * tickValue * (Point / tickSize);
+  }
+
+// The USD a single trade is allowed to lose: a percentage of the balance,
+// optionally hard-capped by MaxLossUSDPerTrade. Set RiskPercent to 0 and a
+// USD cap to trade purely on a flat dollar stop.
+double RiskBudgetUSD()
+  {
+   double balance = (RiskReferenceBalance > 0) ? RiskReferenceBalance : AccountBalance();
+   double pct     = balance * MathMax(0.0, RiskPercent) / 100.0;
+   double cap     = MathMax(0.0, MaxLossUSDPerTrade);
+
+   if(StopLossMode == SL_By_Max_USD)
+      return (cap > 0) ? cap : pct;        // flat-USD mode: the cap IS the risk
+
+   if(cap > 0) return MathMin(pct, cap);   // percent mode, optionally capped
+   return pct;
+  }
+
+// Turn the money budget into a stop DISTANCE in price, at the traded lot.
+// This is the only stop model in the EA - there is no ATR fallback.
+double RiskStopDistance(double lots)
+  {
+   double money = RiskBudgetUSD();
+   double mpp   = MoneyPerPoint(lots);
+   if(money <= 0 || mpp <= 0) return 0;
+   return MathMax(Point, (money / mpp) * Point);
+  }
+
+// The smallest stop the broker and the current spread will actually let us
+// survive: STOPLEVEL, plus the spread (a BUY stop is measured from Ask but
+// triggers on Bid), plus a slippage allowance, and never below MinStopPoints.
+double MinStopDistance()
+  {
+   double stopLevel = MarketInfo(Symbol(), MODE_STOPLEVEL);
+   double spreadPts = (Ask - Bid) / Point;
+   double floorPts  = MathMax(MathMax(0.0, MinStopPoints),
+                              stopLevel + spreadPts + MathMax(0, SlippagePoints) + 2);
+   return floorPts * Point;
   }
 
 int CountOwnPositions(int &type, int &ticket)
@@ -764,31 +825,55 @@ bool OpenPosition(int type)
       return false;
      }
 
+   // THE LOT IS THE LOT. It is never scaled down to fit a risk budget and
+   // a sizing verdict can never refuse the entry - that behaviour was
+   // removed on purpose. The RISK is expressed in the stop instead.
    double lots  = NormalizeLots(FixedLots);
    double entry = (type == OP_BUY) ? Ask : Bid;
-   double atr   = iATR(NULL, 0, MathMax(1, ATRLength), 1);
-   double atrSLDistance = atr * MathMax(0.1, StopLossATR);
-   double slDistance = (StopLossMode == SL_By_Risk_Percent) ? RiskStopDistance(lots) : atrSLDistance;
-   double tpDistance = (TakeProfitMode == TP_By_Points)
-                       ? MathMax(Point, TakeProfitPoints * Point)
-                       : atr * MathMax(0.1, TakeProfitATR);
 
-   //--- BREAKOUT-SPECIFIC STOP AND TARGET ---------------------------
-   // The natural stop for a range break is the OTHER side of the range:
-   // if price goes back through the whole box, the break has failed and
-   // there is nothing left to be right about. A pure ATR stop ignores
-   // where the structure actually is.
+   //--- MONEY-DEFINED STOP -------------------------------------------
+   // The stop is whatever distance makes this trade lose exactly the
+   // configured budget at THIS lot size. No ATR anywhere.
+   double budgetUSD  = RiskBudgetUSD();
+   double slDistance = RiskStopDistance(lots);
+   if(slDistance <= 0) slDistance = MinStopDistance();   // never unprotected
+
+   // The structural stop (far side of the range) is still worth knowing
+   // about, but it may only ever make the stop TIGHTER than the money
+   // budget allows - never wider. Widening it is what turned one trade
+   // into a -429.69 loss on a 429.60 account.
    if(StopByRangeOpposite && gBkValid && gBkHigh > gBkLow)
      {
-      double pad  = MathMax(0.0, StopRangePadATR) * atr;
+      double pad = MathMax(0.0, StopRangePadPoints) * Point;
       double structural = (type == OP_BUY) ? (entry - (gBkLow  - pad))
                                            : ((gBkHigh + pad) - entry);
-      // Never let the structural stop be sillier than the ATR one in
-      // either direction: clamp it into a sane band around ATR.
-      if(structural > 0)
-         slDistance = MathMax(atrSLDistance * 0.5,
-                              MathMin(structural, atrSLDistance * 3.0));
+      if(structural > 0 && structural < slDistance) slDistance = structural;
      }
+
+   //--- BROKER / SPREAD FLOOR ----------------------------------------
+   // A stop tighter than the spread is stopped out on the fill. When the
+   // money budget cannot buy a survivable stop the EA STILL TRADES: it
+   // widens to the floor and reports the real risk. It does not refuse.
+   double floorDist = MinStopDistance();
+   bool   overrun   = false;
+   if(slDistance < floorDist)
+     {
+      overrun    = true;
+      slDistance = floorDist;
+     }
+   gLastRiskUSD  = slDistance / Point * MoneyPerPoint(lots);
+   gLastRiskOver = overrun;
+   if(overrun && !AllowRiskOverrun)
+     {
+      // Opt-in only. The default is to trade and accept the wider stop.
+      gLastAction  = "BLOCKED: STOP FLOOR " + DoubleToString(floorDist / Point, 0) + " PTS";
+      gBlockReason = T("RISK") + " $" + Fmt(gLastRiskUSD, 2) + " > $" + Fmt(budgetUSD, 2);
+      return false;
+     }
+
+   double tpDistance = (TakeProfitMode == TP_By_Points)
+                       ? MathMax(Point, TakeProfitPoints * Point)
+                       : slDistance * MathMax(0.1, TakeProfitRMultiple);
 
    // Measured move: a range that was N wide often travels N again.
    if(TargetMode == BK_TP_MEASURED && gBkValid && gBkHigh > gBkLow)
@@ -803,7 +888,7 @@ bool OpenPosition(int type)
    if(tpDistance < tpFloor) tpDistance = tpFloor;
 
    double minimum = (MarketInfo(Symbol(), MODE_STOPLEVEL) + 2) * Point;
-   slDistance = MathMax(slDistance, minimum);
+   slDistance = MathMax(slDistance, minimum);   // already floored, belt and braces
    tpDistance = MathMax(tpDistance, minimum);
    double sl = (type == OP_BUY) ? entry - slDistance : entry + slDistance;
    double tp = (type == OP_BUY) ? entry + tpDistance : entry - tpDistance;
@@ -839,7 +924,10 @@ bool OpenPosition(int type)
    gLastTradeBar = Time[0];
    gDayTrades++;
    gLastAction = (type == OP_BUY) ? "BUY OPENED" : "SELL OPENED";
-   Journal(gLastAction + " " + DoubleToString(lots, 2) + " @ " + DoubleToString(entry, Digits));
+   Journal(gLastAction + " " + DoubleToString(lots, 2) + " @ " + DoubleToString(entry, Digits) +
+           " | SL " + DoubleToString(slDistance / Point, 0) + "p = $" +
+           DoubleToString(gLastRiskUSD, 2) +
+           (overrun ? " (floor, budget $" + DoubleToString(budgetUSD, 2) + ")" : ""));
 
    if(AlertOnEntry)
       Alert("Breakout Forge: ", (type == OP_BUY ? "BUY " : "SELL "), Symbol(), " ", lots);
@@ -855,7 +943,7 @@ bool OpenPosition(int type)
 string BkGateName(int g)
   {
    if(g == 0) return "RANGE OK";
-   if(g == 1) return "VOLATILITY";
+   if(g == 1) return "RANGE vs SPREAD";
    if(g == 2) return "SPREAD";
    if(g == 3) return "SESSION";
    if(g == 4) return "RANGE WIDTH";
@@ -929,10 +1017,14 @@ bool DailyLimitsOK(string &why)
 
 // Buffer in PRICE. Points are converted with Point so a 3-digit gold feed
 // and a 5-digit FX feed both behave.
-double BreakoutBuffer(double atr)
+double BreakoutBuffer()
   {
-   if(BufferMode == BK_BUF_FIXED) return MathMax(0.0, BufferFixedPoints) * Point;
-   return MathMax(0.0, BufferATRMult) * atr;
+   if(BufferMode == BK_BUF_SPREAD)
+     {
+      double sp = (Ask - Bid) / Point;
+      if(sp > 0) return MathMax(0.0, BufferSpreadMult) * sp * Point;
+     }
+   return MathMax(0.0, BufferFixedPoints) * Point;
   }
 
 // Build the range. Returns false when there is nothing usable yet, which
@@ -1079,18 +1171,6 @@ void ArchiveCurrentRange()
 // Refresh the range, the buffer and the derived trigger levels.
 void UpdateRange()
   {
-   double atr = iATR(NULL, 0, MathMax(1, ATRLength), 1);
-   if(atr <= 0) { gBkValid = false; return; }
-   gBkATR = atr;
-
-   double sum = 0; int n = MathMax(1, VolATRAvgPeriod), got = 0;
-   for(int i = 1; i <= n; i++)
-     {
-      double a = iATR(NULL, 0, MathMax(1, ATRLength), i);
-      if(a > 0) { sum += a; got++; }
-     }
-   gBkATRAvg = (got > 0) ? sum / got : atr;
-
    double hi = 0, lo = 0; datetime stamp = 0; int rbars = 0;
    if(!BuildRange(hi, lo, stamp, rbars)) { gBkValid = false; return; }
    gBkBars = MathMax(1, rbars);
@@ -1110,29 +1190,33 @@ void UpdateRange()
 
    gBkHigh   = hi;
    gBkLow    = lo;
-   gBkBuffer = BreakoutBuffer(atr);
+   gBkBuffer = BreakoutBuffer();
    gBkUpper  = hi + gBkBuffer;
    gBkLower  = lo - gBkBuffer;
 
    // ---- WIDTH SANITY -------------------------------------------------
-   // The range must be compared against what the market could PLAUSIBLY
-   // travel over the bars the range actually spans - not against one M5
-   // bar's ATR. A 7-hour Asian session is 84 M5 bars; a healthy gold Asian
-   // range is 9-18 USD while 6x M5 ATR is only about 3-7 USD, so the old
-   // "width <= MaxRangeATRMult * atr" test rejected virtually every real
-   // session range and the panel sat on NO VALID RANGE forever.
-   //
-   // Over N bars a random walk covers roughly ATR * sqrt(N), so that is the
-   // yardstick. The multipliers now mean "fraction of the expected envelope"
-   // and behave identically in SESSION and DONCHIAN mode.
-   double width = hi - lo;
-   gBkSpan  = atr * MathSqrt((double)gBkBars);
-   gBkRatio = (gBkSpan > 0) ? width / gBkSpan : 0.0;
-   gBkValid = (gBkRatio >= MinRangeATRMult && gBkRatio <= MaxRangeATRMult);
-   // ...plus an absolute floor, because a proportionate range can still be
-   // too small in dollars to pay for spread + commission.
-   if(gBkValid && MinRangePoints > 0 && (width / gPoint) < MinRangePoints)
-      gBkValid = false;
+   // ATR has been removed from the EA, so the range is judged directly in
+   // POINTS - which is what the old ratio was only ever approximating, and
+   // is far easier to reason about. On 3-digit gold 1000 points = 1.00 USD:
+   // the defaults accept a 6-40 USD box, the band real Asian ranges occupy.
+   // Under ~6 USD the break is whipsaw; over ~40 USD it is a trend, not a
+   // range, and the far-side stop would be enormous.
+   double width    = hi - lo;
+   double widthPts = (gPoint > 0) ? width / gPoint : 0.0;
+   gBkSpan  = MathMax(1.0, MinRangePoints) * gPoint;   // reference for the meter
+   gBkRatio = (MinRangePoints > 0) ? widthPts / MinRangePoints : 0.0;
+
+   gBkValid = (MinRangePoints <= 0 || widthPts >= MinRangePoints) &&
+              (MaxRangePoints <= 0 || widthPts <= MaxRangePoints);
+
+   // ...and the range must dwarf the spread, or it cannot pay for itself.
+   // This replaces the old ATR-expansion gate with a cost-relative one.
+   if(gBkValid && UseVolatilityGate)
+     {
+      double spPts = SpreadPoints();
+      if(spPts > 0 && widthPts < MathMax(0.0, MinRangeSpreadMult) * spPts)
+         gBkValid = false;
+     }
 
    // Distance-to-break meter: 100% means price is sitting on the trigger.
    double px = (Bid + Ask) / 2.0;
@@ -1186,9 +1270,11 @@ bool BreakoutGates(int dir, string &why)
    // 1 - a valid, sane range exists
    gBkGate[0] = gBkValid;
 
-   // 2 - volatility is expanding
+   // 2 - the range is wide enough relative to the spread to be tradable
    gBkGate[1] = (!UseVolatilityGate) ||
-                (gBkATRAvg > 0 && gBkATR > VolATRMinRatio * gBkATRAvg);
+                (SpreadPoints() <= 0) ||
+                ((gBkHigh - gBkLow) / gPoint >=
+                 MathMax(0.0, MinRangeSpreadMult) * SpreadPoints());
 
    // 3 - spread
    gBkGate[2] = (MaximumSpreadPoints <= 0 || SpreadPoints() <= MaximumSpreadPoints);
@@ -1334,27 +1420,15 @@ double BreakEvenPrice(int type, double entry, double lots)
 // These feed the dashboard only. Nothing here can block a trade - the
 // original strategy has no daily limits.
 
-// ATR of the current symbol/timeframe expressed in points.
-double ATRPoints(int shift)
+// Realised range of the last N bars, in points. This replaces ATR as the
+// dashboard's volatility readout: same intent, no indicator.
+double RecentRangePoints(int bars)
   {
-   double atr = iATR(NULL, 0, ATRLength, shift);
-   return (gPoint > 0) ? atr / gPoint : 0.0;
-  }
-
-// Current ATR against its own 50-bar average: >1 = expanding volatility.
-double ATRRatio(int shift)
-  {
-   double atr = iATR(NULL, 0, ATRLength, shift);
-   if(atr <= 0) return 0.0;
-   double sum = 0; int n = 0;
-   for(int i = shift; i < shift + 50; i++)
-     {
-      double a = iATR(NULL, 0, ATRLength, i);
-      if(a > 0) { sum += a; n++; }
-     }
-   if(n == 0) return 1.0;
-   double avg = sum / n;
-   return (avg > 0) ? atr / avg : 1.0;
+   int n = MathMax(1, bars);
+   int hi = iHighest(NULL, 0, MODE_HIGH, n, 1);
+   int lo = iLowest (NULL, 0, MODE_LOW,  n, 1);
+   if(hi < 0 || lo < 0 || gPoint <= 0) return 0.0;
+   return (High[hi] - Low[lo]) / gPoint;
   }
 
 // The agreement level at which the combined signal actually fires.
@@ -1947,7 +2021,8 @@ string T(const string k)
    if(k == "SPREAD")              return "\x0627\x0644\x0641\x0627\x0631\x0642";
    if(k == "LOTS")                return "\x0627\x0644\x0644\x0648\x062A";
    if(k == "ROUND TURN")          return "\x0630\x0647\x0627\x0628\x0020\x0648\x0639\x0648\x062F\x0629";
-   if(k == "COST / ATR(")         return "\x0627\x0644\x062A\x0643\x0644\x0641\x0629\x0020\x002F\x0020\x0041\x0054\x0052\x0028";
+   if(k == "COST / 14-BAR RANGE") return "\x0627\x0644\x062A\x0643\x0644\x0641\x0629\x0020\x002F\x0020\x0645\x062F\x0649\x0020\x0661\x0664\x0020\x0634\x0645\x0639\x0629";
+   if(k == "RANGE vs SPREAD")     return "\x0627\x0644\x0645\x062F\x0649\x0020\x0645\x0642\x0627\x0628\x0644\x0020\x0627\x0644\x0641\x0627\x0631\x0642";
    //--- tracker
    if(k == "PERFORMANCE TRACKER") return "\x0645\x062A\x062A\x0628\x0639\x0020\x0627\x0644\x0623\x062F\x0627\x0621";
    if(k == "DATE")                return "\x0627\x0644\x062A\x0627\x0631\x064A\x062E";
@@ -2604,7 +2679,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v1.06", TTextDim, 7);
+        "  ·  RAW  ·  v1.07", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -2688,8 +2763,8 @@ void PaintHud()
 
         double spPts  = SpreadPoints();
         double cost   = TotalCostPoints();
-        double atrP   = ATRPoints(1);
-        double costPct= (atrP > 0) ? cost / atrP : 1.0;
+        double rngP   = RecentRangePoints(14);
+        double costPct= (rngP > 0) ? cost / rngP : 1.0;
         uint costCol  = (costPct < 0.12) ? TBull : (costPct < 0.25 ? TFlat : TBear);
 
         int col = innerW / 3;
@@ -2703,8 +2778,8 @@ void PaintHud()
         Text(pad + SC(12) + col * 2, y + SC(26), "ROUND TURN", TTextDim, 7);
         Text(pad + SC(12) + col * 2, y + SC(37), Fmt(cost, 0) + " pts", costCol, 10, "Segoe UI Semibold", SF_FW_SEMI);
 
-        Text(pad + SC(12), y + SC(57), "COST / ATR(" + IntegerToString(ATRLength) + ")", TTextDim, 7);
-        TextRight(pad + innerW - SC(12), y + SC(57), Fmt(costPct * 100.0, 1) + "% of ATR", costCol, 7,
+        Text(pad + SC(12), y + SC(57), T("COST / 14-BAR RANGE"), TTextDim, 7);
+        TextRight(pad + innerW - SC(12), y + SC(57), Fmt(costPct * 100.0, 1) + "%", costCol, 7,
                   "Segoe UI Semibold", SF_FW_SEMI);
         Meter(pad + SC(12), y + SC(72), innerW - SC(24), SC(8), costPct * 4.0, costCol, TGridC);
         y += costH + SC(8);
@@ -2738,12 +2813,21 @@ void PaintHud()
         AccentSpine(pad + SC(4), y + SC(7), SC(13), TFlat);
         Text(pad + SC(13), y + SC(6), T("EXECUTION CONSOLE"), TText, 8, "Segoe UI Black", SF_FW_BLACK);
 
-        string slTxt = (StopLossMode == SL_By_ATR)
-                       ? ("ATR x " + Fmt(StopLossATR, 2))
-                       : ("RISK " + Fmt(RiskPercent, 2) + "%");
-        string tpTxt = (TakeProfitMode == TP_By_ATR)
-                       ? ("ATR x " + Fmt(TakeProfitATR, 2))
-                       : (Fmt(TakeProfitPoints, 0) + " pts");
+        // The stop is money-defined, so show the MONEY and the distance it
+        // buys at the configured lot - that is the number that matters.
+        double planLots = NormalizeLots(FixedLots);
+        double planUSD  = RiskBudgetUSD();
+        double planDist = RiskStopDistance(planLots);
+        double planFloor= MinStopDistance();
+        bool   planOver = (planDist < planFloor);
+        if(planOver) planDist = planFloor;
+        double planReal = planDist / Point * MoneyPerPoint(planLots);
+
+        string slTxt = "$" + Fmt(planReal, 2) + "  ·  " +
+                       Fmt(planDist / Point, 0) + T("p");
+        string tpTxt = (TakeProfitMode == TP_By_Points)
+                       ? (Fmt(TakeProfitPoints, 0) + " pts")
+                       : (Fmt(TakeProfitRMultiple, 1) + "R");
 
         Text(pad + SC(12), y + SC(26), T("STOP LOSS"), TTextDim, 7);
         TextRight(pad + innerW - SC(12), y + SC(26), slTxt, TText, 7, "Segoe UI Semibold", SF_FW_SEMI);
@@ -2804,10 +2888,10 @@ void PaintHud()
          TextCenter(pad + innerW / 2, y + SC(34),
                     BkStateText() + "   ·   " +
                     (gBlockReason == "" ? T("SCANNING") : gBlockReason), TTextDim, 7);
-         double atrNow = ATRPoints(1);
          TextCenter(pad + innerW / 2, y + SC(50),
-                    "ATR " + Fmt(atrNow, 0) + " " + T("pts") + "   ·   " + T("REGIME") + " " +
-                    Fmt(ATRRatio(1), 2) + "x", TTextDim, 7);
+                    T("RANGE") + " " + Fmt(RecentRangePoints(14), 0) + " " + T("pts") +
+                    "   ·   " + T("SPREAD") + " " + Fmt(SpreadPoints(), 0) + " " + T("pts"),
+                    TTextDim, 7);
         }
       y += tkH + SC(8);
         }
@@ -2850,9 +2934,9 @@ void PaintHud()
          // ...and the number the width gate actually judges, with the window
          // it has to fall inside, so a rejection is never a mystery.
          Text(pad + SC(12) + SC(52), rY + SC(43),
-              "x" + DoubleToString(gBkRatio, 2) + "  (" +
-              DoubleToString(MinRangeATRMult, 2) + "-" +
-              DoubleToString(MaxRangeATRMult, 2) + ")", TTextDim, 7);
+              "(" + DoubleToString(MinRangePoints, 0) + "-" +
+              (MaxRangePoints > 0 ? DoubleToString(MaxRangePoints, 0) : "inf") +
+              T("p") + ")", TTextDim, 7);
          TextRight(pad + innerW - SC(12), rY + SC(42),
                    DoubleToString((gBkHigh - gBkLow) / gPoint, 0) + T("p"),
                    TText, 9, "Segoe UI Semibold", SF_FW_SEMI);
@@ -2879,8 +2963,9 @@ void PaintHud()
          if(gBkHigh > gBkLow && gBkRatio > 0)
            {
             TextVC(pad + SC(12), rY, SC(21),
-                   (gBkRatio > MaxRangeATRMult) ? T("RANGE TOO WIDE")
-                                                : T("RANGE TOO TIGHT"),
+                   (MaxRangePoints > 0 &&
+                    (gBkHigh - gBkLow) / gPoint > MaxRangePoints)
+                       ? T("RANGE TOO WIDE") : T("RANGE TOO TIGHT"),
                    TWarn, 8, "Segoe UI Semibold", SF_FW_SEMI);
             Text(pad + SC(12), rY + SC(24), T("WIDTH"), TTextDim, 7);
             TextRight(pad + innerW - SC(12), rY + SC(24),
@@ -2890,12 +2975,13 @@ void PaintHud()
             // absolute points floor.
             bool absFail = (MinRangePoints > 0 &&
                             (gBkHigh - gBkLow) / gPoint < MinRangePoints);
+            double spN = SpreadPoints();
             Text(pad + SC(12), rY + SC(44),
                  absFail ? ("< " + DoubleToString(MinRangePoints, 0) + T("p") +
                             " " + T("minimum"))
-                         : ("x" + DoubleToString(gBkRatio, 2) + " " + T("of") + " " +
-                            DoubleToString(MinRangeATRMult, 2) + "-" +
-                            DoubleToString(MaxRangeATRMult, 2)), TWarn, 7);
+                         : ("< " + DoubleToString(MathMax(0.0, MinRangeSpreadMult) * spN, 0) +
+                            T("p") + " (" + DoubleToString(MinRangeSpreadMult, 1) + "x " +
+                            T("SPREAD") + ")"), TWarn, 7);
             TextRight(pad + innerW - SC(12), rY + SC(44),
                       IntegerToString(gBkBars) + " " + T("bars"), TTextDim, 7);
            }
@@ -4170,17 +4256,17 @@ int OnInit()
       Print("[BK-FORGE] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("BK-FORGE v1.06 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("BK-FORGE v1.07 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
 
    // Print exactly which overlays are armed, so a "nothing is drawn" report
    // can be diagnosed from the Experts log without guesswork.
    string ov = "";
-   Print("[BK-FORGE] v1.06 build | range=",
+   Print("[BK-FORGE] v1.07 build | range=",
          (RangeMode == BK_RANGE_DONCHIAN ? "DONCHIAN" : "SESSION"),
          " | entry=", (EntryMode == BK_ENTRY_RETEST ? "RETEST" : "BREAK"),
-         " | width gate=", DoubleToString(MinRangeATRMult, 2), "-",
-         DoubleToString(MaxRangeATRMult, 2), " x expected travel",
+         " | width gate=", DoubleToString(MinRangePoints, 0), "-",
+         DoubleToString(MaxRangePoints, 0), " pts",
          " | magic=", MagicNumber);
 
    gLastBar = 0;
@@ -4203,8 +4289,8 @@ int OnInit()
                   " | ", gBkBars, " bars | width ",
                   DoubleToString((gBkHigh - gBkLow) / gPoint, 0), "p",
                   " | ratio ", DoubleToString(gBkRatio, 2),
-                  " vs ", DoubleToString(MinRangeATRMult, 2), "-",
-                  DoubleToString(MaxRangeATRMult, 2),
+                  " vs ", DoubleToString(MinRangePoints, 0), "-",
+                  DoubleToString(MaxRangePoints, 0), " pts",
                   " -> ", (gBkValid ? "VALID" : "REJECTED"));
          else
             Print("[BK-FORGE] no range yet (need history, or the window has ",

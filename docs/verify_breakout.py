@@ -73,36 +73,37 @@ check("a wick alone cannot trigger (RequireBodyClose path)",
 check("outside bars are skipped", "if(upBreak && dnBreak) return 0;" in BK)
 check("buffer is applied to both edges",
       "gBkUpper  = hi + gBkBuffer;" in BK and "gBkLower  = lo - gBkBuffer;" in BK)
-check("buffer can be ATR or fixed points",
-      "BK_BUF_FIXED" in BK and "BufferATRMult" in BK)
-# The width gate must normalise by the number of bars the range spans.
-# Comparing a multi-hour range against ONE M5 bar's ATR (the v1.01 bug) made
-# every real session range fail and pinned the panel on NO VALID RANGE.
-check("range width sanity gate exists",
-      re.search(r'gBkValid = \(gBkRatio >= MinRangeATRMult && gBkRatio <= MaxRangeATRMult\)', BK) is not None)
-check("width is normalised by sqrt(bars in range), not one bar's ATR",
-      "gBkSpan  = atr * MathSqrt((double)gBkBars);" in BK)
-check("the raw-ATR width comparison is gone",
-      re.search(r'width <= MaxRangeATRMult \* atr', CODE) is None)
+check("buffer can be fixed points or a spread multiple",
+      "BK_BUF_FIXED" in BK and "BufferSpreadMult" in BK)
+# ATR HAS BEEN REMOVED FROM THE EA. The width gate is now expressed in
+# POINTS, which is what the old ATR ratio only ever approximated.
+check("width gate is measured in points",
+      re.search(r'gBkValid = \(MinRangePoints <= 0 \|\| widthPts >= MinRangePoints\) &&', BK) is not None
+      and "(MaxRangePoints <= 0 || widthPts <= MaxRangePoints)" in BK)
 check("BuildRange reports the bar count",
       "bool BuildRange(double &hi, double &lo, datetime &stamp, int &bars)" in BK)
-check("absolute width floor exists",
+check("both width bounds are inputs",
       re.search(r'^input\s+double\s+MinRangePoints', BK, re.M) is not None and
-      "(width / gPoint) < MinRangePoints" in BK)
-# a healthy Asian range must actually pass
-import math as _m
-_atr, _w, _bars = 0.80, 12.0, 84
-_ratio = _w / (_atr * _m.sqrt(_bars))
-_mn = float(re.search(r'MinRangeATRMult\s*=\s*([\d.]+)', BK).group(1))
-_mx = float(re.search(r'MaxRangeATRMult\s*=\s*([\d.]+)', BK).group(1))
-check(f"healthy Asian range (ATR .80, $12, 84 bars) ratio {_ratio:.2f} passes {_mn}-{_mx}",
-      _mn <= _ratio <= _mx)
-check("a dead-flat $2 range is still rejected",
-      not (_mn <= 2.0 / (0.80 * _m.sqrt(84)) <= _mx))
-check("a $40 trend is still rejected",
-      not (_mn <= 40.0 / (0.80 * _m.sqrt(84)) <= _mx))
-check("volatility expansion gate exists",
-      re.search(r'gBkATR > VolATRMinRatio \* gBkATRAvg', BK) is not None)
+      re.search(r'^input\s+double\s+MaxRangePoints', BK, re.M) is not None)
+_mn = float(re.search(r'MinRangePoints\s*=\s*([\d.]+)', BK).group(1))
+_mx = float(re.search(r'MaxRangePoints\s*=\s*([\d.]+)', BK).group(1))
+# 3-digit gold: 1000 points = 1.00 USD
+check(f"healthy $12 Asian range passes the {_mn:.0f}-{_mx:.0f} pt gate",
+      _mn <= 12000 <= _mx)
+check("a dead-flat $2 range is rejected", not (_mn <= 2000 <= _mx))
+check("a $60 trend is rejected",          not (_mn <= 60000 <= _mx))
+check("range-vs-spread gate replaces the ATR expansion gate",
+      "MinRangeSpreadMult" in BK and
+      re.search(r'widthPts < MathMax\(0\.0, MinRangeSpreadMult\) \* spPts', BK) is not None)
+# ---- NO ATR ANYWHERE ----------------------------------------------
+check("no iATR call survives in the EA", "iATR(" not in BK)
+for _dead in ("ATRLength", "StopLossATR", "TakeProfitATR", "BufferATRMult",
+              "VolATRAvgPeriod", "VolATRMinRatio", "StopRangePadATR",
+              "MinRangeATRMult", "MaxRangeATRMult", "SL_By_ATR", "TP_By_ATR",
+              "BK_BUF_ATR", "BK_TP_ATR", "gBkATR", "gBkATRAvg",
+              "ATRPoints", "ATRRatio", "atrSLDistance"):
+    check(f"ATR identifier removed: {_dead}", _dead not in BK)
+
 check("per-range trade cap resets with a new range",
       "gBkTakenThis  = 0;" in BK and "gBkTakenThis++" in BK)
 
@@ -118,10 +119,8 @@ check("entry requires gatesPass", "if(wantEntry && dir != 0 && gatesPass" in BK)
 print("\n5. exits")
 check("stop can use the opposite side of the range",
       "StopByRangeOpposite" in BK and "gBkLow  - pad" in BK)
-# v1.02 clamps with a hardcoded 3.0 (StopClampATRMult was a v1.03 input and
-# went out with the rest of that risk layer when the engine was restored).
-check("structural stop is clamped to a sane band around ATR",
-      re.search(r'MathMax\(atrSLDistance \* 0\.5,\s*\n\s*MathMin\(structural, atrSLDistance \* 3\.0\)\)', BK) is not None)
+check("structural stop may only tighten the money stop",
+      "if(structural > 0 && structural < slDistance) slDistance = structural;" in BK)
 check("measured-move target available", "BK_TP_MEASURED" in BK)
 check("target floored at a multiple of real cost",
       "MinTargetCostMult" in BK and "SpreadPoints() + gCostPointsRT" in BK)
@@ -169,9 +168,9 @@ n_inputs = len([x for x in re.findall(r'^input\s+[\w ]+?\s+(\w+)\s*=', BK, re.M)
 n_sf = len([x for x in re.findall(r'^input\s+[\w ]+?\s+(\w+)\s*=', SF, re.M)
             if not x.startswith("__")])
 print(f"   (Signal Forge {n_sf} inputs -> Breakout Forge {n_inputs})")
-for bi in ("RangeMode", "DonchianBars", "BufferMode", "BufferATRMult",
+for bi in ("RangeMode", "DonchianBars", "BufferMode", "BufferFixedPoints",
            "RequireBodyClose", "EntryMode", "RetestMaxBars", "UseVolatilityGate",
-           "MinRangeATRMult", "MaxBreakoutsPerRange", "StopByRangeOpposite",
+           "MinRangePoints", "MaxBreakoutsPerRange", "StopByRangeOpposite",
            "TargetMode", "MinTargetCostMult", "UseSessionFilter",
            "BlockRollover", "MaxTradesPerDay", "MaxDailyLossUSD"):
     check(f"breakout input {bi} present",
@@ -212,43 +211,80 @@ check("BUILDING RANGE only claimed while actually forming",
 for k in ("COLLECTING", "FAILED BREAKS"):
     check(f'"{k}" is translated', f'if(k == "{k}")' in BK)
 
-print("\n7d. v1.02 TRADING ENGINE RESTORED (user request)")
-# The user asked for the v1.02 engine back verbatim, keeping ONLY the
-# history/drawing work. v1.03 derived the lot from the stop (which refused
-# trades) and v1.05 capped the stop from the lot; BOTH are removed. These
-# checks assert the v1.02 engine is present and the later risk layer is not.
-check("fixed-lot sizing is back", "double lots  = NormalizeLots(FixedLots);" in BK)
-check("the v1.02 SL mode enum is back",
-      "enum EA_SL_MODE { SL_By_ATR = 0, SL_By_Risk_Percent = 1 };" in BK)
-check("RiskStopDistance() is back", "double RiskStopDistance(double lots)" in BK)
-check("the hardcoded 3.0 structural clamp is back", "atrSLDistance * 3.0));" in BK)
-for d, v in (("RiskPercent", "0.5"), ("StopLossATR", "1.8"),
-             ("TakeProfitPoints", "5000.0"), ("MaxDailyLossUSD", "10.0")):
-    check(f"v1.02 default {d} = {v}",
-          re.search(r'^input[^\n]*\b%s\s*=\s*%s\s*;' % (d, re.escape(v)), BK, re.M) is not None)
-check("TP defaults to TP_By_Points again",
-      re.search(r'TakeProfitMode\s*=\s*TP_By_Points', BK) is not None)
-check("structural stop is ON again",
-      re.search(r'^input\s+bool\s+StopByRangeOpposite\s*=\s*true', BK, re.M) is not None)
-# ...and every trace of the later risk layer is gone
-for gone in ("LotForRisk", "CapStopToRisk", "RiskBudgetUSD", "MoneyPerLot",
+print("\n7d. MONEY-DEFINED STOP (0.1 lot, ATR removed)")
+# The lot is honoured exactly and is NEVER reduced; the risk lives in the
+# stop distance. A sizing verdict may not refuse an entry.
+check("the lot is used as-is", "double lots  = NormalizeLots(FixedLots);" in BK)
+check("FixedLots defaults to 0.1",
+      re.search(r'^input\s+double\s+FixedLots\s*=\s*0\.1\s*;', BK, re.M) is not None)
+check("RiskPercent defaults to 0.5",
+      re.search(r'^input\s+double\s+RiskPercent\s*=\s*0\.5\s*;', BK, re.M) is not None)
+check("a flat USD-per-trade cap exists",
+      re.search(r'^input\s+double\s+MaxLossUSDPerTrade', BK, re.M) is not None)
+check("SL_By_Max_USD mode exists", "SL_By_Max_USD" in BK)
+check("budget = min(percent, cap)",
+      "if(cap > 0) return MathMin(pct, cap);" in BK)
+check("flat-USD mode returns the cap itself",
+      re.search(r'if\(StopLossMode == SL_By_Max_USD\)\s*\n\s*return \(cap > 0\) \? cap : pct;', BK) is not None)
+check("stop distance = budget / money-per-point",
+      "return MathMax(Point, (money / mpp) * Point);" in BK)
+check("money-per-point is derived from tick value",
+      "return lots * tickValue * (Point / tickSize);" in BK)
+check("the structural stop may only TIGHTEN, never widen",
+      "if(structural > 0 && structural < slDistance) slDistance = structural;" in BK)
+check("a broker/spread floor exists",
+      "double MinStopDistance()" in BK and
+      "stopLevel + spreadPts + MathMax(0, SlippagePoints) + 2" in BK)
+check("MinStopPoints is an input",
+      re.search(r'^input\s+double\s+MinStopPoints\s*=\s*200', BK, re.M) is not None)
+check("overrun WIDENS the stop rather than skipping the trade",
+      re.search(r'overrun\s*=\s*true;\s*\n\s*slDistance = floorDist;', BK) is not None)
+check("AllowRiskOverrun defaults to true (never block the entry)",
+      re.search(r'^input\s+bool\s+AllowRiskOverrun\s*=\s*true', BK, re.M) is not None)
+check("the only sizing-related return is behind AllowRiskOverrun",
+      BK.count("if(overrun && !AllowRiskOverrun)") == 1)
+check("realised risk is journalled", "gLastRiskUSD" in BK)
+check("R-multiple target available", "TakeProfitRMultiple" in BK)
+
+# ---- the arithmetic, replayed ----
+POINT = 0.001
+def _mpp(lots):   return lots * 0.10          # USD per point, 3-digit gold
+def _budget(bal, pct, cap, maxusd=False):
+    p = bal * pct / 100.0
+    if maxusd: return cap if cap > 0 else p
+    return min(p, cap) if cap > 0 else p
+def _solve(bal, lots, pct, cap=0.0, maxusd=False,
+           spread=90, stoplevel=0, slip=30, minstop=200.0):
+    want = _budget(bal, pct, cap, maxusd) / _mpp(lots)
+    floor = max(minstop, stoplevel + spread + slip + 2)
+    used = max(want, floor)
+    return used, used * _mpp(lots), want < floor
+
+_ok = True
+for _b in (600, 1000, 2000, 5000):
+    _pts, _usd, _ov = _solve(_b, 0.10, 0.5)
+    if _ov or abs(_usd - _b * 0.005) > 0.01: _ok = False
+check("0.5% is exact at 0.10 lot once the budget clears the floor", _ok)
+_pts, _usd, _ov = _solve(157.79, 0.10, 0.5)
+check(f"tiny balance floors to {_pts:.0f} pts = ${_usd:.2f} and still TRADES",
+      _ov and abs(_usd - 2.00) < 0.01)
+_pts, _usd, _ov = _solve(2000, 0.10, 0.0, 2.00, maxusd=True)
+check(f"flat $2.00 cap honoured exactly (${_usd:.2f})", abs(_usd - 2.00) < 0.01)
+_pts, _usd, _ov = _solve(5000, 0.10, 0.5, 3.00)
+check(f"cap beats percent when percent is larger (${_usd:.2f})", abs(_usd - 3.00) < 0.01)
+# the -429.69 regression
+_pts, _usd, _ov = _solve(429.60, 0.10, 0.5)
+check(f"the -429.69 blowup cannot recur: risk ${_usd:.2f} on $429.60",
+      _usd < 429.60 * 0.02)
+
+# ...and every trace of the v1.03/v1.05 lot-shrinking layer stays gone
+for gone in ("LotForRisk", "CapStopToRisk", "MoneyPerLot",
              "RiskPerTradePercent", "MaxRiskPerTradeUSD", "MaxStopATRMult",
              "MinStopATRMult", "MinRewardRiskRatio", "UseRiskSizing",
              "RiskSizingMode", "BK_RISK_LOT_FIRST", "BK_RISK_STOP_FIRST",
              "SkipIfRiskTooHigh", "EnforceFloatingLossCap", "MaxOpenLossUSD",
-             "MaxLots", "RISK TOO HIGH", "STOP TOO WIDE"):
-    check(f"v1.03/v1.05 artefact removed: {gone}", gone not in BK)
-check("OpenPosition no longer aborts on a sizing verdict",
-      "gBlockReason = riskWhy;" not in BK)
-# the engine itself must be byte-identical to the v1.02 definitions
-_v102_fns = [
-   "   double lots  = NormalizeLots(FixedLots);\n   double entry = (type == OP_BUY) ? Ask : Bid;",
-   "   double slDistance = (StopLossMode == SL_By_Risk_Percent) ? RiskStopDistance(lots) : atrSLDistance;",
-   "   double minimum = (MarketInfo(Symbol(), MODE_STOPLEVEL) + 2) * Point;\n   slDistance = MathMax(slDistance, minimum);\n   tpDistance = MathMax(tpDistance, minimum);",
-]
-for frag in _v102_fns:
-    check("v1.02 OpenPosition body intact: " + frag.strip().split(chr(10))[0][:46],
-          frag in BK)
+             "RISK TOO HIGH", "STOP TOO WIDE"):
+    check(f"lot-shrinking artefact still absent: {gone}", gone not in BK)
 
 print("\n7e. HISTORY RETENTION (post-run analysis)")
 # The live range box is one object that gets MOVED, so without an archive
@@ -378,7 +414,7 @@ keys = re.findall(r'if\(k == "([^"]+)"\)', BK[_t0:_t1])
 check(f"{len(keys)} dictionary keys, no duplicates", len(keys) == len(set(keys)),
       str([k for k in set(keys) if keys.count(k) > 1]))
 for k in ("BREAKOUT", "SESSION RANGE", "WAITING FOR BREAK", "ENTRY CHECKLIST",
-          "VOLATILITY", "BODY CLOSE", "DAILY LIMIT"):
+          "RANGE vs SPREAD", "BODY CLOSE", "DAILY LIMIT"):
     check(f'"{k}" is translated', f'if(k == "{k}")' in BK)
 check("no raw Arabic bytes (escapes only)",
       not any(0x600 <= ord(c) <= 0x6FF for c in BK))

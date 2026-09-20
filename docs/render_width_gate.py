@@ -1,5 +1,7 @@
-# Why v1.01 said NO VALID RANGE, and what v1.02 does instead.
-import os, math
+# The v1.07 gates: range width in POINTS, and the money-defined stop.
+# ATR has been removed from the EA entirely, so this replaces the old
+# "ratio vs ATR x sqrt(bars)" diagram.
+import os
 from PIL import Image, ImageDraw, ImageFont
 HERE=os.path.dirname(os.path.abspath(__file__))
 BG=(9,14,24);PANEL=(16,24,38);EDGE=(38,54,78);CY=(0,214,255)
@@ -8,63 +10,77 @@ def f(sz,b=False):
     n="DejaVuSans-Bold.ttf" if b else "DejaVuSans.ttf"
     try: return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/"+n,sz)
     except: return ImageFont.load_default()
-W,H=1180,700
+W,H=1180,760
 img=Image.new("RGB",(W,H),BG);d=ImageDraw.Draw(img)
-d.text((26,18),"WHY THE PANEL SAID  \u201cNO VALID RANGE\u201d",font=f(20,True),fill=TXT)
-d.text((26,48),"The width gate compared a 7-hour session range against ONE M5 bar's ATR. Different scales.",font=f(12),fill=DIM)
 
-# --- old vs new bar chart ---
-def block(ox,oy,w,h,title,tc,sub):
-    d.rounded_rectangle([ox,oy,ox+w,oy+h],9,fill=PANEL,outline=EDGE)
-    d.text((ox+16,oy+12),title,font=f(14,True),fill=tc)
-    d.text((ox+16,oy+33),sub,font=f(11),fill=DIM)
+d.text((26,20),"WIDTH GATE IN POINTS  +  MONEY-DEFINED STOP",font=f(20,True),fill=CY)
+d.text((26,48),"ATR is gone. The range is judged in points; the stop is whatever distance loses the budget at 0.10 lot.",font=f(12),fill=DIM)
 
-atr=0.80; bars=84
-ranges=[3,6,9,12,15,18,25,40]
-oldmax=6.0*atr
-span=atr*math.sqrt(bars)
+def block(x,y,w,h,title,col,sub):
+    d.rounded_rectangle([x,y,x+w,y+h],10,fill=PANEL,outline=EDGE,width=2)
+    d.text((x+16,y+12),title,font=f(15,True),fill=col)
+    d.text((x+16,y+34),sub,font=f(11),fill=DIM)
 
-block(26,86,552,286,"v1.01  BROKEN","#".replace("#","")or BEAR,"width vs 6 x M5 ATR  =  max $%.2f allowed"%oldmax)
-block(602,86,552,286,"v1.02  FIXED",BULL,"width vs ATR x sqrt(84) = $%.2f expected travel"%span)
-for i,(ox,mode) in enumerate(((26,"old"),(602,"new"))):
-    bx,by,bw=ox+16,86+70,552-32
-    for j,r in enumerate(ranges):
-        y=by+j*25
-        if mode=="old": ok = r<=oldmax
-        else:
-            ratio=r/span; ok = 0.40<=ratio<=3.00 and r>=6.0
-        c=BULL if ok else BEAR
-        d.text((bx,y),"$%-3d"%r,font=f(11,True),fill=TXT)
-        barw=int((r/40.0)*(bw-150))
-        d.rectangle([bx+42,y+2,bx+42+max(barw,2),y+13],fill=c)
-        lbl = "PASS" if ok else "REJECT"
-        d.text((bx+bw-52,y),lbl,font=f(10,True),fill=c)
-    # healthy band marker
-    hb1=bx+42+int((9/40.0)*(bw-150)); hb2=bx+42+int((18/40.0)*(bw-150))
-    d.line([hb1,by-10,hb2,by-10],fill=AMB,width=3)
-    d.text((hb1,by-26),"healthy Asian range $9-18",font=f(10),fill=AMB)
+# ---------- width gate ----------
+MIN,MAX=6000,40000      # points; 1000 pts = $1.00 on 3-digit gold
+block(26,86,1128,238,"RANGE WIDTH GATE",BULL,"accepted band: %d - %d points  =  $%.0f - $%.0f"%(MIN,MAX,MIN/1000,MAX/1000))
+x0,y0=60,164
+d.text((x0,y0-24),"range width in dollars",font=f(11),fill=DIM)
+scale=1040/60.0
+for dollars in range(0,61,5):
+    px=x0+dollars*scale
+    d.line([px,y0,px,y0+12],fill=EDGE,width=1)
+    d.text((px-8,y0+16),"$%d"%dollars,font=f(10),fill=DIM)
+# accepted band
+d.rectangle([x0+(MIN/1000)*scale,y0+34,x0+(MAX/1000)*scale,y0+74],fill=(0,70,55),outline=BULL,width=2)
+d.text((x0+(MIN/1000)*scale+10,y0+46),"ACCEPTED   %d - %d pts"%(MIN,MAX),font=f(13,True),fill=BULL)
+d.rectangle([x0,y0+34,x0+(MIN/1000)*scale,y0+74],fill=(60,18,26),outline=BEAR,width=2)
+d.text((x0+6,y0+46),"whipsaw",font=f(10),fill=BEAR)
+d.rectangle([x0+(MAX/1000)*scale,y0+34,x0+60*scale,y0+74],fill=(60,18,26),outline=BEAR,width=2)
+d.text((x0+(MAX/1000)*scale+8,y0+46),"trend, not a range",font=f(10),fill=BEAR)
+for lbl,dollars,ok in (("$2 flat",2,False),("$12 Asian",12,True),("$25 wide",25,True),("$60 trend",60,False)):
+    px=x0+dollars*scale
+    d.line([px,y0+78,px,y0+96],fill=BULL if ok else BEAR,width=3)
+    d.text((px-22,y0+100),lbl,font=f(10,True),fill=BULL if ok else BEAR)
+d.text((x0,y0+124),"second gate: width must also be >= 5 x the live spread, so the box can pay for itself.",font=f(11),fill=AMB)
 
-# verdict strip
-d.rounded_rectangle([26,384,W-26,432],8,fill=(24,12,16),outline=BEAR)
-d.text((44,398),"v1.01 rejected EVERY healthy range (0 of 170 combinations passed)  ->  the engine could never arm",font=f(13,True),fill=BEAR)
-d.rounded_rectangle([26,442,W-26,490],8,fill=(10,30,24),outline=BULL)
-d.text((44,456),"v1.02 accepts 85% of the healthy band, still rejects dead-flat and trending ranges",font=f(13,True),fill=BULL)
+# ---------- money stop ----------
+block(26,344,1128,392,"MONEY-DEFINED STOP AT 0.10 LOT",CY,"stop distance = risk budget / money-per-point.  0.10 lot on 3-digit gold = $0.01 per point.")
+def mpp(l): return l*0.10
+def solve(bal,pct=0.5,cap=0.0,minstop=200.0,spread=90,slip=30,stoplevel=0):
+    budget=bal*pct/100.0
+    if cap>0: budget=min(budget,cap)
+    want=budget/mpp(0.10)
+    floor=max(minstop,stoplevel+spread+slip+2)
+    used=max(want,floor)
+    return budget,want,used,used*mpp(0.10),want<floor
 
-# rules
-by=506
-d.rounded_rectangle([26,by,W-26,by+172],10,fill=PANEL,outline=EDGE)
-d.text((44,by+14),"THE NEW TEST",font=f(14,True),fill=CY)
-d.text((44,by+40),"ratio  =  range width  /  ( ATR x sqrt(bars the range spans) )",font=f(14,True),fill=TXT)
-rows=[("0.40 - 3.00","the ratio must fall in this band - it is scale-free, so SESSION and DONCHIAN use one rule",TXT),
-      ("6000 points","new MinRangePoints: an absolute $6 floor, because a proportionate range can still be too",DIM),
-      ("","small in dollars to pay for spread and commission. Set 0 to disable.",DIM),
-      ("on the panel","the WIDTH row now shows x1.64 (0.40-3.00), and a rejection says TOO TIGHT / TOO WIDE",CY)]
-yy=by+70
-for tag,txt,c in rows:
-    if tag:
-        d.rounded_rectangle([44,yy-2,166,yy+20],5,fill=(12,20,32),outline=c)
-        tw=d.textlength(tag,font=f(10,True)); d.text((44+(122-tw)/2,yy+3),tag,font=f(10,True),fill=c)
-    d.text((182,yy+2),txt,font=f(11),fill=c if c!=DIM else DIM)
-    yy+=26
-img.save(os.path.join(HERE,"breakout_width_gate_fix.png"))
-print("saved docs/breakout_width_gate_fix.png")
+hdr=["balance","0.5% budget","stop wanted","stop used","actual loss","actual %","verdict"]
+colx=[60,210,360,520,670,830,950]
+ty=392
+for i,h in enumerate(hdr): d.text((colx[i],ty),h,font=f(11,True),fill=CY)
+d.line([60,ty+18,1120,ty+18],fill=EDGE,width=1)
+ty+=26
+for bal in (157.79,200,300,400,600,1000,2000,5000):
+    budget,want,used,loss,over=solve(bal)
+    col=AMB if over else BULL
+    vals=["$%.2f"%bal,"$%.2f"%budget,"%.0f pts"%want,"%.0f pts"%used,"$%.2f"%loss,"%.2f%%"%(loss/bal*100),
+          "floored - still trades" if over else "exact 0.5%"]
+    for i,v in enumerate(vals):
+        d.text((colx[i],ty),v,font=f(11,True) if i==6 else f(11),fill=col if i>=4 else TXT)
+    ty+=24
+
+ty+=10
+d.line([60,ty,1120,ty],fill=EDGE,width=1); ty+=14
+d.text((60,ty),"THE FLOOR, AND WHY IT IS NOT A BLOCK",font=f(13,True),fill=AMB); ty+=22
+for line,col in [
+  ("A stop tighter than the spread is hit on the fill. Below ~$400 balance, 0.5% of equity buys a stop",DIM),
+  ("narrower than the 90-point spread, so it is widened to MinStopPoints (200) and the trade is STILL TAKEN.",DIM),
+  ("The EA never refuses an entry over sizing: AllowRiskOverrun defaults to true and the panel reports the real risk.",BULL),
+  ("The structural range stop may only ever TIGHTEN this distance - never widen it. That is what caps the loss.",BULL),
+  ("Regression: ticket #17 took a 95,646-point structural stop = $956 on a $429.60 account. Now capped at $2.15.",BEAR)]:
+    d.text((60,ty),line,font=f(11),fill=col); ty+=20
+
+out=os.path.join(HERE,"breakout_width_gate.png")
+img.save(out)
+print("wrote",out)

@@ -1,10 +1,11 @@
-; Breakout Forge XAUUSD M5 EA v1.06
+; Breakout Forge XAUUSD M5 EA v1.07
 ; Exness Raw Spread, 3-digit gold, commission 0.07 USD / 0.01 lot RT
-; v1.02 TRADING ENGINE (fixed lot, ATR/structural stop) + full history.
+; 0.10 fixed lot. Stop is MONEY-DEFINED (no ATR anywhere in the EA).
+; risk USD = min(balance x RiskPercent%, MaxLossUSDPerTrade)
 ; Donchian(20) - more trades, intended for a larger account
 ; ---
 MagicNumber=260915
-FixedLots=0.05
+FixedLots=0.1
 SlippagePoints=50
 MaximumSpreadPoints=91
 OnePositionOnly=1
@@ -13,12 +14,13 @@ TradeOnClosedBar=1
 TradeComment=Breakout Forge
 StopLossMode=0
 TakeProfitMode=0
-ATRLength=14
-StopLossATR=1.8
-TakeProfitATR=2.4
 TakeProfitPoints=5000.0
+TakeProfitRMultiple=2.0
 RiskPercent=0.5
+MaxLossUSDPerTrade=0.0
 RiskReferenceBalance=0.0
+MinStopPoints=200.0
+AllowRiskOverrun=1
 EnableTrailingStop=1
 TrailingStartPoints=700.0
 TrailingDistancePoints=100.0
@@ -28,24 +30,22 @@ RangeStartHour=0
 RangeEndHour=7
 DonchianBars=20
 ShowRangeBox=1
-BufferMode=0
-BufferATRMult=0.3
+BufferMode=1
 BufferFixedPoints=250.0
+BufferSpreadMult=3.0
 RequireBodyClose=1
 EntryMode=0
 RetestMaxBars=12
 RetestTolerancePoints=150.0
 UseVolatilityGate=1
-VolATRAvgPeriod=50
-VolATRMinRatio=0.8
-MinRangeATRMult=0.35
-MaxRangeATRMult=3.00
+MinRangeSpreadMult=5.0
 MinRangePoints=2500
+MaxRangePoints=60000
 AllowReEntry=1
 MaxBreakoutsPerRange=4
 StopByRangeOpposite=1
-StopRangePadATR=0.5
-TargetMode=0
+StopRangePadPoints=400.0
+TargetMode=1
 MeasuredMoveMult=1.0
 MinTargetCostMult=3.0
 UseSessionFilter=1
