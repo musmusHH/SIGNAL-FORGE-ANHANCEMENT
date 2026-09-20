@@ -1351,7 +1351,7 @@ corrected.
 
 ---
 
-# Breakout Forge XAUUSD M5 EA (v1.01) — the second EA
+# Breakout Forge XAUUSD M5 EA (v1.02) — the second EA
 
 A **separate EA with its own strategy**, not a variant of Signal Forge. Exactly
 two things are reused from PRO — the **visual shell** (HUD, themes, Arabic
@@ -1390,7 +1390,7 @@ something the engine did not actually check.
 | 2 | Volatility expanding — `ATR > 0.8 × SMA50(ATR)` | breaks inside a dead market |
 | 3 | Spread ≤ `MaximumSpreadPoints` | fills that cost more than the edge |
 | 4 | Inside the trading session | thin Asian liquidity |
-| 5 | Range width between `0.5×` and `6.0×` ATR | noise ranges and untradeable ones |
+| 5 | Range width `0.40–3.00 ×` expected travel, and ≥ `MinRangePoints` | noise ranges and untradeable ones |
 | 6 | **Body** closes beyond range ± buffer | the wick sweep |
 | 7 | Not in the 20:00–22:00 rollover | the swap-time spread blowout |
 | 8 | Daily trade / loss limits, and `MaxBreakoutsPerRange` | revenge trading |
@@ -1421,6 +1421,49 @@ The middle column is the whole point of the design.
 * **RETEST** — wait for price to come back to the broken level and hold.
   Fewer trades, better fills, tighter stops. Times out after `RetestMaxBars`,
   and a close back through the level kills the setup rather than arming it.
+
+## The "NO VALID RANGE" bug (fixed in v1.02)
+
+![width gate](docs/breakout_width_gate_fix.png)
+
+The width gate compared a **multi-hour range** against **one M5 bar's ATR**:
+
+```
+gBkValid = (width >= MinRangeATRMult * atr && width <= MaxRangeATRMult * atr);
+```
+
+A 7-hour Asian session is 84 M5 bars. A healthy gold Asian range is $9–18,
+but `6 × M5 ATR` is only about $3–7 — so **every healthy range was rejected**
+and the panel sat on NO VALID RANGE permanently. Sweeping ATR $0.40–1.20
+against widths $9–18, **0 of 170 combinations passed**.
+
+The fix normalises by how many bars the range actually spans. Over N bars a
+random walk covers roughly `ATR × √N`, so that is the yardstick:
+
+```
+ratio    = width / (ATR * sqrt(barsInRange))
+gBkValid = (ratio >= MinRangeATRMult && ratio <= MaxRangeATRMult)
+```
+
+The multipliers now mean *fraction of the expected travel*, which is
+scale-free — SESSION and DONCHIAN modes use the same rule, and so would any
+other timeframe. Defaults are **0.40–3.00**, which accepts 85 % of the healthy
+band while still rejecting dead-flat ranges (a $2 range on ATR 0.80 scores
+0.27) and trends (a $40 range scores 10.91).
+
+One relative test is not enough on its own, though: on a very quiet day a $3
+range can look perfectly proportionate. The new **`MinRangePoints`** input
+(default 6000 = $6) is an absolute floor, matching the research finding that
+an Asian range under $6–8 is whipsaw. Set it to 0 to disable.
+
+**You can now see the gate work.** The WIDTH row shows the measured ratio and
+the band it must fall inside (`x1.64 (0.40-3.00)`), and a rejected range says
+**RANGE TOO TIGHT** or **RANGE TOO WIDE** with the measurement, instead of a
+dead end. `OnInit` also prints the full verdict to the journal:
+
+```
+[BK-FORGE] range 2643.100-2651.400 | 84 bars | width 8300p | ratio 1.13 vs 0.40-3.00 -> VALID
+```
 
 ## Re-entry: a break does not retire the range (v1.01)
 
@@ -1498,8 +1541,8 @@ state — CORE panel, execution console, BREAKOUT page — read one function,
 
 ## Files
 
-* `Breakout Forge XAUUSD M5 EA.mq4` — 4,224 lines, **84 inputs, 0 dead**,
-  111 functions (none unused), 133 dictionary keys (no duplicates).
+* `Breakout Forge XAUUSD M5 EA.mq4` — 4,313 lines, **85 inputs, 0 dead**,
+  111 functions (none unused), 138 dictionary keys (no duplicates).
 * `presets/BKF_XAUUSD_M5_Exness-Raw_200USD.set` — the shipped default.
 * `presets/BKF_XAUUSD_M5_Conservative-Retest.set` — retest entry, overlap only.
 * `presets/BKF_XAUUSD_M5_Donchian-Aggressive.set` — Donchian(20), all session.
@@ -1512,6 +1555,8 @@ state — CORE panel, execution console, BREAKOUT page — read one function,
   asserts no element overlaps or overflows.
 * `docs/render_reentry_cases.py` — draws the two re-entry cases from the rules
   in `ReEntryResult()`.
+* `docs/render_width_gate.py` — the old vs new width gate, sweeping real ATR
+  and range values.
 
 > No MQL4 compiler exists in this environment: this is static analysis plus
 > logic simulation, not a build. Please report compiler output.

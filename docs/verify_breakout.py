@@ -75,8 +75,32 @@ check("buffer is applied to both edges",
       "gBkUpper  = hi + gBkBuffer;" in BK and "gBkLower  = lo - gBkBuffer;" in BK)
 check("buffer can be ATR or fixed points",
       "BK_BUF_FIXED" in BK and "BufferATRMult" in BK)
+# The width gate must normalise by the number of bars the range spans.
+# Comparing a multi-hour range against ONE M5 bar's ATR (the v1.01 bug) made
+# every real session range fail and pinned the panel on NO VALID RANGE.
 check("range width sanity gate exists",
-      re.search(r'gBkValid = \(width >= MinRangeATRMult \* atr && width <= MaxRangeATRMult \* atr\)', BK) is not None)
+      re.search(r'gBkValid = \(gBkRatio >= MinRangeATRMult && gBkRatio <= MaxRangeATRMult\)', BK) is not None)
+check("width is normalised by sqrt(bars in range), not one bar's ATR",
+      "gBkSpan  = atr * MathSqrt((double)gBkBars);" in BK)
+check("the raw-ATR width comparison is gone",
+      re.search(r'width <= MaxRangeATRMult \* atr', CODE) is None)
+check("BuildRange reports the bar count",
+      "bool BuildRange(double &hi, double &lo, datetime &stamp, int &bars)" in BK)
+check("absolute width floor exists",
+      re.search(r'^input\s+double\s+MinRangePoints', BK, re.M) is not None and
+      "(width / gPoint) < MinRangePoints" in BK)
+# a healthy Asian range must actually pass
+import math as _m
+_atr, _w, _bars = 0.80, 12.0, 84
+_ratio = _w / (_atr * _m.sqrt(_bars))
+_mn = float(re.search(r'MinRangeATRMult\s*=\s*([\d.]+)', BK).group(1))
+_mx = float(re.search(r'MaxRangeATRMult\s*=\s*([\d.]+)', BK).group(1))
+check(f"healthy Asian range (ATR .80, $12, 84 bars) ratio {_ratio:.2f} passes {_mn}-{_mx}",
+      _mn <= _ratio <= _mx)
+check("a dead-flat $2 range is still rejected",
+      not (_mn <= 2.0 / (0.80 * _m.sqrt(84)) <= _mx))
+check("a $40 trend is still rejected",
+      not (_mn <= 40.0 / (0.80 * _m.sqrt(84)) <= _mx))
 check("volatility expansion gate exists",
       re.search(r'gBkATR > VolATRMinRatio \* gBkATRAvg', BK) is not None)
 check("per-range trade cap resets with a new range",

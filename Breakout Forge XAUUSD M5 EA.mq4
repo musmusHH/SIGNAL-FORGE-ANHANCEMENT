@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                Breakout Forge XAUUSD M5 EA       |
-//|                    QUANTUM HUD  .  v1.01  .  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  .  v1.02  .  MQL4 / MetaTrader 4 |
 //|                                                                  |
 //| A RANGE BREAKOUT engine wearing the Signal Forge PRO interface.  |
 //|                                                                  |
@@ -163,8 +163,17 @@ input double RetestTolerancePoints    = 150.0;  // RETEST: how close counts as a
 input bool   UseVolatilityGate        = true;   // ATR must be expanding
 input int    VolATRAvgPeriod          = 50;     // ATR average period
 input double VolATRMinRatio           = 0.8;    // ATR > ratio x average ATR
-input double MinRangeATRMult          = 0.5;    // Range must be >= ATR x this
-input double MaxRangeATRMult          = 6.0;    // Range must be <= ATR x this
+// Width is tested as  width / (ATR * sqrt(barsInRange)), so these are a
+// FRACTION OF THE EXPECTED TRAVEL over the range, not a raw ATR multiple.
+// 1.0 = exactly the textbook envelope. Below 0.40 the range is dead flat,
+// above 3.00 it is a trend, not a range.
+input double MinRangeATRMult          = 0.40;   // Min width / expected travel
+input double MaxRangeATRMult          = 3.00;   // Max width / expected travel
+// The ratio above is relative, so on a very quiet day a 3 USD "range" can
+// still look proportionate. Research on the Asian range is blunt about the
+// absolute floor: under 6-8 USD the break is whipsaw. 6000 points = 6 USD on
+// 3-digit gold. Set to 0 to disable the absolute test.
+input double MinRangePoints           = 6000;   // Absolute min width, points
 input bool   AllowReEntry             = true;   // Re-enter after a failed / rejected break
 input int    MaxBreakoutsPerRange     = 3;      // Max TRADES one range may produce
 
@@ -348,6 +357,10 @@ string   gBkGateFail   = "";    // which gate rejected the setup
 // (e.g. 00:00-07:00) is not usable for trading until it closes, but the user
 // must still SEE it forming on the chart - otherwise the panel says
 // "BUILDING RANGE" while the chart shows nothing at all.
+int      gBkBars       = 0;     // bars the completed range spans
+double   gBkSpan       = 0.0;   // ATR * sqrt(bars) = expected travel
+double   gBkRatio      = 0.0;   // width / span, what the width gate tests
+int      gBkFormBars   = 0;     // bars collected so far while forming
 bool     gBkForming    = false; // inside the range window right now
 double   gBkFormHigh   = 0.0;
 double   gBkFormLow    = 0.0;
@@ -883,9 +896,9 @@ double BreakoutBuffer(double atr)
 
 // Build the range. Returns false when there is nothing usable yet, which
 // keeps the panel honest instead of drawing a stale box.
-bool BuildRange(double &hi, double &lo, datetime &stamp)
+bool BuildRange(double &hi, double &lo, datetime &stamp, int &bars)
   {
-   hi = 0; lo = 0; stamp = 0;
+   hi = 0; lo = 0; stamp = 0; bars = 0;
 
    if(RangeMode == BK_RANGE_DONCHIAN)
      {
@@ -899,6 +912,7 @@ bool BuildRange(double &hi, double &lo, datetime &stamp)
       if(hb < 0 || lb < 0) return false;
       hi = High[hb]; lo = Low[lb];
       stamp = Time[1];                 // rolls every bar, by design
+      bars  = n;
       return (hi > lo);
      }
 
@@ -911,7 +925,7 @@ bool BuildRange(double &hi, double &lo, datetime &stamp)
    // record what it looks like SO FAR so the chart can draw it forming.
    if(HourInWindowRaw(curH, RangeStartHour, RangeEndHour))
      {
-      double fh = -1, fl = -1; datetime fs = 0;
+      double fh = -1, fl = -1; datetime fs = 0; int fc = 0;
       for(int k = 0; k < Bars && k < 2000; k++)
         {
          if(!HourInWindowRaw(TimeHour(Time[k]), RangeStartHour, RangeEndHour))
@@ -919,7 +933,9 @@ bool BuildRange(double &hi, double &lo, datetime &stamp)
          if(fh < 0 || High[k] > fh) fh = High[k];
          if(fl < 0 || Low[k]  < fl) fl = Low[k];
          fs = Time[k];
+         fc++;
         }
+      gBkFormBars = fc;
       if(fh > 0 && fl > 0 && fh > fl)
         {
          gBkForming   = true;
@@ -933,7 +949,7 @@ bool BuildRange(double &hi, double &lo, datetime &stamp)
 
    double h = -1, l = -1;
    datetime st = 0;
-   int scanned = 0;
+   int scanned = 0, cnt = 0;
    for(int i = 1; i < Bars && scanned < 2000; i++, scanned++)
      {
       int bh = TimeHour(Time[i]);
@@ -942,12 +958,13 @@ bool BuildRange(double &hi, double &lo, datetime &stamp)
          if(h < 0 || High[i] > h) h = High[i];
          if(l < 0 || Low[i]  < l) l = Low[i];
          st = Time[i];
+         cnt++;
         }
       else if(h >= 0)
          break;      // we walked out of the most recent window - done
      }
    if(h < 0 || l < 0 || h <= l) return false;
-   hi = h; lo = l; stamp = st;
+   hi = h; lo = l; stamp = st; bars = MathMax(1, cnt);
    return true;
   }
 
@@ -966,8 +983,9 @@ void UpdateRange()
      }
    gBkATRAvg = (got > 0) ? sum / got : atr;
 
-   double hi = 0, lo = 0; datetime stamp = 0;
-   if(!BuildRange(hi, lo, stamp)) { gBkValid = false; return; }
+   double hi = 0, lo = 0; datetime stamp = 0; int rbars = 0;
+   if(!BuildRange(hi, lo, stamp, rbars)) { gBkValid = false; return; }
+   gBkBars = MathMax(1, rbars);
 
    // A brand new range wipes the per-range trade counter and the state.
    if(stamp != gBkRangeStamp)
@@ -986,10 +1004,25 @@ void UpdateRange()
    gBkUpper  = hi + gBkBuffer;
    gBkLower  = lo - gBkBuffer;
 
-   // Width sanity: a range far tighter than ATR is noise, one far wider
-   // puts the stop further away than the trade can pay for.
+   // ---- WIDTH SANITY -------------------------------------------------
+   // The range must be compared against what the market could PLAUSIBLY
+   // travel over the bars the range actually spans - not against one M5
+   // bar's ATR. A 7-hour Asian session is 84 M5 bars; a healthy gold Asian
+   // range is 9-18 USD while 6x M5 ATR is only about 3-7 USD, so the old
+   // "width <= MaxRangeATRMult * atr" test rejected virtually every real
+   // session range and the panel sat on NO VALID RANGE forever.
+   //
+   // Over N bars a random walk covers roughly ATR * sqrt(N), so that is the
+   // yardstick. The multipliers now mean "fraction of the expected envelope"
+   // and behave identically in SESSION and DONCHIAN mode.
    double width = hi - lo;
-   gBkValid = (width >= MinRangeATRMult * atr && width <= MaxRangeATRMult * atr);
+   gBkSpan  = atr * MathSqrt((double)gBkBars);
+   gBkRatio = (gBkSpan > 0) ? width / gBkSpan : 0.0;
+   gBkValid = (gBkRatio >= MinRangeATRMult && gBkRatio <= MaxRangeATRMult);
+   // ...plus an absolute floor, because a proportionate range can still be
+   // too small in dollars to pay for spread + commission.
+   if(gBkValid && MinRangePoints > 0 && (width / gPoint) < MinRangePoints)
+      gBkValid = false;
 
    // Distance-to-break meter: 100% means price is sitting on the trigger.
    double px = (Bid + Ask) / 2.0;
@@ -1844,6 +1877,11 @@ string T(const string k)
    if(k == "WAITING FOR BREAK")         return "\x0628\x0627\x0646\x062A\x0638\x0627\x0631\x0020\x0627\x0644\x0627\x062E\x062A\x0631\x0627\x0642";
    if(k == "COLLECTING")                return "\x062C\x0627\x0631\x064A\x0020\x0627\x0644\x062A\x062C\x0645\x064A\x0639";
    if(k == "FAILED BREAKS")             return "\x0627\x062E\x062A\x0631\x0627\x0642\x0020\x0641\x0627\x0634\x0644";
+   if(k == "RANGE TOO TIGHT")           return "\x0627\x0644\x0646\x0637\x0627\x0642\x0020\x0636\x064A\x0642\x0020\x062C\x062F\x0627";
+   if(k == "RANGE TOO WIDE")            return "\x0627\x0644\x0646\x0637\x0627\x0642\x0020\x0648\x0627\x0633\x0639\x0020\x062C\x062F\x0627";
+   if(k == "of")                        return "\x0645\x0646";
+   if(k == "bars")                      return "\x0634\x0645\x0639\x0629";
+   if(k == "minimum")                  return "\x0627\x0644\x062D\x062F\x0020\x0627\x0644\x0623\x062F\x0646\x0649";
    if(k == "BUILDING RANGE")            return "\x0628\x0646\x0627\x0621\x0020\x0627\x0644\x0646\x0637\x0627\x0642";
    if(k == "BROKEN")                    return "\x062A\x0645\x0020\x0627\x0644\x0627\x062E\x062A\x0631\x0627\x0642";
    if(k == "WAITING RETEST")            return "\x0628\x0627\x0646\x062A\x0638\x0627\x0631\x0020\x0625\x0639\x0627\x062F\x0629\x0020\x0627\x0644\x0627\x062E\x062A\x0628\x0627\x0631";
@@ -2453,7 +2491,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v1.01", TTextDim, 7);
+        "  ·  RAW  ·  v1.02", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -2694,6 +2732,12 @@ void PaintHud()
          TextRight(pad + innerW - SC(12), rY + SC(21), DoubleToString(gBkLow, Digits),
                    TBear, 9, "Segoe UI Semibold", SF_FW_SEMI);
          Text(pad + SC(12), rY + SC(42), T("WIDTH"), TTextDim, 7);
+         // ...and the number the width gate actually judges, with the window
+         // it has to fall inside, so a rejection is never a mystery.
+         Text(pad + SC(12) + SC(52), rY + SC(43),
+              "x" + DoubleToString(gBkRatio, 2) + "  (" +
+              DoubleToString(MinRangeATRMult, 2) + "-" +
+              DoubleToString(MaxRangeATRMult, 2) + ")", TTextDim, 7);
          TextRight(pad + innerW - SC(12), rY + SC(42),
                    DoubleToString((gBkHigh - gBkLow) / gPoint, 0) + T("p"),
                    TText, 9, "Segoe UI Semibold", SF_FW_SEMI);
@@ -2715,8 +2759,34 @@ void PaintHud()
         }
       else
         {
-         TextVC(pad + SC(12), rY, SC(42), T("NO VALID RANGE"), TTextDim, 8,
-                "Segoe UI Semibold", SF_FW_SEMI);
+         // A range exists but failed the width gate: show the measurement
+         // that rejected it rather than a dead end.
+         if(gBkHigh > gBkLow && gBkRatio > 0)
+           {
+            TextVC(pad + SC(12), rY, SC(21),
+                   (gBkRatio > MaxRangeATRMult) ? T("RANGE TOO WIDE")
+                                                : T("RANGE TOO TIGHT"),
+                   TWarn, 8, "Segoe UI Semibold", SF_FW_SEMI);
+            Text(pad + SC(12), rY + SC(24), T("WIDTH"), TTextDim, 7);
+            TextRight(pad + innerW - SC(12), rY + SC(24),
+                      DoubleToString((gBkHigh - gBkLow) / gPoint, 0) + T("p"),
+                      TTextDim, 8, "Segoe UI Semibold", SF_FW_SEMI);
+            // Name the test that actually failed: the relative ratio or the
+            // absolute points floor.
+            bool absFail = (MinRangePoints > 0 &&
+                            (gBkHigh - gBkLow) / gPoint < MinRangePoints);
+            Text(pad + SC(12), rY + SC(44),
+                 absFail ? ("< " + DoubleToString(MinRangePoints, 0) + T("p") +
+                            " " + T("minimum"))
+                         : ("x" + DoubleToString(gBkRatio, 2) + " " + T("of") + " " +
+                            DoubleToString(MinRangeATRMult, 2) + "-" +
+                            DoubleToString(MaxRangeATRMult, 2)), TWarn, 7);
+            TextRight(pad + innerW - SC(12), rY + SC(44),
+                      IntegerToString(gBkBars) + " " + T("bars"), TTextDim, 7);
+           }
+         else
+            TextVC(pad + SC(12), rY, SC(42), T("NO VALID RANGE"), TTextDim, 8,
+                   "Segoe UI Semibold", SF_FW_SEMI);
         }
       y += SC(96) + SC(8);
 
@@ -3816,15 +3886,17 @@ int OnInit()
       Print("[BK-FORGE] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("BK-FORGE v1.01 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("BK-FORGE v1.02 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
 
    // Print exactly which overlays are armed, so a "nothing is drawn" report
    // can be diagnosed from the Experts log without guesswork.
    string ov = "";
-   Print("[BK-FORGE] v1.01 build | range=",
+   Print("[BK-FORGE] v1.02 build | range=",
          (RangeMode == BK_RANGE_DONCHIAN ? "DONCHIAN" : "SESSION"),
          " | entry=", (EntryMode == BK_ENTRY_RETEST ? "RETEST" : "BREAK"),
+         " | width gate=", DoubleToString(MinRangeATRMult, 2), "-",
+         DoubleToString(MaxRangeATRMult, 2), " x expected travel",
          " | magic=", MagicNumber);
 
    gLastBar = 0;
@@ -3836,6 +3908,23 @@ int OnInit()
       if(Bars > 100)
         {
          UpdateRange();
+         // Explain the range verdict in the journal. "NO VALID RANGE" on the
+         // panel is otherwise impossible to diagnose from a screenshot.
+         if(gBkForming)
+            Print("[BK-FORGE] range window still open, collecting (",
+                  gBkFormBars, " bars so far)");
+         else if(gBkHigh > gBkLow)
+            Print("[BK-FORGE] range ", DoubleToString(gBkLow, Digits), "-",
+                  DoubleToString(gBkHigh, Digits),
+                  " | ", gBkBars, " bars | width ",
+                  DoubleToString((gBkHigh - gBkLow) / gPoint, 0), "p",
+                  " | ratio ", DoubleToString(gBkRatio, 2),
+                  " vs ", DoubleToString(MinRangeATRMult, 2), "-",
+                  DoubleToString(MaxRangeATRMult, 2),
+                  " -> ", (gBkValid ? "VALID" : "REJECTED"));
+         else
+            Print("[BK-FORGE] no range yet (need history, or the window has ",
+                  "not completed since the EA started)");
          DrawRangeObjects();
          DrawTradeLevelLines();
          DrawResultPills();
