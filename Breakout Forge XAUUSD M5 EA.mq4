@@ -2934,14 +2934,16 @@ void PaintHud()
       y += SC(96) + SC(8);
 
       //---- state strip -------------------------------------------
-      string st = BkStateText();
+      // Named bkSt, not st: PaintHud() already has a function-scope `st`
+      // for the header pill, and MQL4 warns on the shadowing.
+      string bkSt = BkStateText();
       uint stc;
       if(gBkState == BK_TRADED || gBkState == BK_RETEST) stc = TAccent2;
       else if(gBkState == BK_BROKEN)                     stc = (gBkDir > 0) ? TBull : TBear;
       else if(gBkValid)                                  stc = TAccent;
       else                                               stc = TTextDim;
       RaisedPlate(pad, y, innerW, SC(54), SC(8), TPanelHi, stc, true, 1);
-      TextBoxCenter(pad, y + SC(4), innerW, SC(26), st, stc, 11,
+      TextBoxCenter(pad, y + SC(4), innerW, SC(26), bkSt, stc, 11,
                     "Segoe UI Black", SF_FW_BLACK);
       string sub;
       if(gBkGateFail != "")                   sub = gBkGateFail;

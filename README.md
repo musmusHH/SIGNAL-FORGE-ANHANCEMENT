@@ -1614,6 +1614,10 @@ state — CORE panel, execution console, BREAKOUT page — read one function,
   and range values.
 * `docs/render_risk_postmortem.py` — the 17-trade equity curve and the three
   causes of the wipeout.
+* `docs/verify_no_shadowing.py` — reproduces MetaEditor's "declaration of X
+  hides local variable" warning for both EAs, since there is no compiler in
+  this environment. Tested in both directions: it flags the real case and
+  passes once fixed.
 
 > No MQL4 compiler exists in this environment: this is static analysis plus
 > logic simulation, not a build. Please report compiler output.
