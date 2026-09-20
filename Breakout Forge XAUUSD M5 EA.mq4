@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                Breakout Forge XAUUSD M5 EA       |
-//|                    QUANTUM HUD  .  v1.04  .  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  .  v1.05  .  MQL4 / MetaTrader 4 |
 //|                                                                  |
 //| A RANGE BREAKOUT engine wearing the Signal Forge PRO interface.  |
 //|                                                                  |
@@ -56,6 +56,18 @@
 //==================================================================//
 // ---- ORIGINAL v1 STRATEGY ENUMS -------------------------------------
 enum EA_TP_MODE { TP_By_Points = 0, TP_By_ATR = 1 };
+
+// How risk is reconciled with position size.
+//  LOT_FIRST  - the trader's lot is honoured and the STOP is tightened until
+//               the loss it implies fits the risk budget. This is v1.02
+//               behaviour (your lot is your lot) made safe.
+//  STOP_FIRST - the strategy's stop is honoured and the LOT is derived from
+//               it (v1.03). Safer for structure, but it refuses trades.
+enum BK_RISK_MODE
+  {
+   BK_RISK_LOT_FIRST  = 0, // Keep my lot, cap the stop to the risk %
+   BK_RISK_STOP_FIRST = 1  // Keep the stop, derive the lot from it
+  };
 
 enum ENUM_SF_LANG
   {
@@ -126,19 +138,27 @@ input double TakeProfitPoints       = 5000.0;   // Take profit (points, TP_By_Po
 input double MinRewardRiskRatio     = 1.5;      // Minimum target / stop ratio (0=off)
 input double RiskReferenceBalance   = 0.0;      // 0 = current account balance
 
-// ---- HARD RISK CONTROL (added v1.04 after a 1-trade account wipeout) ----
+// ---- HARD RISK CONTROL (added v1.05 after a 1-trade account wipeout) ----
 // The lot used to be a constant while the stop was structural, so risk per
 // trade floated with the range width. A 95 USD stop on 0.10 lots is 956 USD
 // of risk - on a 429 USD account that is a margin call, and that is exactly
 // how a 16-win streak ended at -0.09. The lot is now DERIVED from the stop.
-input bool   UseRiskSizing          = true;     // Size the lot from the stop distance
-input double RiskPerTradePercent    = 2.0;      // Risk per trade (% of equity)
+input bool   UseRiskSizing          = true;     // Master switch for risk control
+// LOT_FIRST is the default: the lot you type is the lot that gets sent, and
+// the stop is moved in until the trade cannot lose more than the budget.
+input BK_RISK_MODE RiskSizingMode   = BK_RISK_LOT_FIRST; // How to reconcile lot and stop
+input double RiskPerTradePercent    = 0.5;      // Risk per trade (% of equity) - HARD CAP
 input double MaxRiskPerTradeUSD     = 0.0;      // Hard cap in USD (0 = off)
 input double MaxLots                = 0.50;     // Never exceed this lot
 // If even the broker minimum lot risks more than the budget, the only safe
 // action is to SKIP the trade. Leave this true; setting it false restores
 // the old behaviour of trading anyway at minimum lot.
 input bool   SkipIfRiskTooHigh      = true;     // Refuse trades that exceed the budget
+// A risk cap can only tighten a stop so far before it sits inside ordinary
+// noise and gets hit for fun. Below this floor the EA reduces the LOT
+// instead of squeezing the stop any further - that keeps the risk promise
+// without turning every trade into instant stop-out bait.
+input double MinStopATRMult         = 0.5;      // Never cap the stop tighter than ATR x this
 // A stop wider than this many ATRs means the structure is too far away to
 // pay for. Independent of the clamp, because the clamp scales WITH atr.
 input double MaxStopATRMult         = 3.0;      // Reject stops wider than ATR x this
@@ -220,7 +240,7 @@ input int    MaxTradesPerDay          = 6;      // 0 = unlimited
 input double MaxDailyLossUSD          = 10.0;   // Realised daily loss cap
 // Checked on every tick against the OPEN position, because a pre-trade
 // daily cap cannot stop a trade that is already running.
-input double MaxOpenLossUSD           = 8.0;    // Emergency close at this open loss (0=off)
+input double MaxOpenLossUSD           = 0.0;    // Emergency close at this open loss (0=off, SL now bounds it)
 
 input string __10 = "======== BROKER COST (DISPLAY ONLY) ========"; // .
 // Commission never gates a trade in the original strategy - it is used only
@@ -748,6 +768,109 @@ double RiskBudgetUSD()
    return usd;
   }
 
+// The stop cap shown on the panel, in points, after the noise floor is
+// applied - so the readout matches what CapStopToRisk() will actually do.
+double MaxStopPtsDisplay(double rawPts, double atr)
+  {
+   double floorPts = (atr > 0) ? (atr * MathMax(0.0, MinStopATRMult)) / Point : 0;
+   return MathMax(rawPts, floorPts);
+  }
+
+// ---- LOT-FIRST RISK SOLVER ------------------------------------------
+// The trader picks the lot; this decides how far the stop may sit so that
+// lot cannot lose more than the budget.
+//
+//   max stop distance = budget / (lot * money-per-1.00-price-unit)
+//
+// Trade #17 is the worked example: 0.10 lots, 429.60 equity, 0.5% budget
+// = $2.15, which permits a $0.215 (215 point) stop. The strategy wanted
+// $95.65 - 445x too far - so the stop is pulled in to 215 points and the
+// theoretical loss becomes $2.15 instead of $956.
+//
+// A stop that tight is inside the noise, so MinStopATRMult sets a floor:
+// once the cap would go below it, the LOT is cut instead. Between the two
+// rules the promise "never risk more than X%" holds for ANY lot the trader
+// types, which is what a fixed-lot trader actually wants.
+//
+// `lots` is in/out: it is only ever REDUCED, never raised above the request.
+// Returns the stop distance in PRICE to use, and riskUSD as finally sized.
+double CapStopToRisk(double requestedStop, double atr, double &lots,
+                     double &riskUSD, string &why)
+  {
+   why = ""; riskUSD = 0;
+   if(lots <= 0) { why = T("NO LOT"); return 0; }
+
+   double perLotFull = MoneyPerLot(requestedStop);      // cost of that stop, 1.00 lot
+   if(perLotFull <= 0) { why = T("NO TICK VALUE"); return 0; }
+
+   if(!UseRiskSizing)                                   // risk control disabled
+     {
+      riskUSD = perLotFull * lots;
+      return requestedStop;
+     }
+
+   double budget = RiskBudgetUSD();
+   if(budget <= 0) { why = T("NO RISK BUDGET"); return 0; }
+
+   double stop = requestedStop;
+   riskUSD = perLotFull * lots;
+   if(riskUSD <= budget) return stop;                   // already within budget
+
+   // ---- 1. pull the stop in ------------------------------------------
+   double moneyPerPrice = MoneyPerLot(1.0) * lots;      // USD per 1.00 of price
+   if(moneyPerPrice <= 0) { why = T("NO TICK VALUE"); return 0; }
+   double capped = budget / moneyPerPrice;
+
+   // ...but not tighter than the noise floor.
+   double floorStop = (atr > 0) ? atr * MathMax(0.0, MinStopATRMult) : 0;
+   double minimum   = (MarketInfo(Symbol(), MODE_STOPLEVEL) + 2) * Point;
+   floorStop = MathMax(floorStop, minimum);
+
+   if(capped >= floorStop)
+     {
+      stop    = capped;
+      riskUSD = MoneyPerLot(stop) * lots;
+      return stop;
+     }
+
+   // ---- 2. the cap would be inside the noise: cut the lot instead -----
+   stop = floorStop;
+   double perLotFloor = MoneyPerLot(stop);
+   double affordable  = (perLotFloor > 0) ? (budget / perLotFloor) : 0;
+   double minLot      = MarketInfo(Symbol(), MODE_MINLOT);
+   if(minLot <= 0) minLot = 0.01;
+   double newLots = NormalizeLots(MathMin(lots, affordable));
+
+   riskUSD = MoneyPerLot(stop) * newLots;
+   // NormalizeLots() floors UP to minLot, so re-check the real number.
+   if(newLots < minLot || riskUSD > budget * 1.02)
+     {
+      // Even ONE minimum lot, stopped at the tightest sane distance, costs
+      // more than the budget. That is not a bug - the account is simply too
+      // small for this instrument at this risk %. Say so in plain numbers
+      // instead of silently refusing, because "the EA never trades" is
+      // indistinguishable from a broken EA otherwise.
+      if(SkipIfRiskTooHigh)
+        {
+         why = T("RISK TOO HIGH");
+         Journal("CANNOT SIZE: " + DoubleToString(minLot, 2) + " lot x " +
+                 DoubleToString(stop / Point, 0) + " pt floor = $" +
+                 DoubleToString(MoneyPerLot(stop) * minLot, 2) + " but " +
+                 DoubleToString(RiskPerTradePercent, 2) + "% of $" +
+                 DoubleToString(AccountEquity(), 2) + " is only $" +
+                 DoubleToString(budget, 2) +
+                 ". Raise RiskPerTradePercent, lower MinStopATRMult, or set " +
+                 "SkipIfRiskTooHigh=false to trade at minimum lot.");
+         lots = 0;
+         return 0;
+        }
+      newLots = NormalizeLots(minLot);
+      riskUSD = MoneyPerLot(stop) * newLots;
+     }
+   lots = newLots;
+   return stop;
+  }
+
 // THE FIX. The lot is derived from the stop, never the other way round, so
 // a wide structural stop produces a small position instead of a large loss.
 // Returns 0 when even the minimum lot exceeds the budget, which means the
@@ -872,23 +995,53 @@ bool OpenPosition(int type)
    //--- reject a stop that is simply too far away --------------------
    // The clamp above scales with ATR, so on a volatile day it still permits
    // an enormous stop. This is an absolute structural veto.
+   // In LOT_FIRST mode a too-wide stop is not a reason to refuse the trade:
+   // the risk solver below simply pulls the stop in until it is affordable.
+   // Vetoing here would reintroduce the "EA never enters" complaint.
    if(MaxStopATRMult > 0 && atr > 0 && slDistance > atr * MaxStopATRMult)
      {
-      gLastAction  = "BLOCKED: STOP " + DoubleToString(slDistance / Point, 0) + " PTS TOO WIDE";
-      gBlockReason = T("STOP TOO WIDE");
-      Journal(gLastAction);
-      return false;
+      if(UseRiskSizing && RiskSizingMode == BK_RISK_LOT_FIRST)
+        {
+         slDistance = atr * MaxStopATRMult;      // trim, do not refuse
+        }
+      else
+        {
+         gLastAction  = "BLOCKED: STOP " + DoubleToString(slDistance / Point, 0) + " PTS TOO WIDE";
+         gBlockReason = T("STOP TOO WIDE");
+         Journal(gLastAction);
+         return false;
+        }
      }
 
    double minimum = (MarketInfo(Symbol(), MODE_STOPLEVEL) + 2) * Point;
    slDistance = MathMax(slDistance, minimum);
 
-   //--- SIZE THE POSITION FROM THE STOP ------------------------------
-   // Everything above decided WHERE the stop goes. Only now is it known
-   // how many lots that stop can be afforded at.
-   double riskUSD = 0; string riskWhy = "";
-   double lots = LotForRisk(slDistance, riskUSD, riskWhy);
-   if(lots <= 0)
+   //--- RECONCILE LOT AND STOP AGAINST THE RISK BUDGET ----------------
+   double riskUSD = 0; string riskWhy = ""; double lots = 0;
+
+   if(UseRiskSizing && RiskSizingMode == BK_RISK_STOP_FIRST)
+     {
+      // v1.03: the stop is sacred, the lot is derived from it.
+      lots = LotForRisk(slDistance, riskUSD, riskWhy);
+     }
+   else
+     {
+      // v1.02 restored, made safe: the trader's lot is honoured and the
+      // STOP is capped so that lot cannot breach RiskPerTradePercent.
+      lots = NormalizeLots(FixedLots);
+      if(MaxLots > 0) lots = NormalizeLots(MathMin(lots, MaxLots));
+      double before = slDistance;
+      slDistance = CapStopToRisk(slDistance, atr, lots, riskUSD, riskWhy);
+      if(lots > 0 && slDistance > 0 && slDistance < before - Point)
+         Journal("RISK CAP: stop " + DoubleToString(before / Point, 0) + " -> " +
+                 DoubleToString(slDistance / Point, 0) + " pts so " +
+                 DoubleToString(lots, 2) + " lots risks $" +
+                 DoubleToString(riskUSD, 2) + " (" +
+                 DoubleToString(RiskPerTradePercent, 2) + "% = $" +
+                 DoubleToString(RiskBudgetUSD(), 2) + ")");
+     }
+
+   if(lots <= 0 || slDistance <= 0)
      {
       gLastAction  = "BLOCKED: " + riskWhy + " (stop " +
                      DoubleToString(slDistance / Point, 0) + " pts = $" +
@@ -897,6 +1050,23 @@ bool OpenPosition(int type)
       gBlockReason = riskWhy;
       Journal(gLastAction);
       return false;
+     }
+
+   // Final, unconditional assertion: whatever route got us here, the trade
+   // on the wire must not be able to lose more than the budget. This is the
+   // line that trade #17 would have tripped.
+   if(UseRiskSizing)
+     {
+      double finalRisk = MoneyPerLot(slDistance) * lots;
+      double budget    = RiskBudgetUSD();
+      if(budget > 0 && finalRisk > budget * 1.02)
+        {
+         gLastAction  = "BLOCKED: RISK $" + DoubleToString(finalRisk, 2) +
+                        " > BUDGET $" + DoubleToString(budget, 2);
+         gBlockReason = T("RISK TOO HIGH");
+         Journal(gLastAction);
+         return false;
+        }
      }
 
    //--- cost floor ---------------------------------------------------
@@ -2115,6 +2285,7 @@ string T(const string k)
    if(k == "SKIP")                      return "\x062A\x062E\x0637\x064A";
    if(k == "T")                         return "\x0635";
    if(k == "F")                         return "\x0641";
+   if(k == "NO LOT")            return "\x0644\x0627\x0020\x064A\x0648\x062C\x062F\x0020\x0639\x0642\x062F";
    if(k == "BUILDING RANGE")            return "\x0628\x0646\x0627\x0621\x0020\x0627\x0644\x0646\x0637\x0627\x0642";
    if(k == "BROKEN")                    return "\x062A\x0645\x0020\x0627\x0644\x0627\x062E\x062A\x0631\x0627\x0642";
    if(k == "WAITING RETEST")            return "\x0628\x0627\x0646\x062A\x0638\x0627\x0631\x0020\x0625\x0639\x0627\x062F\x0629\x0020\x0627\x0644\x0627\x062E\x062A\x0628\x0627\x0631";
@@ -2724,7 +2895,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v1.04", TTextDim, 7);
+        "  ·  RAW  ·  v1.05", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -2879,7 +3050,7 @@ void PaintHud()
         // the lot the next fill would actually use - a static FixedLots
         // readout would be a lie under risk sizing.
         string lotTxt;
-        if(UseRiskSizing)
+        if(UseRiskSizing && RiskSizingMode == BK_RISK_STOP_FIRST)
           {
            double pvAtr = iATR(NULL, 0, MathMax(1, ATRLength), 1) * MathMax(0.1, StopLossATR);
            double rUSD = 0; string rWhy = "";
@@ -2887,6 +3058,21 @@ void PaintHud()
            lotTxt = T("RISK") + " $" + Fmt(RiskBudgetUSD(), 2) + "  ->  " +
                     ((nextLot > 0) ? Fmt(nextLot, 2) + " " + T("lots")
                                    : T("SKIP"));
+          }
+        else if(UseRiskSizing)
+          {
+           // LOT_FIRST: the lot is fixed, so report it together with the
+           // widest stop that lot may carry - that is the number the trader
+           // is actually buying, and it is what trade #17 needed shown.
+           double pvAtr2 = iATR(NULL, 0, MathMax(1, ATRLength), 1);
+           double shownLot = NormalizeLots(FixedLots);
+           if(MaxLots > 0) shownLot = NormalizeLots(MathMin(shownLot, MaxLots));
+           double perPrice = MoneyPerLot(1.0) * shownLot;
+           double maxStopPts = (perPrice > 0)
+                               ? (RiskBudgetUSD() / perPrice) / Point : 0;
+           lotTxt = Fmt(shownLot, 2) + " " + T("lots") + "  " +
+                    T("RISK") + " $" + Fmt(RiskBudgetUSD(), 2) + " / " +
+                    Fmt(MaxStopPtsDisplay(maxStopPts, pvAtr2), 0) + T("p");
           }
         else lotTxt = T("LOTS") + "  " + Fmt(FixedLots, 2);
         Text(pad + SC(12), y + SC(76), lotTxt, TTextDim, 7);
@@ -4300,13 +4486,13 @@ int OnInit()
       Print("[BK-FORGE] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("BK-FORGE v1.04 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("BK-FORGE v1.05 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
 
    // Print exactly which overlays are armed, so a "nothing is drawn" report
    // can be diagnosed from the Experts log without guesswork.
    string ov = "";
-   Print("[BK-FORGE] v1.04 build | range=",
+   Print("[BK-FORGE] v1.05 build | range=",
          (RangeMode == BK_RANGE_DONCHIAN ? "DONCHIAN" : "SESSION"),
          " | entry=", (EntryMode == BK_ENTRY_RETEST ? "RETEST" : "BREAK"),
          " | width gate=", DoubleToString(MinRangeATRMult, 2), "-",

@@ -1351,7 +1351,7 @@ corrected.
 
 ---
 
-# Breakout Forge XAUUSD M5 EA (v1.04) — the second EA
+# Breakout Forge XAUUSD M5 EA (v1.05) — the second EA
 
 A **separate EA with its own strategy**, not a variant of Signal Forge. Exactly
 two things are reused from PRO — the **visual shell** (HUD, themes, Arabic
@@ -1421,6 +1421,68 @@ The middle column is the whole point of the design.
 * **RETEST** — wait for price to come back to the broken level and hold.
   Fewer trades, better fills, tighter stops. Times out after `RetestMaxBars`,
   and a close back through the level kills the setup rather than arming it.
+
+## v1.05 — LOT-FIRST risk: your lot is honoured, the **stop** is capped
+
+Two complaints, one root cause, opposite symptoms:
+
+* **v1.02** sent a constant lot with a structural stop. Ticket #17 —
+  `sell 0.10 @ 5017.031, SL 5112.677` — was a **95,646-point ($95.65) stop on
+  0.10 lots = $956 of risk on a $429.60 account, 222%.** It never reached its
+  stop; margin stop-out closed it at −$429.69.
+* **v1.03** fixed that by deriving the lot from the stop. But on a $200
+  account a normal ATR stop costs $3.00 even at the 0.01 minimum lot, so at a
+  tight risk % the honest answer was always "refuse" — hence *"now he doesn't
+  enter trades"*.
+
+Both models pick one variable to respect and sacrifice the other. **v1.05
+respects the lot and solves for the stop instead:**
+
+```
+max stop distance = risk budget / (lot x money-per-price-unit)
+```
+
+For ticket #17: 0.5% of $429.60 = $2.15, which at 0.10 lots buys a **215-point
+stop**. The strategy wanted 95,646 points — 445× too far — so the stop is
+pulled in and the trade risks **$2.15 instead of $956.**
+
+`RiskSizingMode` selects the behaviour and defaults to `LOT_FIRST`:
+
+| Mode | Honours | Sacrifices |
+|---|---|---|
+| **`BK_RISK_LOT_FIRST`** (default) | **your lot** | stop distance (capped) |
+| `BK_RISK_STOP_FIRST` | the strategy's stop | lot size (may refuse) |
+
+`RiskPerTradePercent` now defaults to **0.5**.
+
+### The one honest limitation
+
+A cap can only tighten a stop so far before it sits inside ordinary noise and
+gets hit for fun. `MinStopATRMult = 0.5` is the floor; below it the EA reduces
+the **lot** instead, which is why ticket #17 comes out as *0.02 lots × 1000
+points* rather than *0.10 lots × 215 points*. Both risk ~$2.15 — the second
+just wouldn't survive contact with gold. **Set `MinStopATRMult = 0` to force
+the full lot through** and let the stop absorb the entire cap.
+
+At **$157.79** (the live balance) 0.5% is $0.79, which cannot cover even one
+minimum lot at the noise floor, so the EA skips and **journals the arithmetic**
+rather than failing silently:
+
+```
+CANNOT SIZE: 0.01 lot x 1000 pt floor = $1.00 but 0.50% of $157.79
+is only $0.79. Raise RiskPerTradePercent, lower MinStopATRMult, or
+set SkipIfRiskTooHigh=false to trade at minimum lot.
+```
+
+A final unconditional assertion re-derives the risk from the lot and stop
+actually going on the wire and blocks the order if it still exceeds budget —
+whichever mode produced them. `MaxOpenLossUSD` now defaults to **0 (off)**,
+because at 0.5% the stop already bounds the loss and an $8 emergency cap would
+fire long before it.
+
+![lot-first risk](docs/breakout_lotfirst_risk.png)
+
+---
 
 ## v1.04 — nothing is thrown away any more
 
@@ -1691,6 +1753,9 @@ state — CORE panel, execution console, BREAKOUT page — read one function,
   hides local variable" warning for both EAs, since there is no compiler in
   this environment. Tested in both directions: it flags the real case and
   passes once fixed.
+* `docs/render_lotfirst_risk.py` — the three risk models measured against
+  ticket #17, plus a sweep showing the lot is never exceeded and the risk %
+  never breached.
 * `docs/render_history_preview.py` — what the chart retains after a run:
   archived range boxes colour-coded by outcome, permanent trade markers and
   the two CSV schemas.
