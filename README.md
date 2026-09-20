@@ -1351,7 +1351,7 @@ corrected.
 
 ---
 
-# Breakout Forge XAUUSD M5 EA (v1.07) — the second EA
+# Breakout Forge XAUUSD M5 EA (v1.08) — the second EA
 
 A **separate EA with its own strategy**, not a variant of Signal Forge. Exactly
 two things are reused from PRO — the **visual shell** (HUD, themes, Arabic
@@ -1421,6 +1421,48 @@ The middle column is the whole point of the design.
 * **RETEST** — wait for price to come back to the broken level and hold.
   Fewer trades, better fills, tighter stops. Times out after `RetestMaxBars`,
   and a close back through the level kills the setup rather than arming it.
+
+## v1.08 — the width gate is a PERCENT OF PRICE (it was rejecting everything)
+
+From the user's journal:
+
+```
+range 4274.439-4373.493 | 84 bars | width 99054p | ratio 16.51
+        vs 6000-40000 pts -> REJECTED
+```
+
+**My bug, introduced in v1.07.** Removing ATR, I replaced a *scale-free* ratio
+with an *absolute* dollar band of $6–$40. That was calibrated for $2,000 gold.
+At **$4,324** the same band is only **0.14%–0.93%** of price, so a perfectly
+normal **$99.05** session range (2.29% of price) was thrown out — and with the
+range invalid, gates 1 and 5 never opened and **the EA could not trade at all**.
+
+The gate is now expressed as a percentage of the gold price, measured off the
+range **midpoint** (stable while the range is judged; a Bid spike cannot skew
+it):
+
+| input | default | meaning |
+|---|---|---|
+| `MinRangePercent` | 0.25 | min width as % of price |
+| `MaxRangePercent` | 3.00 | max width as % of price |
+| `MinRangePoints` / `MaxRangePoints` | 0 / 0 | optional absolute backstop, off by default |
+
+At $4,324 that accepts **$10.81 – $129.72**; at $2,000 it accepts $5 – $60. The
+band moves with the market instead of going stale. The user's rejected range now
+scores **2.29%** and passes; `verify_breakout.py` replays those exact figures and
+also checks the gate at $2,000 / $3,000 / $4,324 / $5,000.
+
+**Two more blockers fixed in the same pass:**
+
+* `TargetMode` no longer defaults to `BK_TP_MEASURED`. Measured-move sets TP to
+  the whole range height — on a $99 range against a 430-point stop that is a
+  **230:1** target that is never reached, so every trade would have exited on the
+  stop or the trailing stop. Default is now `BK_TP_RANGE` (`TakeProfitPoints`
+  5000 = $5.00, ≈11:1), with MEASURED available opt-in.
+* Gate 1's rejection message still read `VOLATILITY` after the gate became
+  `RANGE vs SPREAD`, so the panel named a gate that no longer existed.
+
+---
 
 ## v1.07 — 0.10 lot, a money-defined stop, and no ATR anywhere
 

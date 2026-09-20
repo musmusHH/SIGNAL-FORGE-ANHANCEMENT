@@ -77,21 +77,39 @@ check("buffer can be fixed points or a spread multiple",
       "BK_BUF_FIXED" in BK and "BufferSpreadMult" in BK)
 # ATR HAS BEEN REMOVED FROM THE EA. The width gate is now expressed in
 # POINTS, which is what the old ATR ratio only ever approximated.
-check("width gate is measured in points",
-      re.search(r'gBkValid = \(MinRangePoints <= 0 \|\| widthPts >= MinRangePoints\) &&', BK) is not None
-      and "(MaxRangePoints <= 0 || widthPts <= MaxRangePoints)" in BK)
+# THE WIDTH GATE MUST BE PRICE-RELATIVE. An absolute dollar band goes stale:
+# $6-$40 was sane at $2000 gold, but at $4324 a $40 ceiling is 0.93% of price
+# and rejected a real 99054-point ($99.05) session range in the user's log.
+check("width gate is a PERCENTAGE of price, not an absolute band",
+      re.search(r'gBkValid = \(MinRangePercent <= 0 \|\| gBkWidthPct >= MinRangePercent\) &&', BK) is not None
+      and "(MaxRangePercent <= 0 || gBkWidthPct <= MaxRangePercent)" in BK)
+check("width percent is computed off the range MIDPOINT, not Bid",
+      "double refPx = (hi + lo) / 2.0;" in BK and
+      "gBkWidthPct = (refPx > 0) ? (width / refPx) * 100.0 : 0.0;" in BK)
 check("BuildRange reports the bar count",
       "bool BuildRange(double &hi, double &lo, datetime &stamp, int &bars)" in BK)
-check("both width bounds are inputs",
-      re.search(r'^input\s+double\s+MinRangePoints', BK, re.M) is not None and
-      re.search(r'^input\s+double\s+MaxRangePoints', BK, re.M) is not None)
-_mn = float(re.search(r'MinRangePoints\s*=\s*([\d.]+)', BK).group(1))
-_mx = float(re.search(r'MaxRangePoints\s*=\s*([\d.]+)', BK).group(1))
-# 3-digit gold: 1000 points = 1.00 USD
-check(f"healthy $12 Asian range passes the {_mn:.0f}-{_mx:.0f} pt gate",
-      _mn <= 12000 <= _mx)
-check("a dead-flat $2 range is rejected", not (_mn <= 2000 <= _mx))
-check("a $60 trend is rejected",          not (_mn <= 60000 <= _mx))
+check("percent bounds are inputs",
+      re.search(r'^input\s+double\s+MinRangePercent', BK, re.M) is not None and
+      re.search(r'^input\s+double\s+MaxRangePercent', BK, re.M) is not None)
+check("the absolute points band still exists as an opt-in backstop",
+      re.search(r'^input\s+double\s+MinRangePoints\s*=\s*0\s*;', BK, re.M) is not None and
+      re.search(r'^input\s+double\s+MaxRangePoints\s*=\s*0\s*;', BK, re.M) is not None)
+_mn = float(re.search(r'MinRangePercent\s*=\s*([\d.]+)', BK).group(1))
+_mx = float(re.search(r'MaxRangePercent\s*=\s*([\d.]+)', BK).group(1))
+# THE REGRESSION FROM THE USER'S LOG, replayed exactly.
+_hi, _lo = 4373.493, 4274.439
+_pct = (_hi - _lo) / ((_hi + _lo) / 2.0) * 100.0
+check(f"the rejected $99.05 range at $4324 gold ({_pct:.2f}%) now PASSES {_mn}-{_mx}%",
+      _mn <= _pct <= _mx)
+# and the gate must still behave across price regimes
+for _px in (2000, 3000, 4324, 5000):
+    _lowW  = _px * (_mn / 100.0) * 0.5      # half the minimum -> reject
+    _goodW = _px * 0.02                      # 2% -> accept
+    _bigW  = _px * (_mx / 100.0) * 1.5      # 1.5x the max -> reject
+    ok = (not (_mn <= _lowW / _px * 100 <= _mx)) and \
+         (_mn <= _goodW / _px * 100 <= _mx) and \
+         (not (_mn <= _bigW / _px * 100 <= _mx))
+    check(f"gate behaves correctly at ${_px} gold (scale-free)", ok)
 check("range-vs-spread gate replaces the ATR expansion gate",
       "MinRangeSpreadMult" in BK and
       re.search(r'widthPts < MathMax\(0\.0, MinRangeSpreadMult\) \* spPts', BK) is not None)
@@ -170,7 +188,7 @@ n_sf = len([x for x in re.findall(r'^input\s+[\w ]+?\s+(\w+)\s*=', SF, re.M)
 print(f"   (Signal Forge {n_sf} inputs -> Breakout Forge {n_inputs})")
 for bi in ("RangeMode", "DonchianBars", "BufferMode", "BufferFixedPoints",
            "RequireBodyClose", "EntryMode", "RetestMaxBars", "UseVolatilityGate",
-           "MinRangePoints", "MaxBreakoutsPerRange", "StopByRangeOpposite",
+           "MinRangePercent", "MaxBreakoutsPerRange", "StopByRangeOpposite",
            "TargetMode", "MinTargetCostMult", "UseSessionFilter",
            "BlockRollover", "MaxTradesPerDay", "MaxDailyLossUSD"):
     check(f"breakout input {bi} present",
@@ -245,6 +263,12 @@ check("the only sizing-related return is behind AllowRiskOverrun",
       BK.count("if(overrun && !AllowRiskOverrun)") == 1)
 check("realised risk is journalled", "gLastRiskUSD" in BK)
 check("R-multiple target available", "TakeProfitRMultiple" in BK)
+# MEASURED sets TP to the whole range height: on a $99 gold range that is a
+# 230:1 target at a 430pt stop and is never reached. It must be opt-in.
+check("TargetMode does NOT default to MEASURED",
+      re.search(r'^input\s+ENUM_BK_TP\s+TargetMode\s*=\s*BK_TP_RANGE', BK, re.M) is not None)
+check("gate 1's reason string matches its name (not the old VOLATILITY)",
+      'else if(g == 1) why = T("RANGE vs SPREAD");' in BK)
 
 # ---- the arithmetic, replayed ----
 POINT = 0.001

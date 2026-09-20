@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                Breakout Forge XAUUSD M5 EA       |
-//|                    QUANTUM HUD  .  v1.07  .  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  .  v1.08  .  MQL4 / MetaTrader 4 |
 //|                                                                  |
 //| A RANGE BREAKOUT engine wearing the Signal Forge PRO interface.  |
 //|                                                                  |
@@ -96,8 +96,8 @@ enum ENUM_BK_BUFFER
 
 enum ENUM_BK_TP
   {
-   BK_TP_RANGE    = 0,     // Target = range height x multiplier
-   BK_TP_MEASURED = 1      // Target = range height x multiplier (alias)
+   BK_TP_RANGE    = 0,     // Target = TakeProfitPoints / R multiple
+   BK_TP_MEASURED = 1      // Target = range height x MeasuredMoveMult
   };
 
 enum ENUM_BK_ENTRY
@@ -200,15 +200,24 @@ input double MinRangeSpreadMult       = 5.0;    // Range width >= spread x this
 // still look proportionate. Research on the Asian range is blunt about the
 // absolute floor: under 6-8 USD the break is whipsaw. 6000 points = 6 USD on
 // 3-digit gold. Set to 0 to disable the absolute test.
-input double MinRangePoints           = 6000;   // Min range width, points
-input double MaxRangePoints           = 40000;  // Max range width, points (0 = off)
+input double MinRangePercent          = 0.25;   // Min range width, % of price
+input double MaxRangePercent          = 3.00;   // Max range width, % of price (0 = off)
+// Absolute backstop in points, applied ON TOP of the percentage. 0 = rely
+// on the percentage alone, which is the default now that gold trades near
+// 4300 and a fixed dollar band goes stale every time price re-rates.
+input double MinRangePoints           = 0;      // Absolute min width, points (0 = off)
+input double MaxRangePoints           = 0;      // Absolute max width, points (0 = off)
 input bool   AllowReEntry             = true;   // Re-enter after a failed / rejected break
 input int    MaxBreakoutsPerRange     = 3;      // Max TRADES one range may produce
 
 input string __04c = "======== BREAKOUT EXITS ========"; // .
 input bool   StopByRangeOpposite      = true;   // Stop at the far side of the range
 input double StopRangePadPoints       = 400.0;  // ...padded by this many points
-input ENUM_BK_TP TargetMode           = BK_TP_MEASURED; // Target style
+// MEASURED sets TP to the whole range height. On a 99-dollar gold range
+// that is a 230:1 target at a 430-point stop - it is never reached and
+// every trade ends on the stop or the trailing stop. RANGE mode uses
+// TakeProfitPoints / TakeProfitRMultiple instead, which is reachable.
+input ENUM_BK_TP TargetMode           = BK_TP_RANGE; // Target style
 input double MeasuredMoveMult         = 1.0;    // MEASURED: range height x this
 input double MinTargetCostMult        = 3.0;    // Target >= (spread+commission) x this
 
@@ -400,6 +409,7 @@ string   gBkGateFail   = "";    // which gate rejected the setup
 // "BUILDING RANGE" while the chart shows nothing at all.
 int      gBkBars       = 0;     // bars the completed range spans
 double   gBkSpan       = 0.0;   // the min-width reference, in price
+double   gBkWidthPct   = 0.0;   // range width as a % of the gold price
 double   gBkRatio      = 0.0;   // width / span, what the width gate tests
 int      gBkFormBars   = 0;     // bars collected so far while forming
 bool     gBkForming    = false; // inside the range window right now
@@ -875,7 +885,9 @@ bool OpenPosition(int type)
                        ? MathMax(Point, TakeProfitPoints * Point)
                        : slDistance * MathMax(0.1, TakeProfitRMultiple);
 
-   // Measured move: a range that was N wide often travels N again.
+   // Measured move: a range that was N wide often travels N again. Opt-in
+   // only - on a wide gold range this target is effectively unreachable, so
+   // it must never be the default.
    if(TargetMode == BK_TP_MEASURED && gBkValid && gBkHigh > gBkLow)
       tpDistance = (gBkHigh - gBkLow) * MathMax(0.1, MeasuredMoveMult);
 
@@ -1203,11 +1215,22 @@ void UpdateRange()
    // range, and the far-side stop would be enormous.
    double width    = hi - lo;
    double widthPts = (gPoint > 0) ? width / gPoint : 0.0;
-   gBkSpan  = MathMax(1.0, MinRangePoints) * gPoint;   // reference for the meter
-   gBkRatio = (MinRangePoints > 0) ? widthPts / MinRangePoints : 0.0;
 
-   gBkValid = (MinRangePoints <= 0 || widthPts >= MinRangePoints) &&
-              (MaxRangePoints <= 0 || widthPts <= MaxRangePoints);
+   // Reference price for the percentage. The range MIDPOINT, not Bid: it is
+   // stable while the range is judged and cannot be skewed by a spike at
+   // the moment of evaluation.
+   double refPx = (hi + lo) / 2.0;
+   if(refPx <= 0) refPx = Bid;
+   gBkWidthPct = (refPx > 0) ? (width / refPx) * 100.0 : 0.0;
+
+   // gBkRatio is what the panel shows: 1.00 = exactly at the minimum width.
+   gBkSpan  = (refPx > 0) ? refPx * MathMax(0.0, MinRangePercent) / 100.0 : 0.0;
+   gBkRatio = (gBkSpan > 0) ? width / gBkSpan : 0.0;
+
+   gBkValid = (MinRangePercent <= 0 || gBkWidthPct >= MinRangePercent) &&
+              (MaxRangePercent <= 0 || gBkWidthPct <= MaxRangePercent) &&
+              (MinRangePoints  <= 0 || widthPts    >= MinRangePoints)  &&
+              (MaxRangePoints  <= 0 || widthPts    <= MaxRangePoints);
 
    // ...and the range must dwarf the spread, or it cannot pay for itself.
    // This replaces the old ATR-expansion gate with a cost-relative one.
@@ -1300,7 +1323,7 @@ bool BreakoutGates(int dir, string &why)
       if(!gBkGate[g])
         {
          if(g == 0 || g == 4) why = T("RANGE");
-         else if(g == 1) why = T("VOLATILITY");
+         else if(g == 1) why = T("RANGE vs SPREAD");
          else if(g == 2) why = T("SPREAD");
          else if(g == 3) why = T("SESSION");
          else if(g == 5) why = T("NO BREAK");
@@ -2679,7 +2702,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v1.07", TTextDim, 7);
+        "  ·  RAW  ·  v1.08", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -2934,9 +2957,10 @@ void PaintHud()
          // ...and the number the width gate actually judges, with the window
          // it has to fall inside, so a rejection is never a mystery.
          Text(pad + SC(12) + SC(52), rY + SC(43),
-              "(" + DoubleToString(MinRangePoints, 0) + "-" +
-              (MaxRangePoints > 0 ? DoubleToString(MaxRangePoints, 0) : "inf") +
-              T("p") + ")", TTextDim, 7);
+              DoubleToString(gBkWidthPct, 2) + "%  (" +
+              DoubleToString(MinRangePercent, 2) + "-" +
+              (MaxRangePercent > 0 ? DoubleToString(MaxRangePercent, 2) : "inf") +
+              "%)", TTextDim, 7);
          TextRight(pad + innerW - SC(12), rY + SC(42),
                    DoubleToString((gBkHigh - gBkLow) / gPoint, 0) + T("p"),
                    TText, 9, "Segoe UI Semibold", SF_FW_SEMI);
@@ -2963,8 +2987,7 @@ void PaintHud()
          if(gBkHigh > gBkLow && gBkRatio > 0)
            {
             TextVC(pad + SC(12), rY, SC(21),
-                   (MaxRangePoints > 0 &&
-                    (gBkHigh - gBkLow) / gPoint > MaxRangePoints)
+                   (MaxRangePercent > 0 && gBkWidthPct > MaxRangePercent)
                        ? T("RANGE TOO WIDE") : T("RANGE TOO TIGHT"),
                    TWarn, 8, "Segoe UI Semibold", SF_FW_SEMI);
             Text(pad + SC(12), rY + SC(24), T("WIDTH"), TTextDim, 7);
@@ -2973,15 +2996,25 @@ void PaintHud()
                       TTextDim, 8, "Segoe UI Semibold", SF_FW_SEMI);
             // Name the test that actually failed: the relative ratio or the
             // absolute points floor.
-            bool absFail = (MinRangePoints > 0 &&
-                            (gBkHigh - gBkLow) / gPoint < MinRangePoints);
             double spN = SpreadPoints();
-            Text(pad + SC(12), rY + SC(44),
-                 absFail ? ("< " + DoubleToString(MinRangePoints, 0) + T("p") +
-                            " " + T("minimum"))
-                         : ("< " + DoubleToString(MathMax(0.0, MinRangeSpreadMult) * spN, 0) +
-                            T("p") + " (" + DoubleToString(MinRangeSpreadMult, 1) + "x " +
-                            T("SPREAD") + ")"), TWarn, 7);
+            bool pctFail = (MinRangePercent > 0 && gBkWidthPct < MinRangePercent) ||
+                           (MaxRangePercent > 0 && gBkWidthPct > MaxRangePercent);
+            bool absFail = (MinRangePoints > 0 &&
+                            (gBkHigh - gBkLow) / gPoint < MinRangePoints) ||
+                           (MaxRangePoints > 0 &&
+                            (gBkHigh - gBkLow) / gPoint > MaxRangePoints);
+            string wWhy;
+            if(pctFail)      wWhy = DoubleToString(gBkWidthPct, 2) + "% " + T("of") + " " +
+                                    DoubleToString(MinRangePercent, 2) + "-" +
+                                    DoubleToString(MaxRangePercent, 2) + "%";
+            else if(absFail) wWhy = DoubleToString((gBkHigh - gBkLow) / gPoint, 0) + T("p") +
+                                    " " + T("of") + " " +
+                                    DoubleToString(MinRangePoints, 0) + "-" +
+                                    DoubleToString(MaxRangePoints, 0) + T("p");
+            else             wWhy = "< " + DoubleToString(MathMax(0.0, MinRangeSpreadMult) * spN, 0) +
+                                    T("p") + " (" + DoubleToString(MinRangeSpreadMult, 1) + "x " +
+                                    T("SPREAD") + ")";
+            Text(pad + SC(12), rY + SC(44), wWhy, TWarn, 7);
             TextRight(pad + innerW - SC(12), rY + SC(44),
                       IntegerToString(gBkBars) + " " + T("bars"), TTextDim, 7);
            }
@@ -4256,17 +4289,17 @@ int OnInit()
       Print("[BK-FORGE] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("BK-FORGE v1.07 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("BK-FORGE v1.08 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
 
    // Print exactly which overlays are armed, so a "nothing is drawn" report
    // can be diagnosed from the Experts log without guesswork.
    string ov = "";
-   Print("[BK-FORGE] v1.07 build | range=",
+   Print("[BK-FORGE] v1.08 build | range=",
          (RangeMode == BK_RANGE_DONCHIAN ? "DONCHIAN" : "SESSION"),
          " | entry=", (EntryMode == BK_ENTRY_RETEST ? "RETEST" : "BREAK"),
-         " | width gate=", DoubleToString(MinRangePoints, 0), "-",
-         DoubleToString(MaxRangePoints, 0), " pts",
+         " | width gate=", DoubleToString(MinRangePercent, 2), "-",
+         DoubleToString(MaxRangePercent, 2), "% of price",
          " | magic=", MagicNumber);
 
    gLastBar = 0;
@@ -4289,8 +4322,9 @@ int OnInit()
                   " | ", gBkBars, " bars | width ",
                   DoubleToString((gBkHigh - gBkLow) / gPoint, 0), "p",
                   " | ratio ", DoubleToString(gBkRatio, 2),
-                  " vs ", DoubleToString(MinRangePoints, 0), "-",
-                  DoubleToString(MaxRangePoints, 0), " pts",
+                  " = ", DoubleToString(gBkWidthPct, 2), "% vs ",
+                  DoubleToString(MinRangePercent, 2), "-",
+                  DoubleToString(MaxRangePercent, 2), "%",
                   " -> ", (gBkValid ? "VALID" : "REJECTED"));
          else
             Print("[BK-FORGE] no range yet (need history, or the window has ",
