@@ -1422,6 +1422,21 @@ The middle column is the whole point of the design.
   Fewer trades, better fills, tighter stops. Times out after `RetestMaxBars`,
   and a close back through the level kills the setup rather than arming it.
 
+## v1.05b — the panel opens on BREAKOUT
+
+The HUD used to start on CORE, which meant the page describing the engine this
+EA is named after was one click away every single load. `HudStartPage` now
+selects the opening tab and defaults to `BK_PAGE_BREAKOUT`, and **BREAKOUT is
+also the leftmost tab** — an active tab sitting in the second slot looks like
+a mis-render. Set `HudStartPage = BK_PAGE_CORE` to restore the old view.
+
+The enum is *mapped* to the internal page index in `OnInit()` rather than cast,
+because the enum is ordered for how it reads in the dropdown (BREAKOUT first)
+while the internal numbering stays `0 = core, 1 = breakout`. Casting would
+silently invert the pages.
+
+---
+
 ## v1.05 — LOT-FIRST risk: your lot is honoured, the **stop** is capped
 
 Two complaints, one root cause, opposite symptoms:

@@ -447,6 +447,26 @@ print("\n8. the new page")
 check("two tabs: CORE and BREAKOUT",
       '"TAB_CORE"' in BK and '"TAB_BREAKOUT"' in BK and '"TAB_FILTERS"' not in BK)
 check("BREAKOUT tab is handled on click", 'hit == "TAB_BREAKOUT"' in BK)
+
+# The panel must OPEN on the breakout page - that is the reason the EA exists.
+check("start page is an input, not a hardcoded constant",
+      "enum BK_HUD_PAGE" in BK and
+      re.search(r'^input\s+BK_HUD_PAGE\s+HudStartPage', BK, re.M) is not None)
+check("it defaults to BREAKOUT",
+      re.search(r'HudStartPage\s*=\s*BK_PAGE_BREAKOUT', BK) is not None)
+check("the global is seeded from it in OnInit",
+      "gHudPage = (HudStartPage == BK_PAGE_CORE) ? 0 : 1;" in BK)
+check("the global's own initialiser is the breakout page too",
+      re.search(r'^int\s+gHudPage = 1;', BK, re.M) is not None)
+check("the enum is mapped, never cast (its order is for the dropdown)",
+      re.search(r'gHudPage\s*=\s*\(int\)HudStartPage', BK) is None)
+# ...and the active tab must be the leftmost one, not the second
+_tabs = re.search(r'DrawButton\(pad,\s*\n?\s*y, tabW2[^;]*?"(TAB_\w+)"', BK, re.S)
+check("BREAKOUT is the leftmost tab", _tabs is not None and _tabs.group(1) == "TAB_BREAKOUT")
+check("CORE is the second tab",
+      re.search(r'DrawButton\(pad \+ tabW2 \+ SC\(8\),\s*y, tabW2[^;]*?"TAB_CORE"', BK, re.S) is not None)
+check("both tabs still highlight off the same global",
+      BK.count("gHudPage == 1, TAccent") == 1 and BK.count("gHudPage == 0, TAccent") == 1)
 check("breakout page has its own computed height", "if(gHudPage == 1)" in BK)
 check("CORE panel shows breakout status, not filter agreement",
       'T("BREAKOUT STATUS")' in BK and 'T("FILTER AGREEMENT")' not in BK)

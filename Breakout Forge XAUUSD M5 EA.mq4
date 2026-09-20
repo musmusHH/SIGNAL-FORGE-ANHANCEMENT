@@ -63,6 +63,14 @@ enum EA_TP_MODE { TP_By_Points = 0, TP_By_ATR = 1 };
 //               behaviour (your lot is your lot) made safe.
 //  STOP_FIRST - the strategy's stop is honoured and the LOT is derived from
 //               it (v1.03). Safer for structure, but it refuses trades.
+// Which tab the panel opens on. This EA's whole reason to exist is the
+// breakout engine, so that is the page worth seeing first.
+enum BK_HUD_PAGE
+  {
+   BK_PAGE_BREAKOUT = 0, // BREAKOUT (range, gates, distance to break)
+   BK_PAGE_CORE     = 1  // CORE (cost, balance, execution console)
+  };
+
 enum BK_RISK_MODE
   {
    BK_RISK_LOT_FIRST  = 0, // Keep my lot, cap the stop to the risk %
@@ -266,6 +274,8 @@ input int    HudRefreshMs           = 220;      // Repaint interval (ms)
 input bool   HudInteractive         = true;     // Buttons + hover + hotkeys
 input int    HudScalePercent        = 100;      // 80..130 UI scale
 
+input BK_HUD_PAGE HudStartPage      = BK_PAGE_BREAKOUT; // Tab the panel opens on
+
 input string __12 = "======== CHART VISUALS ========"; // .
 // ---- HISTORY / POST-ANALYSIS ----------------------------------------
 // The live range box is ONE object that gets moved when a new range is
@@ -453,7 +463,9 @@ int      gRngHead  = 0;              // next write slot
 #define BK_GATES 8
 bool     gBkGate[BK_GATES];
 
-int      gHudPage = 0;          // 0 = core, 1 = breakout
+// 0 = core, 1 = breakout. Seeded from HudStartPage in OnInit(); the enum is
+// ordered so BREAKOUT reads first in the dropdown, so it cannot be cast.
+int      gHudPage = 1;          // 0 = core, 1 = breakout
 bool     gTrkCollapsed = false; // standalone tracker panel collapsed?
 bool     gPaused = false;
 int      gMouseX = -1, gMouseY = -1;   // chart-space cursor, for hover + click fallback
@@ -2915,15 +2927,17 @@ void PaintHud()
    // Row layout: [ CORE ][ FILTERS ][ lang ][ theme ]
    // The two square buttons on the right switch the interface language and
    // the colour theme live, with no need to reopen the EA properties dialog.
-   // Two pages: CORE | BREAKOUT, then the language and theme squares.
+   // Two pages: BREAKOUT | CORE, then the language and theme squares.
    // The tab width is derived from the counts, never hardcoded.
+   // BREAKOUT is leftmost because it is the default page and the reason this
+   // EA exists - the opening view should not start on the second tab.
    int sqW   = SC(30);
    int tabW2 = (innerW - SC(8) * 3 - sqW * 2) / 2;
    int lx    = pad + (tabW2 + SC(8)) * 2;
    int tx    = lx + sqW + SC(8);
    // TRACKER is no longer a tab - it lives in its own top-right panel.
-   DrawButton(pad,                   y, tabW2, SC(24), "TAB_CORE",     T("CORE"),     gHudPage == 0, TAccent);
-   DrawButton(pad + tabW2 + SC(8),   y, tabW2, SC(24), "TAB_BREAKOUT", T("BREAKOUT"), gHudPage == 1, TAccent);
+   DrawButton(pad,                   y, tabW2, SC(24), "TAB_BREAKOUT", T("BREAKOUT"), gHudPage == 1, TAccent);
+   DrawButton(pad + tabW2 + SC(8),   y, tabW2, SC(24), "TAB_CORE",     T("CORE"),     gHudPage == 0, TAccent);
    // Language: shows the language you will switch TO, so the button always
    // reads in the script the user is about to get.
    DrawButton(lx, y, sqW, SC(24), "BTN_LANG",
@@ -4467,6 +4481,7 @@ int OnInit()
   {
    gLang  = (int)HudLanguage;   // seed the live copies from the inputs
    gShowRangeBox = ShowRangeBox;
+   gHudPage = (HudStartPage == BK_PAGE_CORE) ? 0 : 1;
    gTheme = (int)HudTheme;
    LoadTheme();
    CacheSymbolSpec();

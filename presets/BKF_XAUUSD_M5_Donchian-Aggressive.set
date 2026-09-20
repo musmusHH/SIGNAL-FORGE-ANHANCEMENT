@@ -84,6 +84,7 @@ HudMargin=12
 HudRefreshMs=220
 HudInteractive=1
 HudScalePercent=100
+HudStartPage=0
 KeepRangeHistory=1
 MaxRangeHistory=40
 ShowRangeLabels=0

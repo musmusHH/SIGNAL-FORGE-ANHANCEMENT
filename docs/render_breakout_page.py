@@ -33,9 +33,10 @@ def draw(lang):
     y=headerH+SC(6)
     # tabs
     sqW=SC(30); tabW3=(innerW-SC(8)*3-sqW*2)//2
-    names=[T("CORE","الرئيسية"),T("BREAKOUT","الاختراق")]
+    # BREAKOUT is leftmost and is the page the panel opens on.
+    names=[T("BREAKOUT","الاختراق"),T("CORE","الرئيسية")]
     for i,nm in enumerate(names):
-        x=pad+i*(tabW3+SC(8)); act=(i==1)
+        x=pad+i*(tabW3+SC(8)); act=(i==0)
         plate(x,y,tabW3,SC(24),(16,60,86) if act else PB2,CY if act else EDGE)
         d.text((x+(tabW3-d.textlength(nm,font=f(10,True)))/2,y+6),nm,font=f(10,True),fill=CY if act else DIM)
         boxes.append((x,y,x+tabW3,y+SC(24),"tab%d"%i))
