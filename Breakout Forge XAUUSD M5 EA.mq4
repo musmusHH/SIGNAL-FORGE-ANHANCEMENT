@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                Breakout Forge XAUUSD M5 EA       |
-//|                    QUANTUM HUD  .  v1.09  .  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  .  v1.10  .  MQL4 / MetaTrader 4 |
 //|                                                                  |
 //| A RANGE BREAKOUT engine wearing the Signal Forge PRO interface.  |
 //|                                                                  |
@@ -85,7 +85,8 @@ enum ENUM_SF_THEME
 enum ENUM_BK_RANGE
   {
    BK_RANGE_SESSION = 0,   // Session window (Asian range)
-   BK_RANGE_DONCHIAN = 1   // Donchian (last N bars)
+   BK_RANGE_DONCHIAN = 1,  // Donchian (last N bars)
+   BK_RANGE_ORB      = 2   // Opening Range Breakout (New York open)
   };
 
 enum ENUM_BK_BUFFER
@@ -97,6 +98,16 @@ enum ENUM_BK_BUFFER
 // How the range-width gate decides. The percent test is scale-free (it
 // survives gold re-rating); the points test is absolute and predictable.
 // You can run either, or combine them.
+// Exness servers are UTC+0 all year; New York is not. AUTO applies the US
+// rule (2nd Sunday March - 1st Sunday November) so the NY session hours
+// track the real clock without anyone touching a setting twice a year.
+enum ENUM_BK_DST
+  {
+   BK_DST_AUTO   = 0,      // Auto-detect US DST (recommended)
+   BK_DST_SUMMER = 1,      // Force summer, New York = UTC-4
+   BK_DST_WINTER = 2       // Force winter, New York = UTC-5
+  };
+
 enum ENUM_BK_WIDTH
   {
    BK_WIDTH_POINTS  = 0,   // Points only (absolute, e.g. 4000-100000)
@@ -175,10 +186,26 @@ input string __04 = "======== BREAKOUT ENGINE ========"; // .
 //           This is the classic London-open breakout.
 // DONCHIAN: the highest high / lowest low of the last N closed bars.
 //           Always available, so the EA still trades outside session hours.
-input ENUM_BK_RANGE RangeMode         = BK_RANGE_SESSION; // Range source
+input ENUM_BK_RANGE RangeMode         = BK_RANGE_ORB; // Range source
 input int    RangeStartHour           = 0;      // SESSION: window start hour (server)
 input int    RangeEndHour             = 7;      // SESSION: window end hour (server)
 input int    DonchianBars             = 20;     // DONCHIAN: lookback in bars
+
+// ---- NEW YORK OPENING RANGE (ORB) ----------------------------------
+// The classic ORB: let the first N minutes after the New York open build a
+// box, then trade the break of that box for the rest of the session. All
+// hours below are NEW YORK WALL CLOCK - the EA converts them to the
+// broker's clock itself and re-converts when DST flips.
+input ENUM_BK_DST DSTMode             = BK_DST_AUTO; // NY daylight saving handling
+input double ServerGMTOffsetHours     = 0;      // Broker GMT offset (Exness = 0)
+input int    NYOpenHour               = 9;      // NY open hour (NY local, 9 = 09:xx)
+input int    NYOpenMinute             = 30;     // NY open minute (equities open 09:30)
+input int    ORBMinutes               = 15;     // ORB: minutes of range after the open
+// 330 minutes (5.5h) is the most that still finishes before the 20:00-22:00
+// rollover blackout in WINTER, when the NY open sits an hour later on the
+// server clock (14:30 instead of 13:30). Going higher silently loses the
+// tail of the window to the blackout.
+input int    ORBTradeMinutes          = 330;    // ORB: minutes after the open we may trade
 input bool   ShowRangeBox             = true;   // Draw the range box on the chart
 
 // ---- what counts as a break --------------------------------------
@@ -215,12 +242,12 @@ input double MinRangeSpreadMult       = 5.0;    // Range width >= spread x this
 //   BOTH    - strictest: both must agree.
 // Set any bound to 0 to switch that single bound off.
 input ENUM_BK_WIDTH WidthGateMode     = BK_WIDTH_EITHER; // Which width test rules
-input double MinRangePoints           = 4000;   // Min range width, points (0 = off)
+input double MinRangePoints           = 2500;   // Min range width, points (0 = off)
 input double MaxRangePoints           = 100000; // Max range width, points (0 = off)
 input double MinRangePercent          = 0.10;   // Min range width, % of price (0 = off)
 input double MaxRangePercent          = 3.00;   // Max range width, % of price (0 = off)
 input bool   AllowReEntry             = true;   // Re-enter after a failed / rejected break
-input int    MaxBreakoutsPerRange     = 3;      // Max TRADES one range may produce
+input int    MaxBreakoutsPerRange     = 5;      // Max TRADES one range may produce
 
 input string __04c = "======== BREAKOUT EXITS ========"; // .
 input bool   StopByRangeOpposite      = true;   // Stop at the far side of the range
@@ -238,12 +265,17 @@ input string __04b = "======== SESSION & RISK ========"; // .
 // are UTC on that broker. London 08:00-16:30, New York 13:30-20:00, and the
 // overlap 13:00-17:00 produces most of gold's daily range.
 input bool   UseSessionFilter         = true;   // Trade only inside the window
-input int    TradeStartHour           = 8;      // Trading window start (server hour)
-input int    TradeEndHour             = 20;     // Trading window end (server hour)
+// When UseNYSessionClock is on, the two hours below are NEW YORK local and
+// are DST-corrected automatically. When off they are raw server hours, the
+// old behaviour. In ORB mode the window is derived from the NY open and
+// ORBTradeMinutes instead, so these are ignored.
+input bool   UseNYSessionClock        = true;   // Read the hours below as NY local time
+input int    TradeStartHour           = 8;      // Trading window start
+input int    TradeEndHour             = 16;     // Trading window end
 input bool   BlockRollover            = true;   // Skip the 20:00-22:00 swap window
 input int    RolloverStartHour        = 20;     // Rollover blackout start
 input int    RolloverEndHour          = 22;     // Rollover blackout end
-input int    MaxTradesPerDay          = 6;      // 0 = unlimited
+input int    MaxTradesPerDay          = 10;      // 0 = unlimited
 input double MaxDailyLossUSD          = 10.0;   // Stop for the day after this loss (0=off)
 
 input string __10 = "======== BROKER COST (DISPLAY ONLY) ========"; // .
@@ -1018,10 +1050,132 @@ bool HourInWindowRaw(int h, int startH, int endH)
    return (h >= startH || h < endH);
   }
 
+//==================================================================//
+//        N E W   Y O R K   D S T   (  A U T O M A T I C  )         //
+//==================================================================//
+// Exness trading servers run on UTC+0 ALL YEAR - they never shift. New
+// York does shift, so the UTC hour of the New York session moves by one
+// hour twice a year. US DST rule (confirmed on the Exness trading-hours
+// page): starts the SECOND Sunday of March, ends the FIRST Sunday of
+// November, i.e. New York is UTC-4 in summer and UTC-5 in winter.
+//
+// Consequence for gold, from the same page:
+//   New York open   13:30 UTC in summer   /   14:30 UTC in winter
+//   New York close  20:00 UTC in summer   /   21:00 UTC in winter
+// So every ORB and session hour is computed from the NY wall clock and
+// converted to server (UTC) time at runtime - never hardcoded.
+
+// Day of week for a date, 0 = Sunday. Sakamoto's algorithm: MQL4's
+// TimeDayOfWeek() only works on an actual datetime, and we need the
+// weekday of a CONSTRUCTED date (the 1st of March, etc).
+int DowFor(int y, int m, int d)
+  {
+   int t[12] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+   int yy = y;
+   if(m < 3) yy -= 1;
+   return (yy + yy / 4 - yy / 100 + yy / 400 + t[m - 1] + d) % 7;
+  }
+
+// Day-of-month of the Nth given weekday in a month (e.g. 2nd Sunday of March).
+int NthWeekdayOfMonth(int y, int m, int weekday, int nth)
+  {
+   int firstDow = DowFor(y, m, 1);
+   int offset   = (weekday - firstDow + 7) % 7;
+   return 1 + offset + (nth - 1) * 7;
+  }
+
+// Is the given SERVER (UTC) time inside US daylight saving time?
+// DST begins 02:00 LOCAL on the 2nd Sunday of March, which is 07:00 UTC
+// (clocks jump 02:00 EST -> 03:00 EDT), and ends 02:00 LOCAL on the 1st
+// Sunday of November = 06:00 UTC. Comparing in UTC keeps the boundary
+// exact instead of "some time that Sunday".
+bool IsNewYorkDST(datetime serverUtc)
+  {
+   int y = TimeYear(serverUtc);
+   int startDay = NthWeekdayOfMonth(y, 3,  0, 2);   // 2nd Sunday of March
+   int endDay   = NthWeekdayOfMonth(y, 11, 0, 1);   // 1st Sunday of November
+
+   datetime dstStart = StrToTime(StringFormat("%04d.%02d.%02d 07:00", y, 3,  startDay));
+   datetime dstEnd   = StrToTime(StringFormat("%04d.%02d.%02d 06:00", y, 11, endDay));
+   return (serverUtc >= dstStart && serverUtc < dstEnd);
+  }
+
+// New York's UTC offset right now: -4 in summer, -5 in winter.
+int NewYorkUtcOffset()
+  {
+   if(DSTMode == BK_DST_SUMMER) return -4;
+   if(DSTMode == BK_DST_WINTER) return -5;
+   return IsNewYorkDST(TimeCurrent()) ? -4 : -5;
+  }
+
+// Convert a New York wall-clock time (hour + minute) into the matching
+// time on the broker's clock. ServerGMTOffsetHours is 0 on Exness but is
+// exposed so the EA still works on a broker that is not on UTC.
+double NyToServerHour(double nyHour)
+  {
+   double h = nyHour - NewYorkUtcOffset() + ServerGMTOffsetHours;
+   while(h < 0)   h += 24.0;
+   while(h >= 24) h -= 24.0;
+   return h;
+  }
+
+// Format a fractional hour as HH:MM for the journal and the panel.
+string FmtClock(double h)
+  {
+   while(h < 0)   h += 24.0;
+   while(h >= 24) h -= 24.0;
+   int hh = (int)MathFloor(h + 1e-9);
+   int mm = (int)MathRound((h - hh) * 60.0);
+   if(mm >= 60) { mm -= 60; hh = (hh + 1) % 24; }
+   return StringFormat("%02d:%02d", hh, mm);
+  }
+
+// The server time NOW expressed as a fractional hour (13.5 = 13:30).
+double ServerHourNow()
+  {
+   datetime t = TimeCurrent();
+   return TimeHour(t) + TimeMinute(t) / 60.0;
+  }
+
+// Fractional-hour window test, so 13:30 is expressible. Handles windows
+// that wrap past midnight.
+bool InHourWindowF(double h, double startH, double endH)
+  {
+   if(startH == endH) return true;
+   if(startH < endH)  return (h >= startH && h < endH);
+   return (h >= startH || h < endH);
+  }
+
+// ---- THE OPENING RANGE ---------------------------------------------
+// The ORB window opens at the New York open and lasts ORBMinutes. Both
+// ends are returned on the SERVER clock, already DST-corrected.
+void OrbWindowServer(double &openH, double &closeH)
+  {
+   double nyOpen = NYOpenHour + NYOpenMinute / 60.0;
+   openH  = NyToServerHour(nyOpen);
+   closeH = NyToServerHour(nyOpen + MathMax(1, ORBMinutes) / 60.0);
+  }
+
 bool SessionOpenNow()
   {
    if(!UseSessionFilter) return true;
-   return HourInWindowRaw(TimeHour(TimeCurrent()), TradeStartHour, TradeEndHour);
+   double h = ServerHourNow();
+
+   // ORB: the tradable window runs from the END of the opening range to
+   // ORBTradeMinutes after the NY open. Outside that the box is stale.
+   if(RangeMode == BK_RANGE_ORB)
+     {
+      double oOpen = 0, oClose = 0;
+      OrbWindowServer(oOpen, oClose);
+      double nyOpen  = NYOpenHour + NYOpenMinute / 60.0;
+      double tradeTo = NyToServerHour(nyOpen + MathMax(1, ORBTradeMinutes) / 60.0);
+      return InHourWindowF(h, oClose, tradeTo);
+     }
+
+   if(UseNYSessionClock)
+      return InHourWindowF(h, NyToServerHour(TradeStartHour),
+                              NyToServerHour(TradeEndHour));
+   return InHourWindowF(h, TradeStartHour, TradeEndHour);
   }
 
 bool InRolloverBlackout()
@@ -1082,6 +1236,63 @@ bool BuildRange(double &hi, double &lo, datetime &stamp, int &bars)
       stamp = Time[1];                 // rolls every bar, by design
       bars  = n;
       return (hi > lo);
+     }
+
+   // ---- ORB mode ------------------------------------------------------
+   // The opening range is the high/low of the first ORBMinutes after the
+   // New York open. Both edges of that window come from OrbWindowServer(),
+   // so the box lands on the right bars in summer and in winter without
+   // anything being reconfigured.
+   if(RangeMode == BK_RANGE_ORB)
+     {
+      double oOpen = 0, oClose = 0;
+      OrbWindowServer(oOpen, oClose);
+      double hNow = ServerHourNow();
+
+      // Still inside the opening range: report it as forming so the panel
+      // and the dotted box show it building, but do not trade it yet.
+      if(InHourWindowF(hNow, oOpen, oClose))
+        {
+         double fh = -1, fl = -1; datetime fs = 0; int fc = 0;
+         for(int k = 0; k < Bars && k < 500; k++)
+           {
+            double bh2 = TimeHour(Time[k]) + TimeMinute(Time[k]) / 60.0;
+            if(!InHourWindowF(bh2, oOpen, oClose)) break;
+            if(fh < 0 || High[k] > fh) fh = High[k];
+            if(fl < 0 || Low[k]  < fl) fl = Low[k];
+            fs = Time[k];
+            fc++;
+           }
+         gBkFormBars = fc;
+         if(fh > 0 && fl > 0 && fh > fl)
+           {
+            gBkForming   = true;
+            gBkFormHigh  = fh;
+            gBkFormLow   = fl;
+            gBkFormStart = fs;
+           }
+         return false;
+        }
+      gBkForming = false;
+
+      // The most recent COMPLETED opening range.
+      double oh = -1, ol = -1; datetime ost = 0; int ocnt = 0, oscan = 0;
+      for(int j = 1; j < Bars && oscan < 1000; j++, oscan++)
+        {
+         double bh3 = TimeHour(Time[j]) + TimeMinute(Time[j]) / 60.0;
+         if(InHourWindowF(bh3, oOpen, oClose))
+           {
+            if(oh < 0 || High[j] > oh) oh = High[j];
+            if(ol < 0 || Low[j]  < ol) ol = Low[j];
+            ost = Time[j];
+            ocnt++;
+           }
+         else if(oh >= 0)
+            break;   // walked out of the most recent opening range
+        }
+      if(oh < 0 || ol < 0 || oh <= ol) return false;
+      hi = oh; lo = ol; stamp = ost; bars = MathMax(1, ocnt);
+      return true;
      }
 
    // ---- SESSION mode ------------------------------------------------
@@ -2734,7 +2945,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v1.09", TTextDim, 7);
+        "  ·  RAW  ·  v1.10", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -2970,7 +3181,12 @@ void PaintHud()
       TextVC(pad + SC(12), y, SC(24), T("SESSION RANGE"), TAccent, 7,
              "Segoe UI Black", SF_FW_BLACK);
       // Mode badge so it is never ambiguous which range is on screen.
-      string mode = (RangeMode == BK_RANGE_DONCHIAN)
+      string mode = (RangeMode == BK_RANGE_ORB)
+                    ? ("ORB " + IntegerToString(ORBMinutes) + "m  NY " +
+                       IntegerToString(NYOpenHour) + ":" +
+                       StringFormat("%02d", NYOpenMinute) +
+                       (NewYorkUtcOffset() == -4 ? "  EDT" : "  EST"))
+                    : (RangeMode == BK_RANGE_DONCHIAN)
                     ? T("DONCHIAN") + " " + IntegerToString(MathMax(2, DonchianBars))
                     : T("SESSION") + " " + IntegerToString(RangeStartHour) + "-" +
                       IntegerToString(RangeEndHour);
@@ -4324,19 +4540,36 @@ int OnInit()
       Print("[BK-FORGE] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("BK-FORGE v1.09 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("BK-FORGE v1.10 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
 
    // Print exactly which overlays are armed, so a "nothing is drawn" report
    // can be diagnosed from the Experts log without guesswork.
    string ov = "";
-   Print("[BK-FORGE] v1.09 build | range=",
-         (RangeMode == BK_RANGE_DONCHIAN ? "DONCHIAN" : "SESSION"),
+   Print("[BK-FORGE] v1.10 build | range=",
+         (RangeMode == BK_RANGE_ORB ? "ORB" :
+          RangeMode == BK_RANGE_DONCHIAN ? "DONCHIAN" : "SESSION"),
          " | entry=", (EntryMode == BK_ENTRY_RETEST ? "RETEST" : "BREAK"),
          " | width gate=", WidthModeName(), " ",
          DoubleToString(MinRangePoints, 0), "-", DoubleToString(MaxRangePoints, 0), "p / ",
          DoubleToString(MinRangePercent, 2), "-", DoubleToString(MaxRangePercent, 2), "%",
          " | magic=", MagicNumber);
+
+   // Spell out the DST decision and the resulting server hours. Getting this
+   // wrong silently shifts every trade by an hour, so it is stated at boot.
+   if(RangeMode == BK_RANGE_ORB)
+     {
+      double oOpen = 0, oClose = 0;
+      OrbWindowServer(oOpen, oClose);
+      double nyO     = NYOpenHour + NYOpenMinute / 60.0;
+      double tradeTo = NyToServerHour(nyO + MathMax(1, ORBTradeMinutes) / 60.0);
+      Print("[BK-FORGE] NY ", (NewYorkUtcOffset() == -4 ? "EDT (summer, UTC-4)"
+                                                        : "EST (winter, UTC-5)"),
+            " | DST=", (DSTMode == BK_DST_AUTO ? "AUTO" :
+                        DSTMode == BK_DST_SUMMER ? "FORCED SUMMER" : "FORCED WINTER"),
+            " | ORB window ", FmtClock(oOpen), "-", FmtClock(oClose),
+            " server | trade until ", FmtClock(tradeTo), " server");
+     }
 
    gLastBar = 0;
 

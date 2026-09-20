@@ -1351,7 +1351,7 @@ corrected.
 
 ---
 
-# Breakout Forge XAUUSD M5 EA (v1.09) — the second EA
+# Breakout Forge XAUUSD M5 EA (v1.10) — the second EA
 
 A **separate EA with its own strategy**, not a variant of Signal Forge. Exactly
 two things are reused from PRO — the **visual shell** (HUD, themes, Arabic
@@ -1421,6 +1421,71 @@ The middle column is the whole point of the design.
 * **RETEST** — wait for price to come back to the broken level and hold.
   Fewer trades, better fills, tighter stops. Times out after `RetestMaxBars`,
   and a close back through the level kills the setup rather than arming it.
+
+## v1.10 — New York ORB with automatic DST
+
+`RangeMode` now has a third option, **`BK_RANGE_ORB`**, and it is the default:
+the high/low of the first `ORBMinutes` after the **New York open** becomes the
+box, and the break of that box is traded for the rest of the session.
+
+### The DST problem, solved properly
+
+Exness servers run **UTC+0 all year and never shift** — confirmed on their
+[trading-hours page](https://get.exness.help/hc/fr/articles/4405235684498-Horaires-de-trading-des-instruments)
+("Nos serveurs de trading sont synchronisés avec le fuseau horaire UTC+0").
+New York *does* shift, so the NY open moves on the server clock twice a year.
+Exness publish it plainly: **New York 13:30–20:00 UTC in summer, 14:30–21:00 in
+winter.**
+
+`DSTMode = BK_DST_AUTO` applies the US rule in code — **2nd Sunday of March →
+1st Sunday of November**, compared at the true UTC boundary (07:00 / 06:00), so
+New York is UTC−4 in summer and UTC−5 in winter:
+
+| | NY local | server (UTC) |
+|---|---|---|
+| summer (EDT) | 09:30 | **13:30** |
+| winter (EST) | 09:30 | **14:30** |
+
+All ORB inputs are **New York wall clock**; the EA converts. Nothing is edited
+twice a year. `BK_DST_SUMMER` / `BK_DST_WINTER` force it if you ever need to.
+The transition dates are computed, not tabulated, so they cannot expire —
+verified against 2024–2030 (Mar 10/Nov 3, Mar 9/Nov 2, Mar 8/Nov 1, Mar 14/Nov 7…),
+every one landing on a Sunday.
+
+The boot log states the decision outright:
+
+```
+[BK-FORGE] NY EST (winter, UTC-5) | DST=AUTO | ORB window 14:30-14:45 server
+           | trade until 20:00 server
+```
+
+### More trades per day
+
+| input | was | now |
+|---|---|---|
+| `RangeMode` | SESSION (one Asian box) | **ORB** (New York open) |
+| `MaxBreakoutsPerRange` | 3 | **5** |
+| `MaxTradesPerDay` | 6 | **10** |
+| `MinRangePoints` | 4000 | **2500** — a 15-minute box is a fraction of a 7-hour range |
+
+`ORBTradeMinutes` is **330**, not 360: in winter the open sits an hour later, so
+360 would push the tail of the window into the 20:00–22:00 rollover blackout.
+330 clears it in **both** seasons.
+
+`OnePositionOnly` stays `true` — frequency comes from more sequential entries,
+not from stacking risk.
+
+### ORB presets
+
+`BKF_ORB_NY_15m` (classic), `BKF_ORB_NY_30m` (wider box, fewer false breaks),
+`BKF_ORB_NY_5m-HighFreq` (up to 15 trades/day), `BKF_ORB_NY_London-Overlap`
+(trades only the overlap). `BKF_XAUUSD_M5_Asian-Session` keeps the old
+behaviour. Every ORB preset was replayed in both seasons: all open at 13:30/14:30
+server and none collide with rollover.
+
+See `docs/breakout_ny_dst.png`.
+
+---
 
 ## v1.09 — the width gate is yours to choose
 

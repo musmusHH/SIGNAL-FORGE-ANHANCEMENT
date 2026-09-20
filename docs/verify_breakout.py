@@ -100,8 +100,11 @@ check("width percent is computed off the range MIDPOINT, not Bid",
       "gBkWidthPct = (refPx > 0) ? (width / refPx) * 100.0 : 0.0;" in BK)
 check("BuildRange reports the bar count",
       "bool BuildRange(double &hi, double &lo, datetime &stamp, int &bars)" in BK)
-check("the requested 4000-100000 point band is the default",
-      re.search(r'^input\s+double\s+MinRangePoints\s*=\s*4000', BK, re.M) is not None and
+# The floor was lowered 4000 -> 2500 for ORB: a 15-minute opening range is a
+# fraction of a 7-hour session range, so the session-era floor would sit out
+# quiet opens. The 100000 ceiling the user asked for is unchanged.
+check("the points band is 2500-100000 (ORB-aware floor)",
+      re.search(r'^input\s+double\s+MinRangePoints\s*=\s*2500', BK, re.M) is not None and
       re.search(r'^input\s+double\s+MaxRangePoints\s*=\s*100000', BK, re.M) is not None)
 check("percent bounds are inputs",
       re.search(r'^input\s+double\s+MinRangePercent', BK, re.M) is not None and
@@ -214,6 +217,81 @@ for bi in ("RangeMode", "DonchianBars", "BufferMode", "BufferFixedPoints",
            "BlockRollover", "MaxTradesPerDay", "MaxDailyLossUSD"):
     check(f"breakout input {bi} present",
           re.search(r'^input[^\n]*\b%s\b' % bi, BK, re.M) is not None)
+
+print("\n7a2. NEW YORK ORB + AUTOMATIC DST")
+# Exness servers are UTC+0 all year; New York is not. Getting the DST rule
+# wrong silently shifts every entry by one hour.
+check("ORB is a real range mode", "BK_RANGE_ORB" in BK and
+      re.search(r'^input\s+ENUM_BK_RANGE\s+RangeMode\s*=\s*BK_RANGE_ORB', BK, re.M) is not None)
+check("DSTMode input with AUTO / SUMMER / WINTER",
+      all(k in BK for k in ("BK_DST_AUTO", "BK_DST_SUMMER", "BK_DST_WINTER"))
+      and re.search(r'^input\s+ENUM_BK_DST\s+DSTMode\s*=\s*BK_DST_AUTO', BK, re.M) is not None)
+check("US rule: 2nd Sunday of March, 1st Sunday of November",
+      "NthWeekdayOfMonth(y, 3,  0, 2)" in BK and "NthWeekdayOfMonth(y, 11, 0, 1)" in BK)
+check("DST boundary compared in UTC (07:00 / 06:00), not local",
+      '%04d.%02d.%02d 07:00' in BK and '%04d.%02d.%02d 06:00' in BK)
+check("New York is UTC-4 in summer and UTC-5 in winter",
+      "if(DSTMode == BK_DST_SUMMER) return -4;" in BK and
+      "if(DSTMode == BK_DST_WINTER) return -5;" in BK and
+      "return IsNewYorkDST(TimeCurrent()) ? -4 : -5;" in BK)
+check("NY wall clock is converted to server time, never hardcoded",
+      "double h = nyHour - NewYorkUtcOffset() + ServerGMTOffsetHours;" in BK)
+check("ServerGMTOffsetHours defaults to 0 (Exness is UTC+0)",
+      re.search(r'^input\s+double\s+ServerGMTOffsetHours\s*=\s*0\s*;', BK, re.M) is not None)
+check("the ORB window is derived from the NY open",
+      "void OrbWindowServer(double &openH, double &closeH)" in BK and
+      "double nyOpen = NYOpenHour + NYOpenMinute / 60.0;" in BK)
+check("minutes are supported (09:30 needs fractional hours)",
+      "bool InHourWindowF(double h, double startH, double endH)" in BK and
+      "TimeMinute(t) / 60.0" in BK)
+check("NY open defaults to 09:30", 
+      re.search(r'^input\s+int\s+NYOpenHour\s*=\s*9\s*;', BK, re.M) is not None and
+      re.search(r'^input\s+int\s+NYOpenMinute\s*=\s*30\s*;', BK, re.M) is not None)
+check("ORB mode has its own session window (open -> ORBTradeMinutes)",
+      "if(RangeMode == BK_RANGE_ORB)" in BK and "ORBTradeMinutes" in BK)
+check("the DST decision is printed at boot",
+      "EDT (summer, UTC-4)" in BK and "EST (winter, UTC-5)" in BK)
+
+# ---- replay the DST arithmetic the EA implements ----
+def _dow(y, m, d):
+    t = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4]
+    yy = y - 1 if m < 3 else y
+    return (yy + yy // 4 - yy // 100 + yy // 400 + t[m - 1] + d) % 7
+def _nth(y, m, wd, n):
+    return 1 + (wd - _dow(y, m, 1) + 7) % 7 + (n - 1) * 7
+import datetime as _dt
+_bad = 0
+for _y in range(2024, 2031):
+    for _m in range(1, 13):
+        for _d in (1, 15, 28):
+            if _dow(_y, _m, _d) != (_dt.date(_y, _m, _d).weekday() + 1) % 7:
+                _bad += 1
+check("Sakamoto weekday algorithm is correct 2024-2030", _bad == 0)
+for _y, _mar, _nov in ((2024, 10, 3), (2025, 9, 2), (2026, 8, 1), (2027, 14, 7)):
+    check(f"{_y} DST: Mar {_mar} / Nov {_nov}",
+          _nth(_y, 3, 0, 2) == _mar and _nth(_y, 11, 0, 1) == _nov)
+    check(f"{_y} transitions both land on a Sunday",
+          _dt.date(_y, 3, _nth(_y, 3, 0, 2)).weekday() == 6 and
+          _dt.date(_y, 11, _nth(_y, 11, 0, 1)).weekday() == 6)
+# the Exness published table must come out of the conversion
+def _ny_to_server(ny, off): return (ny - off) % 24
+check("NY 09:30 -> 13:30 server in summer (Exness table)",
+      abs(_ny_to_server(9.5, -4) - 13.5) < 1e-9)
+check("NY 09:30 -> 14:30 server in winter (Exness table)",
+      abs(_ny_to_server(9.5, -5) - 14.5) < 1e-9)
+check("NY 16:00 close -> 20:00 / 21:00 server (Exness table)",
+      abs(_ny_to_server(16, -4) - 20) < 1e-9 and abs(_ny_to_server(16, -5) - 21) < 1e-9)
+
+print("\n7a3. TRADE FREQUENCY")
+check("more trades allowed per ORB box",
+      re.search(r'^input\s+int\s+MaxBreakoutsPerRange\s*=\s*5', BK, re.M) is not None)
+check("more trades allowed per day",
+      re.search(r'^input\s+int\s+MaxTradesPerDay\s*=\s*10', BK, re.M) is not None)
+check("the ORB trade window clears the rollover blackout in BOTH seasons",
+      re.search(r'^input\s+int\s+ORBTradeMinutes\s*=\s*330', BK, re.M) is not None
+      and all((9.5 + 330 / 60.0 - _o) % 24 <= 20.0 for _o in (-4, -5)))
+check("re-entry after a failed break stays on",
+      re.search(r'^input\s+bool\s+AllowReEntry\s*=\s*true', BK, re.M) is not None)
 
 print("\n7b. re-entry after a failed / rejected break")
 check("ReEntryResult() exists", "int ReEntryResult(int shift)" in BK)

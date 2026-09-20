@@ -1,8 +1,8 @@
-; Breakout Forge XAUUSD M5 EA v1.09
-; Exness Raw Spread, 3-digit gold, commission 0.07 USD / 0.01 lot RT
-; 0.10 fixed lot. Money-defined stop (no ATR). Selectable width gate.
-; WidthGateMode: 0=POINTS 1=PERCENT 2=EITHER 3=BOTH
-; Flat 2.00 USD max loss per trade at 0.10 lot, whatever the balance.
+; Breakout Forge XAUUSD M5 EA v1.10
+; Exness Raw Spread (server = UTC+0 all year), 3-digit gold.
+; NEW YORK ORB with AUTOMATIC DST (UTC-4 summer / UTC-5 winter).
+; RangeMode: 0=SESSION 1=DONCHIAN 2=ORB   DSTMode: 0=AUTO 1=SUMMER 2=WINTER
+; NY ORB with a flat 2.00 USD max loss per trade at 0.10 lot.
 ; ---
 MagicNumber=260915
 FixedLots=0.1
@@ -25,10 +25,16 @@ EnableTrailingStop=1
 TrailingStartPoints=700.0
 TrailingDistancePoints=100.0
 TrailingStepPoints=100.0
-RangeMode=0
+RangeMode=2
 RangeStartHour=0
 RangeEndHour=7
 DonchianBars=20
+DSTMode=0
+ServerGMTOffsetHours=0
+NYOpenHour=9
+NYOpenMinute=30
+ORBMinutes=15
+ORBTradeMinutes=330
 ShowRangeBox=1
 BufferMode=0
 BufferFixedPoints=250.0
@@ -40,25 +46,26 @@ RetestTolerancePoints=150.0
 UseVolatilityGate=1
 MinRangeSpreadMult=5.0
 WidthGateMode=2
-MinRangePoints=4000
+MinRangePoints=2500
 MaxRangePoints=100000
 MinRangePercent=0.10
 MaxRangePercent=3.00
 AllowReEntry=1
-MaxBreakoutsPerRange=3
+MaxBreakoutsPerRange=5
 StopByRangeOpposite=1
 StopRangePadPoints=400.0
 TargetMode=0
 MeasuredMoveMult=1.0
 MinTargetCostMult=3.0
 UseSessionFilter=1
+UseNYSessionClock=1
 TradeStartHour=8
-TradeEndHour=20
+TradeEndHour=16
 BlockRollover=1
 RolloverStartHour=20
 RolloverEndHour=22
-MaxTradesPerDay=3
-MaxDailyLossUSD=6.0
+MaxTradesPerDay=10
+MaxDailyLossUSD=8.0
 CommissionPer001LotRT=0.07
 ShowHUD=1
 HudLanguage=0
