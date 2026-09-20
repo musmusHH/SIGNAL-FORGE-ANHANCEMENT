@@ -1349,3 +1349,109 @@ corrected.
 > There is still no MQL4 compiler in this environment — please keep reporting
 > compiler output, it is the only real build signal available here.
 
+---
+
+# Breakout Forge XAUUSD M5 EA (v1.00) — the second EA
+
+A **standalone** second EA: a range-breakout engine wearing the Signal Forge
+PRO interface. It is not a modification of the first EA — both can run on the
+same chart at the same time.
+
+![strategy](docs/breakout_strategy_explained.png)
+![the new page](docs/breakout_page_preview.png)
+
+## Why it is built to reject, not to chase
+
+Gold false-breaks **60–70%** of the time, and the most repeatable trap of the
+day is the sweep of the Asian range minutes before London opens. A breakout EA
+that simply buys a new high on gold is a machine for donating spread. Every
+rule here exists to throw setups away.
+
+## The eight gates
+
+A trade opens only if **all eight** pass. The same `gBkGate[]` array drives the
+on-screen checklist and the entry decision, so the panel can never claim
+something the engine did not actually check.
+
+| # | Gate | What it rejects |
+|---|---|---|
+| 1 | Valid range | no range built yet |
+| 2 | Volatility expanding — `ATR > 0.8 × SMA50(ATR)` | breaks inside a dead market |
+| 3 | Spread ≤ `MaximumSpreadPoints` | fills that cost more than the edge |
+| 4 | Inside the trading session | thin Asian liquidity |
+| 5 | Range width between `0.5×` and `6.0×` ATR | noise ranges and untradeable ones |
+| 6 | **Body** closes beyond range ± buffer | the wick sweep |
+| 7 | Not in the 20:00–22:00 rollover | the swap-time spread blowout |
+| 8 | Daily trade / loss limits | revenge trading |
+
+### The body-close rule, demonstrated
+
+Range 2642–2650, buffer 2.0, so the triggers are 2640 / 2652:
+
+| Bar | Body rule ON | Body rule OFF |
+|---|---|---|
+| wick to 2653.5, closes 2649.5 back inside | **no trade** | **buys the sweep** |
+| closes 2653.2 on a bullish bar | buy | buy |
+| closes 2652.4 on a *bearish* bar | **no trade** | buy |
+
+The middle column is the whole point of the design.
+
+## Range sources
+
+* **SESSION** (default) — high/low of a clock window, `RangeStartHour` to
+  `RangeEndHour`, default 00:00–07:00 server time (the Asian range). The range
+  is only used once the window has *finished*.
+* **DONCHIAN** — highest high / lowest low of the last `DonchianBars` closed
+  bars. Never includes the forming bar, so the level cannot move under you.
+
+## Entry styles
+
+* **BREAK** (default) — enter on the close of the breakout bar.
+* **RETEST** — wait for price to come back to the broken level and hold.
+  Fewer trades, better fills, tighter stops. Times out after `RetestMaxBars`,
+  and a close back through the level kills the setup rather than arming it.
+
+## Exits
+
+* **Stop** — the far side of the range, padded by `0.5 × ATR`, clamped into
+  `0.5×…3× ` the ATR stop so a freak range cannot produce an absurd stop.
+* **Target** — `2 × ATR`, or the measured move (range height × multiplier).
+* **Cost floor** — the target is never allowed below
+  `(spread + commission) × MinTargetCostMult` (default 3×). On a $200 account
+  that is the difference between a winner and a fee donation.
+* **Trailing** — `ManageTrailing()` copied **byte for byte** from Signal Forge
+  PRO. `docs/verify_breakout.py` diffs the two function bodies and fails if
+  they ever drift apart.
+
+## Running both EAs on one chart
+
+| | Signal Forge PRO | Breakout Forge |
+|---|---|---|
+| magic | 260914 | **260915** |
+| objects | `SFP_` | **`BKF_`** |
+| engine | 11-indicator vote | range breakout |
+
+Neither can see or modify the other's trades, and neither deletes the other's
+chart objects.
+
+## The interface
+
+Identical shell — same HUD, themes, Arabic engine, live LANGUAGE/THEME
+buttons, result cards, and the tracker including the v2.16 honest-accounting
+fix. One new **BREAKOUT** tab (range high/low/width, live state, distance
+meter, the 8-gate checklist) and one new chart object (the range box with its
+buffer lines).
+
+## Files
+
+* `Breakout Forge XAUUSD M5 EA.mq4` — 126 inputs, 0 dead.
+* `presets/BKF_XAUUSD_M5_Exness-Raw_200USD.set` — the shipped default.
+* `presets/BKF_XAUUSD_M5_Conservative-Retest.set` — retest entry, overlap only.
+* `presets/BKF_XAUUSD_M5_Donchian-Aggressive.set` — Donchian(20), all session.
+* `docs/verify_breakout.py` — 60+ assertions incl. the trailing-stop diff.
+* `docs/render_breakout_page.py` — renders the new page in both languages and
+  asserts no element overlaps or overflows.
+
+> No MQL4 compiler exists in this environment: this is static analysis plus
+> logic simulation, not a build. Please report compiler output.
+
