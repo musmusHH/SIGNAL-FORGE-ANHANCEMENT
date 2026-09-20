@@ -1,6 +1,7 @@
-; Breakout Forge XAUUSD M5 EA v1.02
+; Breakout Forge XAUUSD M5 EA v1.03
 ; Exness Raw Spread, 3-digit gold, commission 0.07 USD / 0.01 lot RT
-; Donchian(20), break entry, re-entry on, wider daily budget
+; RISK IS SIZED FROM THE STOP - the EA will SKIP a trade it cannot afford.
+; Donchian(20), 2% risk, wider budget - intended for 1000 USD or more
 ; ---
 MagicNumber=260915
 FixedLots=0.01
@@ -10,14 +11,19 @@ OnePositionOnly=1
 CloseOnOppositeSignal=1
 TradeOnClosedBar=1
 TradeComment=Breakout Forge
-StopLossMode=0
-TakeProfitMode=0
+TakeProfitMode=1
 ATRLength=14
-StopLossATR=1.8
+StopLossATR=1.5
 TakeProfitATR=2.4
 TakeProfitPoints=5000.0
-RiskPercent=0.5
+MinRewardRiskRatio=1.5
 RiskReferenceBalance=0.0
+UseRiskSizing=1
+RiskPerTradePercent=2.0
+MaxRiskPerTradeUSD=0.0
+MaxLots=0.50
+SkipIfRiskTooHigh=1
+MaxStopATRMult=3.0
 EnableTrailingStop=1
 TrailingStartPoints=700.0
 TrailingDistancePoints=100.0
@@ -44,6 +50,7 @@ AllowReEntry=1
 MaxBreakoutsPerRange=4
 StopByRangeOpposite=1
 StopRangePadATR=0.5
+StopClampATRMult=1.5
 TargetMode=0
 MeasuredMoveMult=1.0
 MinTargetCostMult=3.0
@@ -55,6 +62,7 @@ RolloverStartHour=20
 RolloverEndHour=22
 MaxTradesPerDay=8
 MaxDailyLossUSD=14.0
+MaxOpenLossUSD=12.0
 CommissionPer001LotRT=0.07
 ShowHUD=1
 HudLanguage=0

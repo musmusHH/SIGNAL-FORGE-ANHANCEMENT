@@ -119,7 +119,7 @@ print("\n5. exits")
 check("stop can use the opposite side of the range",
       "StopByRangeOpposite" in BK and "gBkLow  - pad" in BK)
 check("structural stop is clamped to a sane band around ATR",
-      re.search(r'MathMax\(atrSLDistance \* 0\.5,\s*\n\s*MathMin\(structural, atrSLDistance \* 3\.0\)\)', BK) is not None)
+      re.search(r'MathMax\(atrSLDistance \* 0\.5,\s*\n\s*MathMin\(structural, atrSLDistance \* MathMax\(1\.0, StopClampATRMult\)\)\)', BK) is not None)
 check("measured-move target available", "BK_TP_MEASURED" in BK)
 check("target floored at a multiple of real cost",
       "MinTargetCostMult" in BK and "SpreadPoints() + gCostPointsRT" in BK)
@@ -209,6 +209,71 @@ check("BUILDING RANGE only claimed while actually forming",
       re.search(r'if\(gBkForming\)\s*return T\("BUILDING RANGE"\)', BK) is not None)
 for k in ("COLLECTING", "FAILED BREAKS"):
     check(f'"{k}" is translated', f'if(k == "{k}")' in BK)
+
+print("\n7d. RISK CONTROL (the 1-trade wipeout post-mortem)")
+# A 94% win rate ended at -0.09 because the lot was constant while the stop
+# was structural: a 95.65 USD stop at 0.10 lots = 956 USD risk on a 429 USD
+# account. These checks pin every part of that fix.
+check("lot is derived from the stop", "double LotForRisk(double slDistance" in BK)
+check("OpenPosition sizes AFTER the stop is final",
+      BK.index("double lots = LotForRisk(") > BK.index("slDistance = MathMax(slDistance, minimum);"))
+check("the constant-lot line is gone",
+      "double lots  = NormalizeLots(FixedLots);" not in CODE)
+check("risk budget uses equity", "AccountEquity()" in BK and "double RiskBudgetUSD()" in BK)
+check("money per lot comes from broker tick data",
+      "double MoneyPerLot(double dist)" in BK and "MODE_TICKVALUE" in BK)
+check("a trade is REFUSED when min lot exceeds the budget",
+      "SkipIfRiskTooHigh" in BK and re.search(r'why = T\("RISK TOO HIGH"\);\s*\n\s*return 0;', BK) is not None)
+check("OpenPosition aborts on lots <= 0",
+      re.search(r'if\(lots <= 0\)\s*\n\s*\{', BK) is not None)
+check("NormalizeLots floor-up cannot smuggle risk through",
+      "riskUSD > budget * 1.02" in BK)
+check("absolute stop-width veto exists",
+      "MaxStopATRMult" in BK and 'gBlockReason = T("STOP TOO WIDE");' in BK)
+check("reward:risk floor exists", "MinRewardRiskRatio" in BK and "slDistance * MinRewardRiskRatio" in BK)
+check("R:R floor default beats 1:1",
+      float(re.search(r'MinRewardRiskRatio\s*=\s*([\d.]+)', BK).group(1)) >= 1.0)
+check("TP default is no longer 5000 points (= $5 on 3-digit gold)",
+      re.search(r'TakeProfitMode\s*=\s*TP_By_ATR', BK) is not None)
+check("floating-loss guard exists", "void EnforceFloatingLossCap()" in BK)
+check("guard runs on every tick, right after trailing",
+      re.search(r'ManageTrailing\(\);\s*\n(?:\s*//[^\n]*\n)*\s*EnforceFloatingLossCap\(\);', BK) is not None)
+check("guard counts swap and commission", "OrderProfit() + OrderSwap() + OrderCommission()" in BK)
+check("guard also bounds realised+open against the daily cap",
+      "(gDayNet + floating) <= -MathAbs(MaxDailyLossUSD)" in BK)
+check("structural stop is OFF by default (27-95 USD wide on a 7h range)",
+      re.search(r'^input\s+bool\s+StopByRangeOpposite\s*=\s*false', BK, re.M) is not None)
+check("structural clamp is configurable and tighter than 3x",
+      "StopClampATRMult" in BK and
+      float(re.search(r'StopClampATRMult\s*=\s*([\d.]+)', BK).group(1)) <= 2.0)
+check("obsolete SL_By_Risk_Percent mode removed",
+      "SL_By_Risk_Percent" not in BK and "RiskStopDistance" not in BK)
+check("console reports the risk budget, not a static lot",
+      'T("RISK") + " $" + Fmt(RiskBudgetUSD(), 2)' in BK)
+for k in ("STOP TOO WIDE", "RISK TOO HIGH", "LOSS CAP"):
+    check(f'"{k}" is translated', f'if(k == "{k}")' in BK)
+
+# --- arithmetic: replay the real trade that killed the account ---
+PV = 100.0          # gold: 1.00 price move = 100 USD per 1.00 lot
+def lot_for(stop_usd, equity, pct, maxlots=0.50, minlot=0.01):
+    budget = equity * pct / 100.0
+    per    = stop_usd * PV
+    import math as _m
+    raw    = min(budget / per, maxlots)
+    lot    = _m.floor(raw / 0.01 + 1e-7) * 0.01
+    if lot < minlot or per * lot > budget * 1.02: return 0.0, per * minlot
+    return lot, per * lot
+_pct = float(re.search(r'RiskPerTradePercent\s*=\s*([\d.]+)', BK).group(1))
+_lot, _risk = lot_for(95.65, 429.60, _pct)
+check(f"trade #17 (95.65 stop, 429.60 equity) is refused, not sized at 0.10",
+      _lot == 0.0)
+check("old behaviour would have risked >200% of the account",
+      95.65 * PV * 0.10 / 429.60 > 2.0)
+# and a normal ATR stop must still be tradeable on 200 USD
+_sl = float(re.search(r'StopLossATR\s*=\s*([\d.]+)', BK).group(1))
+_lot2, _risk2 = lot_for(2.0 * _sl, 200.0, _pct)   # ATR $2.00
+check(f"a normal ATR stop is still tradeable on $200 ({_lot2:.2f} lots, ${_risk2:.2f})",
+      _lot2 >= 0.01 and _risk2 <= 200.0 * _pct / 100.0 * 1.02)
 
 print("\n8. the new page")
 check("two tabs: CORE and BREAKOUT",

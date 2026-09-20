@@ -1351,7 +1351,7 @@ corrected.
 
 ---
 
-# Breakout Forge XAUUSD M5 EA (v1.02) — the second EA
+# Breakout Forge XAUUSD M5 EA (v1.03) — the second EA
 
 A **separate EA with its own strategy**, not a variant of Signal Forge. Exactly
 two things are reused from PRO — the **visual shell** (HUD, themes, Arabic
@@ -1421,6 +1421,61 @@ The middle column is the whole point of the design.
 * **RETEST** — wait for price to come back to the broken level and hold.
   Fewer trades, better fills, tighter stops. Times out after `RetestMaxBars`,
   and a close back through the level kills the setup rather than arming it.
+
+## The one-trade wipeout (fixed in v1.03)
+
+![post-mortem](docs/breakout_risk_postmortem.png)
+
+A backtest went **16 wins, 1 loss** — and finished at **-$0.09** from a $200
+deposit. The win rate was 94 %. Three independent defects combined:
+
+**1. The lot was constant while the stop was structural.**
+
+```
+double lots = NormalizeLots(FixedLots);   // always 0.10
+```
+
+The stop came from the far side of the range, so it floated between **$27.62
+and $95.65**. Risk per trade therefore floated too — the last trade risked
+`0.10 × $95.65 × 100 = $956` on a **$429.60** account, i.e. **223 % of
+equity**. The broker stopped it out before the EA's own stop was reached.
+
+**2. Reward was smaller than risk on every single trade.** `TakeProfitPoints
+= 5000` on 3-digit gold is `5000 × 0.001 = $5.00`, against stops of $27–95.
+Planned R:R was between **1:0.05 and 1:0.18**. Sixteen winners earned
+**+$229.60**; one loser took **-$429.69**. At that ratio no win rate is
+survivable.
+
+**3. The daily loss cap could not fire.** `MaxDailyLossUSD` is checked
+*before* an entry, against already-closed trades. Trade 17 opened with the day
+green and then lost $429 while open. Nothing was watching the live position.
+
+### What changed
+
+| | before | after |
+|---|---|---|
+| lot | `FixedLots`, constant | **derived from the stop** via `LotForRisk()` |
+| risk/trade | 12 – 223 % of equity | **1 – 2 %**, `RiskPerTradePercent` |
+| unaffordable trade | taken anyway | **refused** (`SkipIfRiskTooHigh`) |
+| target | $5.00 flat | `TP_By_ATR` + **`MinRewardRiskRatio` 1.5 floor** |
+| open position | unmonitored | **`EnforceFloatingLossCap()` every tick** |
+| stop width | unbounded | **`MaxStopATRMult`** veto |
+
+The order of operations in `OpenPosition()` is now the whole point: the stop
+is finalised **first**, then the lot is derived from it, then the target is
+floored against both cost and the stop. Sizing can return **zero**, and zero
+means the trade does not happen — `verify_breakout.py` §7d replays trade 17
+and asserts it is refused.
+
+**`StopByRangeOpposite` is now OFF by default.** The far side of a 7-hour
+Asian range is $27–95 away, and at the 0.01 lot minimum that *is* $27–95 of
+risk. No $200 account can carry it. Turn it back on above roughly $2000
+equity, where the clamp (`StopClampATRMult`, default 1.5) keeps it sane.
+
+**An honest limitation:** with gold near $5000, a $200 account can only afford
+the tighter ATR setups. The EA will now **skip** trades rather than oversize
+them, so expect fewer trades — that is the fix working, not a fault. The
+journal names the reason (`RISK TOO HIGH`, `STOP TOO WIDE`) every time.
 
 ## The "NO VALID RANGE" bug (fixed in v1.02)
 
@@ -1541,8 +1596,8 @@ state — CORE panel, execution console, BREAKOUT page — read one function,
 
 ## Files
 
-* `Breakout Forge XAUUSD M5 EA.mq4` — 4,313 lines, **85 inputs, 0 dead**,
-  111 functions (none unused), 138 dictionary keys (no duplicates).
+* `Breakout Forge XAUUSD M5 EA.mq4` — 4,493 lines, **92 inputs, 0 dead**,
+  114 functions (none unused), 147 dictionary keys (no duplicates).
 * `presets/BKF_XAUUSD_M5_Exness-Raw_200USD.set` — the shipped default.
 * `presets/BKF_XAUUSD_M5_Conservative-Retest.set` — retest entry, overlap only.
 * `presets/BKF_XAUUSD_M5_Donchian-Aggressive.set` — Donchian(20), all session.
@@ -1557,6 +1612,8 @@ state — CORE panel, execution console, BREAKOUT page — read one function,
   in `ReEntryResult()`.
 * `docs/render_width_gate.py` — the old vs new width gate, sweeping real ATR
   and range values.
+* `docs/render_risk_postmortem.py` — the 17-trade equity curve and the three
+  causes of the wipeout.
 
 > No MQL4 compiler exists in this environment: this is static analysis plus
 > logic simulation, not a build. Please report compiler output.

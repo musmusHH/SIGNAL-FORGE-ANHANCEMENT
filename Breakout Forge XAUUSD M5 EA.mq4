@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                Breakout Forge XAUUSD M5 EA       |
-//|                    QUANTUM HUD  .  v1.02  .  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  .  v1.03  .  MQL4 / MetaTrader 4 |
 //|                                                                  |
 //| A RANGE BREAKOUT engine wearing the Signal Forge PRO interface.  |
 //|                                                                  |
@@ -55,7 +55,6 @@
 //                          E N U M S                               //
 //==================================================================//
 // ---- ORIGINAL v1 STRATEGY ENUMS -------------------------------------
-enum EA_SL_MODE { SL_By_ATR = 0, SL_By_Risk_Percent = 1 };
 enum EA_TP_MODE { TP_By_Points = 0, TP_By_ATR = 1 };
 
 enum ENUM_SF_LANG
@@ -116,14 +115,33 @@ input bool   TradeOnClosedBar       = true;     // Evaluate on the closed bar
 input string TradeComment           = "Breakout Forge"; // Order comment
 
 input string __02 = "======== STOP LOSS / TAKE PROFIT ========"; // .
-input EA_SL_MODE StopLossMode       = SL_By_ATR;    // Stop loss mode
-input EA_TP_MODE TakeProfitMode     = TP_By_Points; // Take profit mode
+input EA_TP_MODE TakeProfitMode     = TP_By_ATR;    // Take profit mode
 input int    ATRLength              = 14;       // ATR length
-input double StopLossATR            = 1.8;      // Stop loss = ATR x
+input double StopLossATR            = 1.5;      // Stop loss = ATR x
 input double TakeProfitATR          = 2.4;      // Take profit = ATR x
-input double TakeProfitPoints       = 5000.0;   // Take profit (points)
-input double RiskPercent            = 0.5;      // Risk % (risk-based SL mode)
+input double TakeProfitPoints       = 5000.0;   // Take profit (points, TP_By_Points only)
+// The target must beat the stop or a high win rate still loses money. The
+// engine enforces this ratio as a FLOOR on the target, after every other
+// target rule has run. 1.5 means "never aim for less than 1.5x the risk".
+input double MinRewardRiskRatio     = 1.5;      // Minimum target / stop ratio (0=off)
 input double RiskReferenceBalance   = 0.0;      // 0 = current account balance
+
+// ---- HARD RISK CONTROL (added v1.03 after a 1-trade account wipeout) ----
+// The lot used to be a constant while the stop was structural, so risk per
+// trade floated with the range width. A 95 USD stop on 0.10 lots is 956 USD
+// of risk - on a 429 USD account that is a margin call, and that is exactly
+// how a 16-win streak ended at -0.09. The lot is now DERIVED from the stop.
+input bool   UseRiskSizing          = true;     // Size the lot from the stop distance
+input double RiskPerTradePercent    = 2.0;      // Risk per trade (% of equity)
+input double MaxRiskPerTradeUSD     = 0.0;      // Hard cap in USD (0 = off)
+input double MaxLots                = 0.50;     // Never exceed this lot
+// If even the broker minimum lot risks more than the budget, the only safe
+// action is to SKIP the trade. Leave this true; setting it false restores
+// the old behaviour of trading anyway at minimum lot.
+input bool   SkipIfRiskTooHigh      = true;     // Refuse trades that exceed the budget
+// A stop wider than this many ATRs means the structure is too far away to
+// pay for. Independent of the clamp, because the clamp scales WITH atr.
+input double MaxStopATRMult         = 3.0;      // Reject stops wider than ATR x this
 
 input string __03 = "======== TRAILING STOP ========"; // .
 input bool   EnableTrailingStop     = true;     // Enable trailing stop
@@ -178,8 +196,12 @@ input bool   AllowReEntry             = true;   // Re-enter after a failed / rej
 input int    MaxBreakoutsPerRange     = 3;      // Max TRADES one range may produce
 
 input string __04c = "======== BREAKOUT EXITS ========"; // .
-input bool   StopByRangeOpposite      = true;   // Stop at the far side of the range
+// OFF by default. The far side of a 7-hour Asian range is 27-95 USD away;
+// at the 0.01 lot minimum that IS 27-95 USD of risk, which no small account
+// can carry. Switch it on only above ~2000 USD equity.
+input bool   StopByRangeOpposite      = false;  // Stop at the far side of the range
 input double StopRangePadATR          = 0.5;    // ...padded by ATR x this
+input double StopClampATRMult         = 1.5;    // Clamp structural stop to ATRstop x this
 input ENUM_BK_TP TargetMode           = BK_TP_ATR; // Target style
 input double MeasuredMoveMult         = 1.0;    // MEASURED: range height x this
 input double MinTargetCostMult        = 3.0;    // Target >= (spread+commission) x this
@@ -195,7 +217,10 @@ input bool   BlockRollover            = true;   // Skip the 20:00-22:00 swap win
 input int    RolloverStartHour        = 20;     // Rollover blackout start
 input int    RolloverEndHour          = 22;     // Rollover blackout end
 input int    MaxTradesPerDay          = 6;      // 0 = unlimited
-input double MaxDailyLossUSD          = 10.0;   // Stop for the day after this loss (0=off)
+input double MaxDailyLossUSD          = 10.0;   // Realised daily loss cap
+// Checked on every tick against the OPEN position, because a pre-trade
+// daily cap cannot stop a trade that is already running.
+input double MaxOpenLossUSD           = 8.0;    // Emergency close at this open loss (0=off)
 
 input string __10 = "======== BROKER COST (DISPLAY ONLY) ========"; // .
 // Commission never gates a trade in the original strategy - it is used only
@@ -669,15 +694,72 @@ double NormalizeLots(double lots)
    return NormalizeDouble(MathFloor(lots / step + 0.0000001) * step, 2);
   }
 
-double RiskStopDistance(double lots)
+// What one lot loses if `dist` (in PRICE) goes against it. Derived from the
+// broker's own tick figures so it is correct for gold, FX or indices.
+double MoneyPerLot(double dist)
   {
-   double balance   = (RiskReferenceBalance > 0) ? RiskReferenceBalance : AccountBalance();
-   double money     = balance * MathMax(0.0, RiskPercent) / 100.0;
    double tickSize  = MarketInfo(Symbol(), MODE_TICKSIZE);
    double tickValue = MarketInfo(Symbol(), MODE_TICKVALUE);
-   if(tickSize <= 0) tickSize = Point;
-   if(money <= 0 || tickValue <= 0 || lots <= 0) return 0;
-   return MathMax(Point, money * tickSize / (lots * tickValue));
+   if(tickSize <= 0)  tickSize  = Point;
+   if(tickValue <= 0) tickValue = 1.0;
+   return (dist / tickSize) * tickValue;
+  }
+
+// The risk budget for one trade, in account currency.
+double RiskBudgetUSD()
+  {
+   double base = (RiskReferenceBalance > 0) ? RiskReferenceBalance
+                                            : AccountEquity();
+   if(base <= 0) base = AccountBalance();
+   double usd = base * MathMax(0.0, RiskPerTradePercent) / 100.0;
+   if(MaxRiskPerTradeUSD > 0) usd = MathMin(usd, MaxRiskPerTradeUSD);
+   return usd;
+  }
+
+// THE FIX. The lot is derived from the stop, never the other way round, so
+// a wide structural stop produces a small position instead of a large loss.
+// Returns 0 when even the minimum lot exceeds the budget, which means the
+// trade must be skipped rather than taken at a size the account cannot pay.
+double LotForRisk(double slDistance, double &riskUSD, string &why)
+  {
+   why = ""; riskUSD = 0;
+   double minLot = MarketInfo(Symbol(), MODE_MINLOT);
+   double maxLot = MarketInfo(Symbol(), MODE_MAXLOT);
+   if(minLot <= 0) minLot = 0.01;
+   if(maxLot <= 0) maxLot = 100.0;
+   if(MaxLots > 0) maxLot = MathMin(maxLot, MaxLots);
+
+   if(!UseRiskSizing)
+     {
+      double fixed = NormalizeLots(MathMin(FixedLots, maxLot));
+      riskUSD = MoneyPerLot(slDistance) * fixed;
+      return fixed;
+     }
+   if(slDistance <= 0) { why = T("NO STOP"); return 0; }
+
+   double perLot = MoneyPerLot(slDistance);
+   if(perLot <= 0) { why = T("NO TICK VALUE"); return 0; }
+
+   double budget = RiskBudgetUSD();
+   if(budget <= 0) { why = T("NO RISK BUDGET"); return 0; }
+
+   double raw = budget / perLot;               // lots the budget can afford
+   double lots = NormalizeLots(MathMin(raw, maxLot));
+
+   // NormalizeLots() floors up to minLot, so an affordable-looking lot can
+   // still blow the budget. Check the REAL number, not the requested one.
+   riskUSD = perLot * lots;
+   if(lots < minLot || riskUSD > budget * 1.02)
+     {
+      if(SkipIfRiskTooHigh)
+        {
+         why = T("RISK TOO HIGH");
+         return 0;
+        }
+      lots    = NormalizeLots(minLot);
+      riskUSD = perLot * lots;
+     }
+   return lots;
   }
 
 int CountOwnPositions(int &type, int &ticket)
@@ -723,11 +805,13 @@ bool OpenPosition(int type)
       return false;
      }
 
-   double lots  = NormalizeLots(FixedLots);
    double entry = (type == OP_BUY) ? Ask : Bid;
    double atr   = iATR(NULL, 0, MathMax(1, ATRLength), 1);
    double atrSLDistance = atr * MathMax(0.1, StopLossATR);
-   double slDistance = (StopLossMode == SL_By_Risk_Percent) ? RiskStopDistance(lots) : atrSLDistance;
+   // The stop is decided FIRST and the lot is derived from it further down.
+   // Doing it the other way round is what allowed a 95 USD structural stop
+   // to be taken at a constant 0.10 lots = 956 USD of risk.
+   double slDistance = atrSLDistance;
    double tpDistance = (TakeProfitMode == TP_By_Points)
                        ? MathMax(Point, TakeProfitPoints * Point)
                        : atr * MathMax(0.1, TakeProfitATR);
@@ -746,12 +830,42 @@ bool OpenPosition(int type)
       // either direction: clamp it into a sane band around ATR.
       if(structural > 0)
          slDistance = MathMax(atrSLDistance * 0.5,
-                              MathMin(structural, atrSLDistance * 3.0));
+                              MathMin(structural, atrSLDistance * MathMax(1.0, StopClampATRMult)));
      }
 
    // Measured move: a range that was N wide often travels N again.
    if(TargetMode == BK_TP_MEASURED && gBkValid && gBkHigh > gBkLow)
       tpDistance = (gBkHigh - gBkLow) * MathMax(0.1, MeasuredMoveMult);
+
+   //--- reject a stop that is simply too far away --------------------
+   // The clamp above scales with ATR, so on a volatile day it still permits
+   // an enormous stop. This is an absolute structural veto.
+   if(MaxStopATRMult > 0 && atr > 0 && slDistance > atr * MaxStopATRMult)
+     {
+      gLastAction  = "BLOCKED: STOP " + DoubleToString(slDistance / Point, 0) + " PTS TOO WIDE";
+      gBlockReason = T("STOP TOO WIDE");
+      Journal(gLastAction);
+      return false;
+     }
+
+   double minimum = (MarketInfo(Symbol(), MODE_STOPLEVEL) + 2) * Point;
+   slDistance = MathMax(slDistance, minimum);
+
+   //--- SIZE THE POSITION FROM THE STOP ------------------------------
+   // Everything above decided WHERE the stop goes. Only now is it known
+   // how many lots that stop can be afforded at.
+   double riskUSD = 0; string riskWhy = "";
+   double lots = LotForRisk(slDistance, riskUSD, riskWhy);
+   if(lots <= 0)
+     {
+      gLastAction  = "BLOCKED: " + riskWhy + " (stop " +
+                     DoubleToString(slDistance / Point, 0) + " pts = $" +
+                     DoubleToString(MoneyPerLot(slDistance) * MarketInfo(Symbol(), MODE_MINLOT), 2) +
+                     " at min lot, budget $" + DoubleToString(RiskBudgetUSD(), 2) + ")";
+      gBlockReason = riskWhy;
+      Journal(gLastAction);
+      return false;
+     }
 
    //--- cost floor ---------------------------------------------------
    // Commission plus spread is a real hurdle on a 200 USD account. A
@@ -761,8 +875,15 @@ bool OpenPosition(int type)
    double tpFloor    = costPoints * MathMax(1.0, MinTargetCostMult) * Point;
    if(tpDistance < tpFloor) tpDistance = tpFloor;
 
-   double minimum = (MarketInfo(Symbol(), MODE_STOPLEVEL) + 2) * Point;
-   slDistance = MathMax(slDistance, minimum);
+   //--- reward/risk floor --------------------------------------------
+   // A 94% win rate still lost the account because every target was a
+   // fraction of its stop. The target must beat the stop by this ratio.
+   if(MinRewardRiskRatio > 0 && slDistance > 0)
+     {
+      double rrFloor = slDistance * MinRewardRiskRatio;
+      if(tpDistance < rrFloor) tpDistance = rrFloor;
+     }
+
    tpDistance = MathMax(tpDistance, minimum);
    double sl = (type == OP_BUY) ? entry - slDistance : entry + slDistance;
    double tp = (type == OP_BUY) ? entry + tpDistance : entry - tpDistance;
@@ -1882,6 +2003,15 @@ string T(const string k)
    if(k == "of")                        return "\x0645\x0646";
    if(k == "bars")                      return "\x0634\x0645\x0639\x0629";
    if(k == "minimum")                  return "\x0627\x0644\x062D\x062F\x0020\x0627\x0644\x0623\x062F\x0646\x0649";
+   if(k == "STOP TOO WIDE")             return "\x0627\x0644\x0648\x0642\x0641\x0020\x0628\x0639\x064A\x062F\x0020\x062C\x062F\x0627";
+   if(k == "RISK TOO HIGH")             return "\x0627\x0644\x0645\x062E\x0627\x0637\x0631\x0629\x0020\x0639\x0627\x0644\x064A\x0629\x0020\x062C\x062F\x0627";
+   if(k == "NO STOP")                   return "\x0644\x0627\x0020\x064A\x0648\x062C\x062F\x0020\x0648\x0642\x0641";
+   if(k == "NO TICK VALUE")             return "\x0644\x0627\x0020\x062A\x0648\x062C\x062F\x0020\x0642\x064A\x0645\x0629\x0020\x0627\x0644\x0646\x0642\x0637\x0629";
+   if(k == "NO RISK BUDGET")            return "\x0644\x0627\x0020\x062A\x0648\x062C\x062F\x0020\x0645\x064A\x0632\x0627\x0646\x064A\x0629\x0020\x0645\x062E\x0627\x0637\x0631\x0629";
+   if(k == "LOSS CAP")                  return "\x062D\x062F\x0020\x0627\x0644\x062E\x0633\x0627\x0631\x0629";
+   if(k == "RISK")                      return "\x0627\x0644\x0645\x062E\x0627\x0637\x0631\x0629";
+   if(k == "lots")                      return "\x0644\x0648\x062A";
+   if(k == "SKIP")                      return "\x062A\x062E\x0637\x064A";
    if(k == "BUILDING RANGE")            return "\x0628\x0646\x0627\x0621\x0020\x0627\x0644\x0646\x0637\x0627\x0642";
    if(k == "BROKEN")                    return "\x062A\x0645\x0020\x0627\x0644\x0627\x062E\x062A\x0631\x0627\x0642";
    if(k == "WAITING RETEST")            return "\x0628\x0627\x0646\x062A\x0638\x0627\x0631\x0020\x0625\x0639\x0627\x062F\x0629\x0020\x0627\x0644\x0627\x062E\x062A\x0628\x0627\x0631";
@@ -2491,7 +2621,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v1.02", TTextDim, 7);
+        "  ·  RAW  ·  v1.03", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -2623,9 +2753,8 @@ void PaintHud()
         AccentSpine(pad + SC(4), y + SC(7), SC(13), TFlat);
         Text(pad + SC(13), y + SC(6), T("EXECUTION CONSOLE"), TText, 8, "Segoe UI Black", SF_FW_BLACK);
 
-        string slTxt = (StopLossMode == SL_By_ATR)
-                       ? ("ATR x " + Fmt(StopLossATR, 2))
-                       : ("RISK " + Fmt(RiskPercent, 2) + "%");
+        string slTxt = "ATR x " + Fmt(StopLossATR, 2);
+        if(StopByRangeOpposite) slTxt = T("RANGE") + " / " + slTxt;
         string tpTxt = (TakeProfitMode == TP_By_ATR)
                        ? ("ATR x " + Fmt(TakeProfitATR, 2))
                        : (Fmt(TakeProfitPoints, 0) + " pts");
@@ -2643,7 +2772,21 @@ void PaintHud()
                                      : "OFF",
                   EnableTrailingStop ? TBull : TTextDim, 7, "Segoe UI Semibold", SF_FW_SEMI);
 
-        Text(pad + SC(12), y + SC(76), T("LOTS") + "  " + Fmt(FixedLots, 2), TTextDim, 7);
+        // The lot is derived from the stop now, so show the RISK BUDGET and
+        // the lot the next fill would actually use - a static FixedLots
+        // readout would be a lie under risk sizing.
+        string lotTxt;
+        if(UseRiskSizing)
+          {
+           double pvAtr = iATR(NULL, 0, MathMax(1, ATRLength), 1) * MathMax(0.1, StopLossATR);
+           double rUSD = 0; string rWhy = "";
+           double nextLot = (pvAtr > 0) ? LotForRisk(pvAtr, rUSD, rWhy) : 0;
+           lotTxt = T("RISK") + " $" + Fmt(RiskBudgetUSD(), 2) + "  ->  " +
+                    ((nextLot > 0) ? Fmt(nextLot, 2) + " " + T("lots")
+                                   : T("SKIP"));
+          }
+        else lotTxt = T("LOTS") + "  " + Fmt(FixedLots, 2);
+        Text(pad + SC(12), y + SC(76), lotTxt, TTextDim, 7);
         TextRight(pad + innerW - SC(12), y + SC(76),
                   T("TRADES TODAY") + " " + IntegerToString(gDayTrades), TTextDim, 7,
                   "Segoe UI Semibold", SF_FW_SEMI);
@@ -3886,13 +4029,13 @@ int OnInit()
       Print("[BK-FORGE] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("BK-FORGE v1.02 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("BK-FORGE v1.03 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
 
    // Print exactly which overlays are armed, so a "nothing is drawn" report
    // can be diagnosed from the Experts log without guesswork.
    string ov = "";
-   Print("[BK-FORGE] v1.02 build | range=",
+   Print("[BK-FORGE] v1.03 build | range=",
          (RangeMode == BK_RANGE_DONCHIAN ? "DONCHIAN" : "SESSION"),
          " | entry=", (EntryMode == BK_ENTRY_RETEST ? "RETEST" : "BREAK"),
          " | width gate=", DoubleToString(MinRangeATRMult, 2), "-",
@@ -4151,6 +4294,41 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
      }
   }
 
+// ---- EMERGENCY FLOATING LOSS GUARD --------------------------------
+// MaxDailyLossUSD is checked BEFORE a trade opens, so it can only ever
+// bound losses that have already been realised. It cannot bound a position
+// that is still open - which is precisely how one trade turned a +229 USD
+// day into a -0.09 USD account. This runs on every tick and closes the book
+// when the open drawdown breaches the cap.
+void EnforceFloatingLossCap()
+  {
+   if(MaxOpenLossUSD <= 0) return;
+
+   double floating = 0; int n = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
+      if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber) continue;
+      if(OrderType() != OP_BUY && OrderType() != OP_SELL) continue;
+      floating += OrderProfit() + OrderSwap() + OrderCommission();
+      n++;
+     }
+   if(n == 0) return;
+
+   // Cap the open loss on its own, and the open loss plus everything already
+   // realised today, so a bad position cannot undo a good day either.
+   bool hitOpen = (floating <= -MathAbs(MaxOpenLossUSD));
+   bool hitDay  = (MaxDailyLossUSD > 0 &&
+                   (gDayNet + floating) <= -MathAbs(MaxDailyLossUSD));
+   if(!hitOpen && !hitDay) return;
+
+   string why = hitOpen ? "OPEN LOSS CAP" : "DAY LOSS CAP (incl. open)";
+   Print("[BK-FORGE] EMERGENCY CLOSE: ", why, " floating $",
+         DoubleToString(floating, 2), " day $", DoubleToString(gDayNet, 2));
+   CloseAllOwn(why);
+   gBlockReason = T("LOSS CAP");
+  }
+
 //==================================================================//
 //              O N   T I C K                                       //
 //==================================================================//
@@ -4159,6 +4337,8 @@ void OnTick()
    // Trailing first - identical order to Signal Forge PRO, and identical
    // code inside ManageTrailing().
    ManageTrailing();
+   // Bound the OPEN loss on every tick, not just before the next entry.
+   EnforceFloatingLossCap();
    if(Bars < 100) return;
 
    PushSpreadSample();
