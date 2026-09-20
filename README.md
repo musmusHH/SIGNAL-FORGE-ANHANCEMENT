@@ -1351,7 +1351,7 @@ corrected.
 
 ---
 
-# Breakout Forge XAUUSD M5 EA (v1.03) — the second EA
+# Breakout Forge XAUUSD M5 EA (v1.04) — the second EA
 
 A **separate EA with its own strategy**, not a variant of Signal Forge. Exactly
 two things are reused from PRO — the **visual shell** (HUD, themes, Arabic
@@ -1421,6 +1421,79 @@ The middle column is the whole point of the design.
 * **RETEST** — wait for price to come back to the broken level and hold.
   Fewer trades, better fills, tighter stops. Times out after `RetestMaxBars`,
   and a close back through the level kills the setup rather than arming it.
+
+## v1.04 — nothing is thrown away any more
+
+The chart used to be **amnesiac**. The range box was a single
+`BKF_RNG_BOX` object that was `ObjectMove()`d when a new range was built, so
+the moment the London session ended yesterday's range ceased to exist. The
+result cards were capped at `MaxResultPills = 25` and, being pixel-anchored,
+were deleted and rebuilt on every scroll. Run a week-long backtest and there
+was nothing left to look at.
+
+Three things now survive the run.
+
+**1. Every range keeps its own box.** Each range is archived the instant it is
+superseded — the stamp change in `UpdateRange()` is exactly that moment — into
+a 512-slot ring buffer, and drawn as its own `HRNG_<starttime>` rectangle that
+is created once and never moved. The colour *is* the verdict:
+
+| Appearance | Meaning |
+|---|---|
+| Filled, green/red | Produced a trade — colour is the break direction |
+| Hollow cyan, solid border | Passed the width gate, never broke |
+| Hollow grey, **dotted** | **Rejected** by the width gate |
+
+That last row is the interesting one: it makes the EA's *refusals* visible, so
+you can scroll back and judge whether a skipped range would actually have paid.
+Each box is labelled with its width in points, its `x`-ratio against the gate,
+and `2T` / `1F` counts for trades and failed breaks.
+
+**2. Every closed trade keeps a permanent marker.** Separate from the cards:
+an `OBJ_TREND` from entry price/time to exit price/time, solid green for a
+winner and dotted red for a loser, with an entry arrow and an exit cross. These
+are **price-anchored**, so unlike the cards they do not need redrawing when you
+scroll, they are **not capped**, and the exit cross carries a tooltip with the
+ticket, lot size and net USD. The cards remain the detailed readout for recent
+trades — 25 of those on screen is already the legibility limit — while the
+markers are the complete record.
+
+**3. Two CSVs are written when the EA stops**, to `MQL4/Files` (or
+`tester/files` after a backtest):
+
+```
+BKF_ranges_<symbol>_<period>_<magic>.csv
+  start, end, high, low, width_points, bars, ratio, valid,
+  trades, failed_breaks, last_dir
+
+BKF_trades_<symbol>_<period>_<magic>.csv
+  ticket, type, lots, open_time, open_price, close_time, close_price,
+  sl, tp, stop_points, target_points, profit, swap, commission, net, comment
+```
+
+The range file is the one worth loading into Excel: sort by `valid` and you can
+measure whether the width gate is earning its keep, which is not a question the
+MT4 report can answer.
+
+![history](docs/breakout_history_preview.png)
+
+### The Donchian trap this had to dodge
+
+In `BK_RANGE_DONCHIAN` mode `BuildRange()` sets `stamp = Time[1]`, so the range
+is "replaced" on **every closed bar** — 288 times a day on M5. Archiving each
+one would have overflowed the 512-slot ring in under two days and covered the
+chart in near-identical boxes. `ArchiveCurrentRange()` therefore extends the
+previous entry in place when the geometry has not moved, and discards a rolling
+channel that produced neither a trade nor a failed break. Session mode is
+untouched: its stamp changes once per session and **every** session range is
+kept, traded or not, because a skipped session is exactly what you want to
+review.
+
+New inputs: `KeepRangeHistory`, `MaxRangeHistory` (80, 0 = unlimited),
+`ShowRangeLabels`, `KeepAllTradeMarkers`, `ExportHistoryCSV` — all on by
+default, all individually switchable if the chart gets busy.
+
+---
 
 ## The one-trade wipeout (fixed in v1.03)
 
@@ -1618,6 +1691,9 @@ state — CORE panel, execution console, BREAKOUT page — read one function,
   hides local variable" warning for both EAs, since there is no compiler in
   this environment. Tested in both directions: it flags the real case and
   passes once fixed.
+* `docs/render_history_preview.py` — what the chart retains after a run:
+  archived range boxes colour-coded by outcome, permanent trade markers and
+  the two CSV schemas.
 
 > No MQL4 compiler exists in this environment: this is static analysis plus
 > logic simulation, not a build. Please report compiler output.

@@ -1,4 +1,4 @@
-; Breakout Forge XAUUSD M5 EA v1.03
+; Breakout Forge XAUUSD M5 EA v1.04
 ; Exness Raw Spread, 3-digit gold, commission 0.07 USD / 0.01 lot RT
 ; RISK IS SIZED FROM THE STOP - the EA will SKIP a trade it cannot afford.
 ; Retest entry, London/NY overlap, 1% risk, tightest stops
@@ -81,6 +81,11 @@ HudMargin=12
 HudRefreshMs=220
 HudInteractive=1
 HudScalePercent=100
+KeepRangeHistory=1
+MaxRangeHistory=80
+ShowRangeLabels=1
+KeepAllTradeMarkers=1
+ExportHistoryCSV=1
 DrawTradeLevels=1
 DrawTradeResults=1
 MaxResultPills=25

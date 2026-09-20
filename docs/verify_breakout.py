@@ -275,6 +275,90 @@ _lot2, _risk2 = lot_for(2.0 * _sl, 200.0, _pct)   # ATR $2.00
 check(f"a normal ATR stop is still tradeable on $200 ({_lot2:.2f} lots, ${_risk2:.2f})",
       _lot2 >= 0.01 and _risk2 <= 200.0 * _pct / 100.0 * 1.02)
 
+print("\n7e. HISTORY RETENTION (post-run analysis)")
+# The live range box is one object that gets MOVED, so without an archive
+# every past range is lost. Cards are pixel-anchored and capped, so most
+# trades leave no lasting record either.
+check("range archive exists", "void ArchiveCurrentRange()" in BK)
+check("archive runs when the range rolls over",
+      re.search(r'if\(stamp != gBkRangeStamp\)\s*\n\s*\{[^}]*?ArchiveCurrentRange\(\);', BK, re.S) is not None)
+check("the live range is archived on deinit too",
+      re.search(r'EventKillTimer\(\);(?:.|\n)*?ArchiveCurrentRange\(\);', BK) is not None)
+check("ring buffer accessors exist",
+      "int ArchivedRanges()" in BK and "int ArchivedSlot(int nth)" in BK)
+check("ring index cannot go negative", "while(i < 0) i += BK_MAX_RANGES;" in BK)
+check("ArchivedSlot bounds-checks", "if(nth < 0 || nth >= have) return -1;" in BK)
+check("past ranges are drawn", "void DrawRangeHistory()" in BK)
+check("history boxes are keyed per range, not reused",
+      'string idB = PFX + "HRNG_" + tag;' in BK and
+      'string tag = IntegerToString((int)gRngStart[k]);' in BK)
+check("colour encodes the outcome",
+      re.search(r'if\(!gRngValid\[k\]\)\s*col = TTextDim;', BK) is not None and
+      "else if(gRngTaken[k] > 0) col = (gRngDir[k] >= 0) ? TBull : TBear;" in BK)
+check("history drawing is reachable from the normal repaint",
+      re.search(r'void DrawRangeObjects\(\)\s*\n\s*\{(?:.|\n){0,400}?DrawRangeHistory\(\);', BK) is not None)
+check("permanent trade markers exist", "void DrawTradeHistoryMarkers()" in BK)
+check("markers are price-anchored OBJ_TREND, not pixel cards",
+      "OBJ_TREND, 0, ot, OrderOpenPrice(), ct, OrderClosePrice()" in BK)
+check("markers are NOT capped by MaxResultPills",
+      re.search(r'void DrawTradeHistoryMarkers\(\)(?:.|\n)*?\n  \}', BK).group(0).find("MaxResultPills") == -1)
+check("marker rebuild is gated on the history count",
+      "if(total == gKnownMarkerHistory) return;" in BK)
+check("markers are reachable from DrawResultPills",
+      re.search(r'void DrawResultPills\(\)(?:.|\n)*?DrawTradeHistoryMarkers\(\);', BK) is not None)
+check("CSV export exists", "void ExportHistoryFiles()" in BK)
+check("two CSVs: ranges and trades",
+      '"BKF_ranges_"' in BK and '"BKF_trades_"' in BK)
+check("range CSV carries the width-gate verdict",
+      re.search(r'FileWrite\(h, "start", "end", "high", "low", "width_points",', BK) is not None and
+      '"ratio", "valid", "trades", "failed_breaks", "last_dir"' in BK)
+check("trade CSV carries stop/target distances and net",
+      '"stop_points", "target_points"' in BK and '"net", "comment"' in BK)
+check("CSV handles are closed", BK.count("FileClose(h") >= 2)
+check("CSV open failure is reported, not ignored",
+      BK.count("INVALID_HANDLE") >= 2)
+check("export is opt-out", re.search(r'^input\s+bool\s+ExportHistoryCSV', BK, re.M) is not None and
+      "if(!ExportHistoryCSV) return;" in BK)
+for i in ("KeepRangeHistory", "MaxRangeHistory", "ShowRangeLabels", "KeepAllTradeMarkers"):
+    check(f"input {i} present", re.search(r'^input[^\n]*\b%s\b' % i, BK, re.M) is not None)
+check("history can be turned off cleanly",
+      'ObjectsDeleteAll(0, PFX + "HRNG_");' in BK and 'ObjectsDeleteAll(0, PFX + "TH_");' in BK)
+
+# DONCHIAN re-stamps every closed bar (stamp = Time[1]), so a naive archive
+# would store 288 boxes a day and overflow the 512-slot ring in under 2 days.
+check("donchian churn is filtered out",
+      "if(RangeMode == BK_RANGE_DONCHIAN && gBkTakenThis == 0 && gBkFailedBreaks == 0)" in BK)
+check("an unchanged box is extended, not duplicated",
+      "MathAbs(gRngHigh[last] - gBkHigh) < gPoint" in BK and "gRngEnd  [last] = Time[0];" in BK)
+check("in-place refresh never loses a trade count",
+      "gRngTaken[last] = MathMax(gRngTaken[last], gBkTakenThis);" in BK)
+check("accessors are defined before the archiver uses them",
+      BK.index("int ArchivedSlot(int nth)") < BK.index("void ArchiveCurrentRange()"))
+# session mode must keep EVERY range, traded or not - that is the whole point
+_arch = re.search(r'void ArchiveCurrentRange\(\)(?:.|\n)*?\n  \}', BK).group(0)
+check("session ranges are archived even when untraded",
+      _arch.count("gBkTakenThis == 0") == 1 and "BK_RANGE_DONCHIAN" in _arch)
+
+# --- ring buffer arithmetic, replayed ---
+CAP = int(re.search(r'#define BK_MAX_RANGES (\d+)', BK).group(1))
+def replay(n, cap):
+    head, count = 0, 0
+    for _ in range(n):
+        head = (head + 1) % cap; count += 1
+    have = count if count < cap else cap
+    out = []
+    for nth in range(have):
+        i = head - 1 - nth
+        while i < 0: i += cap
+        out.append(i)
+    return have, out
+h1, o1 = replay(5, CAP)
+check(f"partial fill: 5 archived -> {h1} retrievable, unique slots",
+      h1 == 5 and len(set(o1)) == 5)
+h2, o2 = replay(CAP + 37, CAP)
+check(f"wrapped: {CAP+37} archived -> {h2} retrievable, all distinct in range",
+      h2 == CAP and len(set(o2)) == CAP and all(0 <= x < CAP for x in o2))
+
 print("\n8. the new page")
 check("two tabs: CORE and BREAKOUT",
       '"TAB_CORE"' in BK and '"TAB_BREAKOUT"' in BK and '"TAB_FILTERS"' not in BK)

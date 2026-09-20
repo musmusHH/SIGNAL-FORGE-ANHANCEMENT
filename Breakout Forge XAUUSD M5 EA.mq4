@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                Breakout Forge XAUUSD M5 EA       |
-//|                    QUANTUM HUD  .  v1.03  .  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  .  v1.04  .  MQL4 / MetaTrader 4 |
 //|                                                                  |
 //| A RANGE BREAKOUT engine wearing the Signal Forge PRO interface.  |
 //|                                                                  |
@@ -126,7 +126,7 @@ input double TakeProfitPoints       = 5000.0;   // Take profit (points, TP_By_Po
 input double MinRewardRiskRatio     = 1.5;      // Minimum target / stop ratio (0=off)
 input double RiskReferenceBalance   = 0.0;      // 0 = current account balance
 
-// ---- HARD RISK CONTROL (added v1.03 after a 1-trade account wipeout) ----
+// ---- HARD RISK CONTROL (added v1.04 after a 1-trade account wipeout) ----
 // The lot used to be a constant while the stop was structural, so risk per
 // trade floated with the range width. A 95 USD stop on 0.10 lots is 956 USD
 // of risk - on a 429 USD account that is a margin call, and that is exactly
@@ -247,9 +247,21 @@ input bool   HudInteractive         = true;     // Buttons + hover + hotkeys
 input int    HudScalePercent        = 100;      // 80..130 UI scale
 
 input string __12 = "======== CHART VISUALS ========"; // .
+// ---- HISTORY / POST-ANALYSIS ----------------------------------------
+// The live range box is ONE object that gets moved when a new range is
+// built, so yesterday's range used to simply vanish. These keep every past
+// range and every closed trade on the chart so a run can be reviewed.
+input bool   KeepRangeHistory        = true;    // Keep every past range on the chart
+input int    MaxRangeHistory         = 80;      // Past ranges to keep (0 = unlimited)
+input bool   ShowRangeLabels         = true;    // Label each past range with its stats
+input bool   KeepAllTradeMarkers     = true;    // Entry->exit line for EVERY closed trade
+input bool   ExportHistoryCSV        = true;    // Write ranges + trades to CSV on deinit
 input bool   DrawTradeLevels        = true;     // Entry/SL/TP lines
 input bool   DrawTradeResults       = true;     // Closed trade result cards
-input int    MaxResultPills         = 25;       // Max result cards on chart
+// Cards are big, pixel-anchored and would overlap into mush past ~30, so
+// this stays capped. The permanent markers (KeepAllTradeMarkers) are the
+// uncapped record; the cards are just the detailed readout for recent trades.
+input int    MaxResultPills         = 25;       // Max result CARDS on chart (markers are uncapped)
 input int    ResultCardFontSize     = 9;        // Result card font size
 input int    ResultCardWidth        = 172;      // Result card width (px)
 input int    ResultCardPadding      = 7;        // Result card text padding (px)
@@ -396,6 +408,26 @@ datetime gBkFormStart  = 0;
 // hit again. gBkFailedBreaks counts those so the panel can show them, and
 // MaxBreakoutsPerRange still caps how many TRADES one range may produce.
 int      gBkFailedBreaks = 0;
+
+// ---- RANGE HISTORY ------------------------------------------------
+// Every completed range is archived here the moment it is superseded, so
+// the chart can keep drawing it and the CSV can report it. Parallel arrays
+// rather than a struct array because MQL4 struct arrays are awkward to
+// resize and this is written once per range, read often.
+#define BK_MAX_RANGES 512
+datetime gRngStart[BK_MAX_RANGES];   // first bar of the range window
+datetime gRngEnd  [BK_MAX_RANGES];   // when it stopped being the live range
+double   gRngHigh [BK_MAX_RANGES];
+double   gRngLow  [BK_MAX_RANGES];
+double   gRngRatio[BK_MAX_RANGES];   // width / expected travel
+int      gRngBars [BK_MAX_RANGES];
+bool     gRngValid[BK_MAX_RANGES];   // did it pass the width gate
+int      gRngTaken[BK_MAX_RANGES];   // trades it produced
+int      gRngFails[BK_MAX_RANGES];   // failed breaks on it
+int      gRngDir  [BK_MAX_RANGES];   // last break direction
+int      gKnownMarkerHistory = -1;   // history count the markers were built for
+int      gRngCount = 0;              // total ever archived (may exceed the ring)
+int      gRngHead  = 0;              // next write slot
 
 // The 8 entry gates, in the order the BREAKOUT page lists them.
 #define BK_GATES 8
@@ -1089,6 +1121,73 @@ bool BuildRange(double &hi, double &lo, datetime &stamp, int &bars)
    return true;
   }
 
+// How many archived ranges are actually retrievable right now.
+int ArchivedRanges()
+  {
+   return (gRngCount < BK_MAX_RANGES) ? gRngCount : BK_MAX_RANGES;
+  }
+
+// Map "n-th most recent archived range" (0 = newest) onto its ring slot.
+int ArchivedSlot(int nth)
+  {
+   int have = ArchivedRanges();
+   if(nth < 0 || nth >= have) return -1;
+   int i = gRngHead - 1 - nth;
+   while(i < 0) i += BK_MAX_RANGES;
+   return i;
+  }
+
+// Archive the range that is about to be replaced, so the chart and the CSV
+// can still show it. Called from UpdateRange() at the moment the stamp
+// changes - that is the only place a range stops being the live one.
+void ArchiveCurrentRange()
+  {
+   if(gBkRangeStamp <= 0 || gBkHigh <= gBkLow) return;   // nothing built yet
+
+   // ---- DONCHIAN GUARD -----------------------------------------------
+   // In DONCHIAN mode BuildRange() stamps the range with Time[1], so the
+   // "range" is superseded on EVERY closed bar - 288 of them a day on M5.
+   // Archiving each one would overflow the ring in under two days and bury
+   // the chart in near-identical boxes. Two filters keep it meaningful:
+   //   1. if the geometry is unchanged, just extend the existing entry;
+   //   2. a rolling channel that produced neither a trade nor a failed
+   //      break carries no analytical signal, so it is not kept.
+   // SESSION mode is unaffected: its stamp only changes once per session,
+   // and every session range is archived whether it traded or not.
+   int last = (gRngCount > 0) ? ArchivedSlot(0) : -1;
+   if(last >= 0 &&
+      MathAbs(gRngHigh[last] - gBkHigh) < gPoint &&
+      MathAbs(gRngLow [last] - gBkLow)  < gPoint)
+     {
+      // Same box as last time - extend it and refresh its stats in place.
+      gRngEnd  [last] = Time[0];
+      gRngRatio[last] = gBkRatio;
+      gRngBars [last] = gBkBars;
+      gRngValid[last] = gBkValid;
+      gRngTaken[last] = MathMax(gRngTaken[last], gBkTakenThis);
+      gRngFails[last] = MathMax(gRngFails[last], gBkFailedBreaks);
+      if(gBkDir != 0) gRngDir[last] = gBkDir;
+      return;
+     }
+   if(RangeMode == BK_RANGE_DONCHIAN && gBkTakenThis == 0 && gBkFailedBreaks == 0)
+      return;   // uneventful rolling channel - nothing to learn from it
+
+   int i = gRngHead;
+   gRngStart[i] = gBkRangeStamp;
+   gRngEnd  [i] = Time[0];
+   gRngHigh [i] = gBkHigh;
+   gRngLow  [i] = gBkLow;
+   gRngRatio[i] = gBkRatio;
+   gRngBars [i] = gBkBars;
+   gRngValid[i] = gBkValid;
+   gRngTaken[i] = gBkTakenThis;
+   gRngFails[i] = gBkFailedBreaks;
+   gRngDir  [i] = gBkDir;
+
+   gRngHead = (gRngHead + 1) % BK_MAX_RANGES;
+   gRngCount++;
+  }
+
 // Refresh the range, the buffer and the derived trigger levels.
 void UpdateRange()
   {
@@ -1111,6 +1210,8 @@ void UpdateRange()
    // A brand new range wipes the per-range trade counter and the state.
    if(stamp != gBkRangeStamp)
      {
+      // ...but first preserve the one being replaced, for post-analysis.
+      if(KeepRangeHistory) ArchiveCurrentRange();
       gBkRangeStamp   = stamp;
       gBkTakenThis    = 0;
       gBkFailedBreaks = 0;
@@ -2012,6 +2113,8 @@ string T(const string k)
    if(k == "RISK")                      return "\x0627\x0644\x0645\x062E\x0627\x0637\x0631\x0629";
    if(k == "lots")                      return "\x0644\x0648\x062A";
    if(k == "SKIP")                      return "\x062A\x062E\x0637\x064A";
+   if(k == "T")                         return "\x0635";
+   if(k == "F")                         return "\x0641";
    if(k == "BUILDING RANGE")            return "\x0628\x0646\x0627\x0621\x0020\x0627\x0644\x0646\x0637\x0627\x0642";
    if(k == "BROKEN")                    return "\x062A\x0645\x0020\x0627\x0644\x0627\x062E\x062A\x0631\x0627\x0642";
    if(k == "WAITING RETEST")            return "\x0628\x0627\x0646\x062A\x0638\x0627\x0631\x0020\x0625\x0639\x0627\x062F\x0629\x0020\x0627\x0644\x0627\x062E\x062A\x0628\x0627\x0631";
@@ -2621,7 +2724,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v1.03", TTextDim, 7);
+        "  ·  RAW  ·  v1.04", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -3295,8 +3398,169 @@ void SetRangeLine(string id, double price, color c)
    ObjectSetInteger(0, id, OBJPROP_COLOR, c);
   }
 
+// ---- HISTORICAL RANGES --------------------------------------------
+// Each archived range gets its own permanent rectangle (plus an optional
+// label), keyed by index so it is created once and never moved. A range
+// that produced a trade is tinted with the accent colour; one that failed
+// the width gate is drawn dim and hollow, so a glance at the chart shows
+// which setups the engine accepted and which it threw away.
+// ---- PERMANENT TRADE MARKERS ---------------------------------------
+// The result CARDS are pixel-anchored and capped at MaxResultPills, so on a
+// long run most trades have no lasting record on the chart. These are
+// price-anchored trend segments from entry to exit - one per closed trade,
+// green for a winner, red for a loser - which survive scrolling and are not
+// capped. This is what makes a whole backtest reviewable afterwards.
+void DrawTradeHistoryMarkers()
+  {
+   if(!KeepAllTradeMarkers)
+     {
+      ObjectsDeleteAll(0, PFX + "TH_");
+      return;
+     }
+
+   // Only rebuild when the history actually changed. These are price-anchored
+   // objects, so unlike the pixel-anchored cards they do NOT need redrawing
+   // on scroll or zoom - MT4 keeps them attached to their bars.
+   int total = OrdersHistoryTotal();
+   if(total == gKnownMarkerHistory) return;
+   gKnownMarkerHistory = total;
+
+   for(int i = 0; i < total; i++)
+     {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_HISTORY)) continue;
+      if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber) continue;
+      if(OrderType() != OP_BUY && OrderType() != OP_SELL) continue;
+      datetime ot = OrderOpenTime(), ct = OrderCloseTime();
+      if(ct <= 0 || ot <= 0) continue;
+
+      string tag = IntegerToString(OrderTicket());
+      string idS = PFX + "TH_S" + tag;      // entry -> exit segment
+      string idE = PFX + "TH_E" + tag;      // entry arrow
+      string idX = PFX + "TH_X" + tag;      // exit arrow
+
+      double net = OrderProfit() + OrderSwap() + OrderCommission();
+      uint   col = (net >= 0) ? TBull : TBear;
+
+      if(ObjectFind(0, idS) < 0)
+        {
+         ObjectCreate(0, idS, OBJ_TREND, 0, ot, OrderOpenPrice(), ct, OrderClosePrice());
+         ObjectSetInteger(0, idS, OBJPROP_RAY, false);
+         ObjectSetInteger(0, idS, OBJPROP_WIDTH, 2);
+         ObjectSetInteger(0, idS, OBJPROP_BACK, false);
+         ObjectSetInteger(0, idS, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, idS, OBJPROP_HIDDEN, true);
+         ObjectMove(0, idS, 0, ot, OrderOpenPrice());
+         ObjectMove(0, idS, 1, ct, OrderClosePrice());
+        }
+      ObjectSetInteger(0, idS, OBJPROP_COLOR, CLR(col));
+      ObjectSetInteger(0, idS, OBJPROP_STYLE, (net >= 0) ? STYLE_SOLID : STYLE_DOT);
+
+      if(ObjectFind(0, idE) < 0)
+        {
+         ObjectCreate(0, idE, OBJ_ARROW, 0, ot, OrderOpenPrice());
+         ObjectSetInteger(0, idE, OBJPROP_ARROWCODE,
+                          (OrderType() == OP_BUY) ? 233 : 234);
+         ObjectSetInteger(0, idE, OBJPROP_WIDTH, 1);
+         ObjectSetInteger(0, idE, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, idE, OBJPROP_HIDDEN, true);
+         ObjectMove(0, idE, 0, ot, OrderOpenPrice());
+        }
+      ObjectSetInteger(0, idE, OBJPROP_COLOR,
+                       CLR((OrderType() == OP_BUY) ? TBull : TBear));
+
+      if(ObjectFind(0, idX) < 0)
+        {
+         ObjectCreate(0, idX, OBJ_ARROW, 0, ct, OrderClosePrice());
+         ObjectSetInteger(0, idX, OBJPROP_ARROWCODE, 251);   // cross
+         ObjectSetInteger(0, idX, OBJPROP_WIDTH, 1);
+         ObjectSetInteger(0, idX, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, idX, OBJPROP_HIDDEN, true);
+         ObjectMove(0, idX, 0, ct, OrderClosePrice());
+        }
+      ObjectSetInteger(0, idX, OBJPROP_COLOR, CLR(col));
+      // The tooltip carries the numbers, so hovering a marker in the tester
+      // reports the trade without needing the card.
+      ObjectSetString(0, idX, OBJPROP_TOOLTIP,
+                      "#" + tag + "  " + DoubleToString(OrderLots(), 2) + " lots  " +
+                      DoubleToString(net, 2) + " USD");
+     }
+  }
+
+void DrawRangeHistory()
+  {
+   if(!gShowRangeBox || !KeepRangeHistory)
+     {
+      ObjectsDeleteAll(0, PFX + "HRNG_");
+      ObjectsDeleteAll(0, PFX + "HLBL_");
+      return;
+     }
+
+   int have = ArchivedRanges();
+   int show = (MaxRangeHistory > 0) ? MathMin(have, MaxRangeHistory) : have;
+
+   for(int nth = 0; nth < show; nth++)
+     {
+      int k = ArchivedSlot(nth);
+      if(k < 0) continue;
+      if(gRngHigh[k] <= gRngLow[k]) continue;
+
+      // Key on the range's own start time: stable even as the ring wraps,
+      // so a box is never redrawn in the wrong place.
+      string tag = IntegerToString((int)gRngStart[k]);
+      string idB = PFX + "HRNG_" + tag;
+
+      datetime t1 = gRngStart[k];
+      datetime t2 = (gRngEnd[k] > t1) ? gRngEnd[k] : (t1 + PeriodSeconds() * 10);
+
+      if(ObjectFind(0, idB) < 0)
+        {
+         ObjectCreate(0, idB, OBJ_RECTANGLE, 0, t1, gRngHigh[k], t2, gRngLow[k]);
+         ObjectSetInteger(0, idB, OBJPROP_WIDTH, 1);
+         ObjectSetInteger(0, idB, OBJPROP_BACK, true);
+         ObjectSetInteger(0, idB, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, idB, OBJPROP_HIDDEN, true);
+         ObjectMove(0, idB, 0, t1, gRngHigh[k]);
+         ObjectMove(0, idB, 1, t2, gRngLow[k]);
+        }
+      // Colour encodes the OUTCOME, which is the whole point of keeping them.
+      uint col;
+      if(!gRngValid[k])         col = TTextDim;                       // rejected
+      else if(gRngTaken[k] > 0) col = (gRngDir[k] >= 0) ? TBull : TBear;
+      else                      col = TAccent;                        // valid, untraded
+      ObjectSetInteger(0, idB, OBJPROP_COLOR, CLR(col));
+      ObjectSetInteger(0, idB, OBJPROP_STYLE, gRngValid[k] ? STYLE_SOLID : STYLE_DOT);
+      ObjectSetInteger(0, idB, OBJPROP_FILL,  gRngTaken[k] > 0);
+
+      if(!ShowRangeLabels) { ObjectDelete(0, PFX + "HLBL_" + tag); continue; }
+
+      string idL = PFX + "HLBL_" + tag;
+      string txt = DoubleToString((gRngHigh[k] - gRngLow[k]) / gPoint, 0) + "p  x" +
+                   DoubleToString(gRngRatio[k], 2) +
+                   (gRngValid[k] ? "" : "  " + T("SKIP")) +
+                   (gRngTaken[k] > 0 ? "  " + IntegerToString(gRngTaken[k]) + T("T") : "") +
+                   (gRngFails[k] > 0 ? "  " + IntegerToString(gRngFails[k]) + T("F") : "");
+      if(ObjectFind(0, idL) < 0)
+        {
+         ObjectCreate(0, idL, OBJ_TEXT, 0, t1, gRngHigh[k]);
+         ObjectSetInteger(0, idL, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, idL, OBJPROP_HIDDEN, true);
+         ObjectSetInteger(0, idL, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+         ObjectSetInteger(0, idL, OBJPROP_FONTSIZE, 7);
+         ObjectMove(0, idL, 0, t1, gRngHigh[k]);
+        }
+      ObjectSetString (0, idL, OBJPROP_TEXT, ArObj(txt));
+      ObjectSetString (0, idL, OBJPROP_FONT, UIFont("Segoe UI"));
+      ObjectSetInteger(0, idL, OBJPROP_COLOR, CLR(col));
+     }
+  }
+
 void DrawRangeObjects()
   {
+   // Past ranges are independent objects with their own lifetime; drawing
+   // them here means every existing call site keeps them up to date without
+   // having to be edited.
+   DrawRangeHistory();
+
    string idBox = PFX + "RNG_BOX";
    string idUp  = PFX + "RNG_UP";
    string idDn  = PFX + "RNG_DN";
@@ -3954,6 +4218,11 @@ void DrawResultPills()
       gKnownResultHistory = total;
       gCardsDirty = false;
      }
+
+   // Permanent, price-anchored markers for EVERY closed trade. Unlike the
+   // cards above these are not capped by MaxResultPills and not deleted on
+   // a viewport change, so a finished run stays fully reviewable.
+   DrawTradeHistoryMarkers();
   }
 
 void ApplySkin()
@@ -4031,13 +4300,13 @@ int OnInit()
       Print("[BK-FORGE] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("BK-FORGE v1.03 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("BK-FORGE v1.04 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
 
    // Print exactly which overlays are armed, so a "nothing is drawn" report
    // can be diagnosed from the Experts log without guesswork.
    string ov = "";
-   Print("[BK-FORGE] v1.03 build | range=",
+   Print("[BK-FORGE] v1.04 build | range=",
          (RangeMode == BK_RANGE_DONCHIAN ? "DONCHIAN" : "SESSION"),
          " | entry=", (EntryMode == BK_ENTRY_RETEST ? "RETEST" : "BREAK"),
          " | width gate=", DoubleToString(MinRangeATRMult, 2), "-",
@@ -4112,9 +4381,103 @@ void FreeCanvases()
    if(gTrk != NULL) { delete gTrk; gTrk = NULL; }
   }
 
+// ---- CSV EXPORT ----------------------------------------------------
+// Chart objects are for eyeballing; a CSV is for actually analysing. Two
+// files are written to MQL4/Files (or tester/files during a backtest):
+// one row per archived range, one row per closed trade. Written on deinit
+// so a finished backtest leaves the whole run on disk.
+void ExportHistoryFiles()
+  {
+   if(!ExportHistoryCSV) return;
+
+   string stamp = Symbol() + "_" + IntegerToString(Period()) + "_" +
+                  IntegerToString(MagicNumber);
+
+   // ---- ranges ----
+   string fr = "BKF_ranges_" + stamp + ".csv";
+   int h = FileOpen(fr, FILE_WRITE | FILE_CSV | FILE_ANSI, ',');
+   if(h == INVALID_HANDLE)
+      Print("[BK-FORGE] range CSV open failed: ", GetLastError());
+   else
+     {
+      FileWrite(h, "start", "end", "high", "low", "width_points",
+                   "bars", "ratio", "valid", "trades", "failed_breaks", "last_dir");
+      int have = ArchivedRanges();
+      for(int nth = have - 1; nth >= 0; nth--)     // oldest first
+        {
+         int k = ArchivedSlot(nth);
+         if(k < 0 || gRngHigh[k] <= gRngLow[k]) continue;
+         FileWrite(h,
+                   TimeToString(gRngStart[k], TIME_DATE | TIME_MINUTES),
+                   TimeToString(gRngEnd[k],   TIME_DATE | TIME_MINUTES),
+                   DoubleToString(gRngHigh[k], Digits),
+                   DoubleToString(gRngLow[k],  Digits),
+                   DoubleToString((gRngHigh[k] - gRngLow[k]) / gPoint, 0),
+                   IntegerToString(gRngBars[k]),
+                   DoubleToString(gRngRatio[k], 3),
+                   gRngValid[k] ? "1" : "0",
+                   IntegerToString(gRngTaken[k]),
+                   IntegerToString(gRngFails[k]),
+                   IntegerToString(gRngDir[k]));
+        }
+      FileClose(h);
+      Print("[BK-FORGE] wrote ", fr, " (", have, " ranges)");
+     }
+
+   // ---- trades ----
+   string ft = "BKF_trades_" + stamp + ".csv";
+   int h2 = FileOpen(ft, FILE_WRITE | FILE_CSV | FILE_ANSI, ',');
+   if(h2 == INVALID_HANDLE)
+     {
+      Print("[BK-FORGE] trade CSV open failed: ", GetLastError());
+      return;
+     }
+   FileWrite(h2, "ticket", "type", "lots", "open_time", "open_price",
+                 "close_time", "close_price", "sl", "tp",
+                 "stop_points", "target_points",
+                 "profit", "swap", "commission", "net", "comment");
+   int total = OrdersHistoryTotal(), n = 0;
+   for(int i = 0; i < total; i++)
+     {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_HISTORY)) continue;
+      if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber) continue;
+      if(OrderType() != OP_BUY && OrderType() != OP_SELL) continue;
+      double net = OrderProfit() + OrderSwap() + OrderCommission();
+      double slp = (OrderStopLoss()   > 0)
+                   ? MathAbs(OrderOpenPrice() - OrderStopLoss())   / gPoint : 0;
+      double tpp = (OrderTakeProfit() > 0)
+                   ? MathAbs(OrderTakeProfit() - OrderOpenPrice()) / gPoint : 0;
+      FileWrite(h2,
+                IntegerToString(OrderTicket()),
+                (OrderType() == OP_BUY) ? "BUY" : "SELL",
+                DoubleToString(OrderLots(), 2),
+                TimeToString(OrderOpenTime(),  TIME_DATE | TIME_MINUTES),
+                DoubleToString(OrderOpenPrice(),  Digits),
+                TimeToString(OrderCloseTime(), TIME_DATE | TIME_MINUTES),
+                DoubleToString(OrderClosePrice(), Digits),
+                DoubleToString(OrderStopLoss(),   Digits),
+                DoubleToString(OrderTakeProfit(), Digits),
+                DoubleToString(slp, 0),
+                DoubleToString(tpp, 0),
+                DoubleToString(OrderProfit(), 2),
+                DoubleToString(OrderSwap(), 2),
+                DoubleToString(OrderCommission(), 2),
+                DoubleToString(net, 2),
+                OrderComment());
+      n++;
+     }
+   FileClose(h2);
+   Print("[BK-FORGE] wrote ", ft, " (", n, " trades)");
+  }
+
 void OnDeinit(const int reason)
   {
    EventKillTimer();
+   // The range that is live when the EA stops has never been archived, so
+   // fold it in before exporting or the last session would be missing.
+   if(KeepRangeHistory) ArchiveCurrentRange();
+   ExportHistoryFiles();
+
    if(IsTesting() && IsVisualMode() && KeepVisualsAfterTest)
      {
       // Canvas dies with the EA; leave the chart objects for review.
