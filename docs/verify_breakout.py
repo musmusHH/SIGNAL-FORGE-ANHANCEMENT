@@ -151,6 +151,41 @@ for bi in ("RangeMode", "DonchianBars", "BufferMode", "BufferATRMult",
     check(f"breakout input {bi} present",
           re.search(r'^input[^\n]*\b%s\b' % bi, BK, re.M) is not None)
 
+print("\n7b. re-entry after a failed / rejected break")
+check("ReEntryResult() exists", "int ReEntryResult(int shift)" in BK)
+check("AllowReEntry input", re.search(r'^input\s+bool\s+AllowReEntry', BK, re.M) is not None)
+check("BK_REARM sentinel", "#define BK_REARM" in BK)
+check("CASE A re-arms to BK_READY", re.search(r'rr == BK_REARM.*?gBkState = BK_READY', BK, re.S) is not None)
+check("CASE B sets wantEntry", re.search(r'rr != 0.*?wantEntry = True|rr != 0.*?wantEntry = true', BK, re.S) is not None)
+check("BK_TRADED is no longer terminal", "gBkState == BK_TRADED || gBkState == BK_BROKEN" in BK)
+check("failed breaks are counted", "gBkFailedBreaks++" in BK)
+check("counter resets with a new range", re.search(r'gBkRangeStamp\s*=\s*stamp.*?gBkFailedBreaks\s*=\s*0', BK, re.S) is not None)
+check("per-range cap allows more than one trade",
+      int(re.search(r'^input\s+int\s+MaxBreakoutsPerRange\s*=\s*(\d+)', BK, re.M).group(1)) > 1)
+# "back inside" must be judged against the RAW range, rejection against the trigger
+check("re-arm compares against the raw range edge", "double inner = (gBkDir > 0) ? gBkHigh  : gBkLow;" in BK)
+check("rejection compares against the trigger", "double lvl   = (gBkDir > 0) ? gBkUpper : gBkLower;" in BK)
+check("CASE B demands a close in the break direction",
+      "c > lvl && c > o" in BK and "c < lvl && c < o" in BK)
+
+print("\n7c. the range is visible WHILE it is being built")
+check("forming-range globals", all(g in BK for g in
+      ("gBkForming", "gBkFormHigh", "gBkFormLow", "gBkFormStart")))
+check("session window records the partial range",
+      re.search(r'HourInWindowRaw\(curH, RangeStartHour, RangeEndHour\)\s*\)\s*\{?\s*\n(?:.|\n)*?gBkForming\s*=\s*true', BK) is not None)
+check("Donchian is never 'forming'", "gBkForming = false;              // a rolling channel" in BK)
+check("DrawRangeObjects draws the forming box",
+      re.search(r'if\(gBkForming && gBkFormHigh > gBkFormLow\)', BK) is not None)
+check("forming box is dotted, completed box solid",
+      "OBJPROP_STYLE, STYLE_DOT" in BK and "STYLE_SOLID);  // undo forming dots" in BK)
+check("forming box draws no trigger lines",
+      re.search(r'// no buffer yet -> no trigger lines\s*\n\s*ObjectDelete\(0, idUp\); ObjectDelete\(0, idDn\);', BK) is not None)
+check("panel shows the collecting high/low", 'T("COLLECTING")' in BK)
+check("BUILDING RANGE only claimed while actually forming",
+      re.search(r'if\(gBkForming\)\s*return T\("BUILDING RANGE"\)', BK) is not None)
+for k in ("COLLECTING", "FAILED BREAKS"):
+    check(f'"{k}" is translated', f'if(k == "{k}")' in BK)
+
 print("\n8. the new page")
 check("two tabs: CORE and BREAKOUT",
       '"TAB_CORE"' in BK and '"TAB_BREAKOUT"' in BK and '"TAB_FILTERS"' not in BK)

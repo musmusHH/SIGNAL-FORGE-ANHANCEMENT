@@ -1,6 +1,6 @@
-; Breakout Forge XAUUSD M5 EA v1.00
+; Breakout Forge XAUUSD M5 EA v1.01
 ; Exness Raw Spread, 3-digit gold, commission 0.07 USD / 0.01 lot RT
-; 200 USD default: Asian range 00-07, body-close break entry, 0.01 lot
+; 200 USD default: Asian range 00-07, body-close break, re-entry on
 ; ---
 MagicNumber=260915
 FixedLots=0.01
@@ -39,7 +39,8 @@ VolATRAvgPeriod=50
 VolATRMinRatio=0.8
 MinRangeATRMult=0.5
 MaxRangeATRMult=6.0
-MaxBreakoutsPerRange=1
+AllowReEntry=1
+MaxBreakoutsPerRange=3
 StopByRangeOpposite=1
 StopRangePadATR=0.5
 TargetMode=0

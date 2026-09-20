@@ -1351,7 +1351,7 @@ corrected.
 
 ---
 
-# Breakout Forge XAUUSD M5 EA (v1.00) — the second EA
+# Breakout Forge XAUUSD M5 EA (v1.01) — the second EA
 
 A **separate EA with its own strategy**, not a variant of Signal Forge. Exactly
 two things are reused from PRO — the **visual shell** (HUD, themes, Arabic
@@ -1393,7 +1393,7 @@ something the engine did not actually check.
 | 5 | Range width between `0.5×` and `6.0×` ATR | noise ranges and untradeable ones |
 | 6 | **Body** closes beyond range ± buffer | the wick sweep |
 | 7 | Not in the 20:00–22:00 rollover | the swap-time spread blowout |
-| 8 | Daily trade / loss limits | revenge trading |
+| 8 | Daily trade / loss limits, and `MaxBreakoutsPerRange` | revenge trading |
 
 ### The body-close rule, demonstrated
 
@@ -1421,6 +1421,39 @@ The middle column is the whole point of the design.
 * **RETEST** — wait for price to come back to the broken level and hold.
   Fewer trades, better fills, tighter stops. Times out after `RetestMaxBars`,
   and a close back through the level kills the setup rather than arming it.
+
+## Re-entry: a break does not retire the range (v1.01)
+
+A traded break used to end the range for the day. It does not any more — the
+level stays live and the engine keeps watching it on every closed bar.
+
+![re-entry](docs/breakout_reentry_cases.png)
+
+| The bar does this | Verdict | What the engine does |
+|---|---|---|
+| comes back and **closes inside** the range | the break failed | **re-arms** to READY — the next genuine break trades again |
+| wicks back inside but is **rejected and closes outside** | the level held | **re-enters immediately**, same direction |
+
+Two details stop this firing on noise. "Back inside" is measured against the
+**raw range edge**, not the buffer, so a bar drifting inside the buffer zone
+does not re-arm anything. And a rejection bar must also **close in the break
+direction** — a bearish close above the upper trigger is a failed push, not a
+bullish re-entry.
+
+`AllowReEntry` (default on) switches the whole behaviour off, and
+`MaxBreakoutsPerRange` (default 3) caps how many trades one range may ever
+produce. The BREAKOUT page shows the failed-break count next to the state.
+
+## Seeing the range while it is still being built (v1.01)
+
+The panel used to say **BUILDING RANGE** while the chart showed nothing,
+because in SESSION mode the range is not usable until the window closes and
+the drawing code deleted the objects until then. Now the partial high/low is
+collected tick by tick and drawn as a **dotted, dimmed box** with no trigger
+lines (there is nothing to trigger on yet). When the window closes the box
+becomes solid and the dashed trigger lines appear. The BREAKOUT page shows the
+same figures under a **COLLECTING** label, so the panel and the chart always
+agree.
 
 ## Exits
 
@@ -1465,8 +1498,8 @@ state — CORE panel, execution console, BREAKOUT page — read one function,
 
 ## Files
 
-* `Breakout Forge XAUUSD M5 EA.mq4` — 4,059 lines, **83 inputs, 0 dead**,
-  110 functions (none unused), 131 dictionary keys (no duplicates).
+* `Breakout Forge XAUUSD M5 EA.mq4` — 4,224 lines, **84 inputs, 0 dead**,
+  111 functions (none unused), 133 dictionary keys (no duplicates).
 * `presets/BKF_XAUUSD_M5_Exness-Raw_200USD.set` — the shipped default.
 * `presets/BKF_XAUUSD_M5_Conservative-Retest.set` — retest entry, overlap only.
 * `presets/BKF_XAUUSD_M5_Donchian-Aggressive.set` — Donchian(20), all session.
@@ -1477,6 +1510,8 @@ state — CORE panel, execution console, BREAKOUT page — read one function,
   is gone" (14 functions, 11 globals, 16 inputs must all be absent).
 * `docs/render_breakout_page.py` — renders the new page in both languages and
   asserts no element overlaps or overflows.
+* `docs/render_reentry_cases.py` — draws the two re-entry cases from the rules
+  in `ReEntryResult()`.
 
 > No MQL4 compiler exists in this environment: this is static analysis plus
 > logic simulation, not a build. Please report compiler output.

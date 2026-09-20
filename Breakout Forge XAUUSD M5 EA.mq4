@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                Breakout Forge XAUUSD M5 EA       |
-//|                    QUANTUM HUD  .  v1.00  .  MQL4 / MetaTrader 4 |
+//|                    QUANTUM HUD  .  v1.01  .  MQL4 / MetaTrader 4 |
 //|                                                                  |
 //| A RANGE BREAKOUT engine wearing the Signal Forge PRO interface.  |
 //|                                                                  |
@@ -165,7 +165,8 @@ input int    VolATRAvgPeriod          = 50;     // ATR average period
 input double VolATRMinRatio           = 0.8;    // ATR > ratio x average ATR
 input double MinRangeATRMult          = 0.5;    // Range must be >= ATR x this
 input double MaxRangeATRMult          = 6.0;    // Range must be <= ATR x this
-input int    MaxBreakoutsPerRange     = 1;      // Trades per range (anti re-entry)
+input bool   AllowReEntry             = true;   // Re-enter after a failed / rejected break
+input int    MaxBreakoutsPerRange     = 3;      // Max TRADES one range may produce
 
 input string __04c = "======== BREAKOUT EXITS ========"; // .
 input bool   StopByRangeOpposite      = true;   // Stop at the far side of the range
@@ -342,6 +343,21 @@ double   gBkATR        = 0.0;   // ATR at the last evaluation
 double   gBkATRAvg     = 0.0;   // its own moving average
 double   gBkDistPct    = 0.0;   // how close price is to the trigger, 0..100
 string   gBkGateFail   = "";    // which gate rejected the setup
+
+// The range while it is still being COLLECTED. In SESSION mode the window
+// (e.g. 00:00-07:00) is not usable for trading until it closes, but the user
+// must still SEE it forming on the chart - otherwise the panel says
+// "BUILDING RANGE" while the chart shows nothing at all.
+bool     gBkForming    = false; // inside the range window right now
+double   gBkFormHigh   = 0.0;
+double   gBkFormLow    = 0.0;
+datetime gBkFormStart  = 0;
+
+// Re-entry after a failed break. A break that closes back inside the range
+// is not the end of the range - the level is still valid and very often gets
+// hit again. gBkFailedBreaks counts those so the panel can show them, and
+// MaxBreakoutsPerRange still caps how many TRADES one range may produce.
+int      gBkFailedBreaks = 0;
 
 // The 8 entry gates, in the order the BREAKOUT page lists them.
 #define BK_GATES 8
@@ -802,7 +818,8 @@ string BkStateText()
    if(gBkState == BK_RETEST)  return T("WAITING RETEST");
    if(gBkState == BK_BROKEN)  return T("BROKEN");
    if(gBkValid)               return T("WAITING FOR BREAK");
-   return T("BUILDING RANGE");
+   if(gBkForming)             return T("BUILDING RANGE");
+   return T("NO VALID RANGE");
   }
 
 int BkGatesPassed()
@@ -872,6 +889,7 @@ bool BuildRange(double &hi, double &lo, datetime &stamp)
 
    if(RangeMode == BK_RANGE_DONCHIAN)
      {
+      gBkForming = false;              // a rolling channel is always complete
       int n = MathMax(2, DonchianBars);
       if(Bars < n + 2) return false;
       // shift 1: the last CLOSED bar. Never include the forming bar or the
@@ -889,8 +907,29 @@ bool BuildRange(double &hi, double &lo, datetime &stamp)
    // completed occurrence of the window.
    datetime now = TimeCurrent();
    int curH = TimeHour(now);
-   // If we are still inside the window the range is not finished yet.
-   if(HourInWindowRaw(curH, RangeStartHour, RangeEndHour)) return false;
+   // If we are still inside the window the range is not finished yet - but
+   // record what it looks like SO FAR so the chart can draw it forming.
+   if(HourInWindowRaw(curH, RangeStartHour, RangeEndHour))
+     {
+      double fh = -1, fl = -1; datetime fs = 0;
+      for(int k = 0; k < Bars && k < 2000; k++)
+        {
+         if(!HourInWindowRaw(TimeHour(Time[k]), RangeStartHour, RangeEndHour))
+            break;                       // walked out of the live window
+         if(fh < 0 || High[k] > fh) fh = High[k];
+         if(fl < 0 || Low[k]  < fl) fl = Low[k];
+         fs = Time[k];
+        }
+      if(fh > 0 && fl > 0 && fh > fl)
+        {
+         gBkForming   = true;
+         gBkFormHigh  = fh;
+         gBkFormLow   = fl;
+         gBkFormStart = fs;
+        }
+      return false;
+     }
+   gBkForming = false;
 
    double h = -1, l = -1;
    datetime st = 0;
@@ -933,11 +972,12 @@ void UpdateRange()
    // A brand new range wipes the per-range trade counter and the state.
    if(stamp != gBkRangeStamp)
      {
-      gBkRangeStamp = stamp;
-      gBkTakenThis  = 0;
-      gBkState      = BK_READY;
-      gBkDir        = 0;
-      gBkLevel      = 0;
+      gBkRangeStamp   = stamp;
+      gBkTakenThis    = 0;
+      gBkFailedBreaks = 0;
+      gBkState        = BK_READY;
+      gBkDir          = 0;
+      gBkLevel        = 0;
      }
 
    gBkHigh   = hi;
@@ -1063,6 +1103,48 @@ int RetestResult(int shift)
       if(h >= gBkLevel - tol && c < gBkLevel) return 1;
      }
    return 0;                                        // still waiting
+  }
+
+// ---- RE-ENTRY AFTER A BREAK -------------------------------------------
+// A break that has already been traded does NOT retire the range. The level
+// stays live and price keeps interacting with it. Two distinct things can
+// happen on a later closed bar:
+//
+//   CASE A - the bar comes back inside and CLOSES INSIDE the range.
+//            The break failed. The range itself is still perfectly good, so
+//            the engine re-arms and the NEXT genuine break trades again.
+//
+//   CASE B - the bar dips back inside intrabar but is REJECTED and CLOSES
+//            BACK OUTSIDE, leaving a wick through the level. The level held
+//            under pressure, which is the strongest continuation tell there
+//            is: re-enter immediately in the same direction.
+//
+// Returns +1 / -1 for a CASE B re-entry, BK_REARM for CASE A, 0 otherwise.
+#define BK_REARM (-2)
+int ReEntryResult(int shift)
+  {
+   if(!AllowReEntry || gBkDir == 0) return 0;
+
+   double c = Close[shift], o = Open[shift];
+   double h = High[shift],  l = Low[shift];
+   // The trigger (range edge + buffer) is what has to be rejected...
+   double lvl   = (gBkDir > 0) ? gBkUpper : gBkLower;
+   // ...but "back inside" means back inside the RAW range, not the buffer
+   // zone, otherwise every bar that merely drifts within the buffer would
+   // count as a failed break.
+   double inner = (gBkDir > 0) ? gBkHigh  : gBkLow;
+
+   if(gBkDir > 0)
+     {
+      if(c < inner) return BK_REARM;                  // CASE A
+      if(l <= lvl && c > lvl && c > o) return 1;      // CASE B
+     }
+   else
+     {
+      if(c > inner) return BK_REARM;                  // CASE A
+      if(h >= lvl && c < lvl && c < o) return -1;     // CASE B
+     }
+   return 0;                                          // nothing yet
   }
 
 // Optional confluence with the inherited 11 filters.
@@ -1760,6 +1842,8 @@ string T(const string k)
    if(k == "WIDTH")                     return "\x0627\x0644\x0639\x0631\x0636";
    if(k == "NO VALID RANGE")            return "\x0644\x0627\x0020\x064A\x0648\x062C\x062F\x0020\x0646\x0637\x0627\x0642\x0020\x0635\x0627\x0644\x062D";
    if(k == "WAITING FOR BREAK")         return "\x0628\x0627\x0646\x062A\x0638\x0627\x0631\x0020\x0627\x0644\x0627\x062E\x062A\x0631\x0627\x0642";
+   if(k == "COLLECTING")                return "\x062C\x0627\x0631\x064A\x0020\x0627\x0644\x062A\x062C\x0645\x064A\x0639";
+   if(k == "FAILED BREAKS")             return "\x0627\x062E\x062A\x0631\x0627\x0642\x0020\x0641\x0627\x0634\x0644";
    if(k == "BUILDING RANGE")            return "\x0628\x0646\x0627\x0621\x0020\x0627\x0644\x0646\x0637\x0627\x0642";
    if(k == "BROKEN")                    return "\x062A\x0645\x0020\x0627\x0644\x0627\x062E\x062A\x0631\x0627\x0642";
    if(k == "WAITING RETEST")            return "\x0628\x0627\x0646\x062A\x0638\x0627\x0631\x0020\x0625\x0639\x0627\x062F\x0629\x0020\x0627\x0644\x0627\x062E\x062A\x0628\x0627\x0631";
@@ -2369,7 +2453,7 @@ void PaintHud()
      }
 
    Text(txtX, hy + SC(18), Symbol() + "  ·  M" + IntegerToString(Period()) +
-        "  ·  RAW  ·  v1.00", TTextDim, 7);
+        "  ·  RAW  ·  v1.01", TTextDim, 7);
 
    RaisedPlate(pillX, hy + SC(3), pillW, pillH, SC(10), TPanelHi, StateColor(), true, 1);
    StatusDot(pillX + SC(12), hy + SC(14), SC(4), !gPaused, StateColor(), TGridC);
@@ -2614,6 +2698,21 @@ void PaintHud()
                    DoubleToString((gBkHigh - gBkLow) / gPoint, 0) + T("p"),
                    TText, 9, "Segoe UI Semibold", SF_FW_SEMI);
         }
+      else if(gBkForming && gBkFormHigh > gBkFormLow)
+        {
+         // The window is still open: show what has been collected so far so
+         // the panel and the dotted box on the chart tell the same story.
+         Text(pad + SC(12), rY, T("HIGH"), TTextDim, 7);
+         TextRight(pad + innerW - SC(12), rY, DoubleToString(gBkFormHigh, Digits),
+                   TTextDim, 9, "Segoe UI Semibold", SF_FW_SEMI);
+         Text(pad + SC(12), rY + SC(21), T("LOW"), TTextDim, 7);
+         TextRight(pad + innerW - SC(12), rY + SC(21), DoubleToString(gBkFormLow, Digits),
+                   TTextDim, 9, "Segoe UI Semibold", SF_FW_SEMI);
+         Text(pad + SC(12), rY + SC(42), T("COLLECTING"), TTextDim, 7);
+         TextRight(pad + innerW - SC(12), rY + SC(42),
+                   DoubleToString((gBkFormHigh - gBkFormLow) / gPoint, 0) + T("p"),
+                   TAccent, 9, "Segoe UI Semibold", SF_FW_SEMI);
+        }
       else
         {
          TextVC(pad + SC(12), rY, SC(42), T("NO VALID RANGE"), TTextDim, 8,
@@ -2631,8 +2730,14 @@ void PaintHud()
       RaisedPlate(pad, y, innerW, SC(54), SC(8), TPanelHi, stc, true, 1);
       TextBoxCenter(pad, y + SC(4), innerW, SC(26), st, stc, 11,
                     "Segoe UI Black", SF_FW_BLACK);
-      string sub = (gBkGateFail != "") ? gBkGateFail
-                   : (gBkDir > 0 ? T("UPSIDE") : (gBkDir < 0 ? T("DOWNSIDE") : T("PRICE INSIDE RANGE")));
+      string sub;
+      if(gBkGateFail != "")                   sub = gBkGateFail;
+      else if(gBkDir > 0)                     sub = T("UPSIDE");
+      else if(gBkDir < 0)                     sub = T("DOWNSIDE");
+      else if(gBkForming)                     sub = T("COLLECTING");
+      else                                    sub = T("PRICE INSIDE RANGE");
+      if(gBkFailedBreaks > 0)
+         sub = sub + "   ·   " + IntegerToString(gBkFailedBreaks) + " " + T("FAILED BREAKS");
       TextBoxCenter(pad, y + SC(30), innerW, SC(18), sub, TTextDim, 7);
       y += SC(54) + SC(8);
 
@@ -2981,7 +3086,39 @@ void DrawRangeObjects()
    string idUp  = PFX + "RNG_UP";
    string idDn  = PFX + "RNG_DN";
 
-   if(!gShowRangeBox || !gBkValid || gBkHigh <= gBkLow)
+   if(!gShowRangeBox)
+     {
+      ObjectDelete(0, idBox); ObjectDelete(0, idUp); ObjectDelete(0, idDn);
+      return;
+     }
+
+   // While the session window is still open there is no tradable range yet,
+   // but the user asked to SEE it being built: draw the partial high/low in
+   // a dimmed style, with no trigger lines (there is nothing to trigger on).
+   if(gBkForming && gBkFormHigh > gBkFormLow)
+     {
+      datetime f1 = (gBkFormStart > 0) ? gBkFormStart : Time[MathMin(Bars - 1, 50)];
+      datetime f2 = Time[0] + PeriodSeconds() * 2;
+      if(ObjectFind(0, idBox) < 0)
+        {
+         ObjectCreate(0, idBox, OBJ_RECTANGLE, 0, f1, gBkFormHigh, f2, gBkFormLow);
+         ObjectSetInteger(0, idBox, OBJPROP_STYLE, STYLE_DOT);
+         ObjectSetInteger(0, idBox, OBJPROP_WIDTH, 1);
+         ObjectSetInteger(0, idBox, OBJPROP_BACK, true);
+         ObjectSetInteger(0, idBox, OBJPROP_FILL, true);
+         ObjectSetInteger(0, idBox, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, idBox, OBJPROP_HIDDEN, true);
+        }
+      ObjectSetInteger(0, idBox, OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, idBox, OBJPROP_COLOR, CLR(TTextDim));
+      ObjectMove(0, idBox, 0, f1, gBkFormHigh);
+      ObjectMove(0, idBox, 1, f2, gBkFormLow);
+      // no buffer yet -> no trigger lines
+      ObjectDelete(0, idUp); ObjectDelete(0, idDn);
+      return;
+     }
+
+   if(!gBkValid || gBkHigh <= gBkLow)
      {
       ObjectDelete(0, idBox); ObjectDelete(0, idUp); ObjectDelete(0, idDn);
       return;
@@ -3005,6 +3142,7 @@ void DrawRangeObjects()
    ObjectMove(0, idBox, 0, t1, gBkHigh);
    ObjectMove(0, idBox, 1, t2, gBkLow);
    ObjectSetInteger(0, idBox, OBJPROP_COLOR, CLR(TAccent2));
+   ObjectSetInteger(0, idBox, OBJPROP_STYLE, STYLE_SOLID);  // undo forming dots
 
    // Trigger lines - dashed, because they are not the range, they are the
    // range plus the buffer the body has to close beyond.
@@ -3678,13 +3816,13 @@ int OnInit()
       Print("[BK-FORGE] NOTE: symbol has ", Digits, " digits. Tuned for 3-digit gold; ",
             "point-based inputs may need scaling.");
 
-   Journal("BK-FORGE v1.00 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
+   Journal("BK-FORGE v1.01 online | comm " + Fmt(gCostPointsRT, 0) + " pts RT | " +
            "min " + Fmt(gMinLot, 2) + " lot");
 
    // Print exactly which overlays are armed, so a "nothing is drawn" report
    // can be diagnosed from the Experts log without guesswork.
    string ov = "";
-   Print("[BK-FORGE] v1.00 build | range=",
+   Print("[BK-FORGE] v1.01 build | range=",
          (RangeMode == BK_RANGE_DONCHIAN ? "DONCHIAN" : "SESSION"),
          " | entry=", (EntryMode == BK_ENTRY_RETEST ? "RETEST" : "BREAK"),
          " | magic=", MagicNumber);
@@ -3984,7 +4122,34 @@ void OnTick()
          gBkDir = 0; gBkLevel = 0;
         }
      }
-   else if(gBkState == BK_READY || gBkState == BK_BROKEN)
+   else if(gBkState == BK_TRADED || gBkState == BK_BROKEN)
+     {
+      // The range already produced a break. Watch the level for a failure
+      // (re-arm) or a wick rejection (immediate re-entry).
+      int rr = ReEntryResult(shift);
+      if(rr == BK_REARM)
+        {
+         gBkFailedBreaks++;
+         gBkState = BK_READY;        // level held as a range again
+         gBkDir   = 0; gBkLevel = 0;
+        }
+      else if(rr != 0)
+        {
+         dir       = rr;             // CASE B - same-direction re-entry
+         wantEntry = true;
+        }
+      else if(gBkState == BK_BROKEN)
+        {
+         // an untraded break can still flip to the other side
+         int d2 = BreakDirection(shift);
+         if(d2 != 0 && d2 != gBkDir)
+           {
+            gBkDir = d2; gBkLevel = (d2 > 0) ? gBkUpper : gBkLower;
+            gBkBreakBar = Bars; dir = d2; wantEntry = true;
+           }
+        }
+     }
+   else if(gBkState == BK_READY)
      {
       dir = BreakDirection(shift);
       if(dir != 0)

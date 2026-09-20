@@ -1,6 +1,6 @@
-; Breakout Forge XAUUSD M5 EA v1.00
+; Breakout Forge XAUUSD M5 EA v1.01
 ; Exness Raw Spread, 3-digit gold, commission 0.07 USD / 0.01 lot RT
-; Donchian(20) rolling channel, break entry, wider daily budget
+; Donchian(20), break entry, re-entry on, wider daily budget
 ; ---
 MagicNumber=260915
 FixedLots=0.01
@@ -39,7 +39,8 @@ VolATRAvgPeriod=50
 VolATRMinRatio=0.8
 MinRangeATRMult=0.4
 MaxRangeATRMult=6.0
-MaxBreakoutsPerRange=2
+AllowReEntry=1
+MaxBreakoutsPerRange=4
 StopByRangeOpposite=1
 StopRangePadATR=0.5
 TargetMode=0

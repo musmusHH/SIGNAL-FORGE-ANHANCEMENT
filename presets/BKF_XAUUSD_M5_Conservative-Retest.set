@@ -1,6 +1,6 @@
-; Breakout Forge XAUUSD M5 EA v1.00
+; Breakout Forge XAUUSD M5 EA v1.01
 ; Exness Raw Spread, 3-digit gold, commission 0.07 USD / 0.01 lot RT
-; Retest-only entry on the London/NY overlap - fewer, cleaner trades
+; Retest entry on the London/NY overlap, re-entry OFF - fewest trades
 ; ---
 MagicNumber=260915
 FixedLots=0.01
@@ -39,6 +39,7 @@ VolATRAvgPeriod=50
 VolATRMinRatio=0.8
 MinRangeATRMult=0.8
 MaxRangeATRMult=6.0
+AllowReEntry=0
 MaxBreakoutsPerRange=1
 StopByRangeOpposite=1
 StopRangePadATR=0.5
